@@ -23,13 +23,14 @@ type Service struct{ Store *store.Store }
 type Key struct {
 	ID            string
 	ApplicationID string
+	ClientID      string
 	SpaceID       string
 	Scopes        []string
 }
 
 func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) {
 	parts := strings.SplitN(raw, ".", 2)
-	if len(parts) != 2 || !strings.HasPrefix(parts[0], "pk_live_") {
+	if len(parts) != 2 || !strings.HasPrefix(parts[0], "ply_sk_") {
 		return Key{}, apierr.New("unauthorized", "application API key is required")
 	}
 	row, e := s.Store.Queries().GetAPIKeyByPrefix(ctx, db.GetAPIKeyByPrefixParams{Prefix: parts[0]})
@@ -46,10 +47,14 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) {
 		return Key{}, apierr.New("unauthorized", "application API key is revoked or expired")
 	}
-	_ = s.Store.InTx(ctx, func(q *db.Queries) error { return q.TouchAPIKey(ctx, db.TouchAPIKeyParams{ID: row.ID}) })
+	if e = s.Store.InTx(ctx, func(q *db.Queries) error {
+		return q.TouchAPIKey(ctx, db.TouchAPIKeyParams{ID: row.ID})
+	}); e != nil {
+		return Key{}, e
+	}
 	var scopes []string
 	_ = json.Unmarshal(row.Scopes, &scopes)
-	return Key{ID: row.ID, ApplicationID: row.ApplicationID, SpaceID: row.SpaceID, Scopes: scopes}, nil
+	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes}, nil
 }
 func GenerateSecret() (string, string, []byte, error) {
 	b := make([]byte, 32)
@@ -57,7 +62,7 @@ func GenerateSecret() (string, string, []byte, error) {
 		return "", "", nil, e
 	}
 	raw := base64.RawURLEncoding.EncodeToString(b)
-	prefix := "pk_live_" + raw[:10]
+	prefix := "ply_sk_" + raw[:10]
 	sum := sha256.Sum256([]byte(raw))
 	return prefix + "." + raw, prefix, sum[:], nil
 }

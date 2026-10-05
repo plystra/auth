@@ -29,6 +29,9 @@ type Claims struct {
 	Actor     string `json:"act,omitempty"`
 	Type      string `json:"typ,omitempty"`
 }
+
+const DefaultApplicationAudience = "default"
+
 type Signer struct {
 	private *ecdsa.PrivateKey
 	public  *ecdsa.PublicKey

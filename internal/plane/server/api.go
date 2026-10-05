@@ -10,11 +10,13 @@ import (
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/session"
 )
 
 type API struct {
 	Applications *application.Service
 	Members      *member.Service
+	Sessions     *session.Service
 }
 type CheckBody struct {
 	MemberID      string `json:"member_id"`
@@ -74,11 +76,30 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	return out, nil
 }
 func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectOutput, error) {
-	if _, e := a.key(ctx, in.Authorization); e != nil {
+	key, e := a.key(ctx, in.Authorization)
+	if e != nil {
+		return nil, e
+	}
+	if !contains(key.Scopes, "tokens:introspect") {
+		return nil, apierr.New("forbidden", "API key is not scoped for token introspection")
+	}
+	if strings.TrimSpace(in.Body.Token) == "" {
+		return nil, apierr.New("invalid_request", "token is required")
+	}
+	if a.Sessions == nil {
+		return nil, apierr.New("unavailable", "token introspection is unavailable")
+	}
+	claims, active, e := a.Sessions.Introspect(ctx, in.Body.Token, key.ClientID)
+	if e != nil {
 		return nil, e
 	}
 	out := &IntrospectOutput{}
-	out.Body.Data.Active = false
+	out.Body.Data.Active = active
+	if active {
+		out.Body.Data.Subject = claims.Subject
+		out.Body.Data.SessionID = claims.SessionID
+		out.Body.Data.ExpiresAt = claims.ExpiresAt
+	}
 	return out, nil
 }
 func (a *API) key(ctx context.Context, value string) (application.Key, error) {

@@ -190,7 +190,7 @@ func serve(ctx context.Context) error {
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter}
 	apps := &application.Service{Store: st}
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer}
-	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}}
+	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Sessions: sessionSvc}
 	opsAPI := &ops.API{Settings: settings, Signer: signer}
 	principalMux := http.NewServeMux()
 	serverMux := http.NewServeMux()

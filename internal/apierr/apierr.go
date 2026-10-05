@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 type Error struct {
@@ -13,17 +14,26 @@ type Error struct {
 	RequestID string `json:"request_id,omitempty"`
 }
 
+// MarshalJSON keeps errors returned by Huma handlers and errors written by
+// protocol handlers on the same wire contract.
+func (e *Error) MarshalJSON() ([]byte, error) {
+	type payload Error
+	return json.Marshal(struct {
+		Error *payload `json:"error"`
+	}{Error: (*payload)(e)})
+}
+
 func (e *Error) Error() string                        { return e.Code + ": " + e.Message }
 func (e *Error) GetStatus() int                       { return Status(e.Code) }
 func New(code, message string) *Error                 { return &Error{Code: code, Message: message} }
 func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = requestID; return &c }
 func Status(code string) int {
-	switch code {
-	case "invalid_request", "invalid_credentials", "invalid_grant":
+	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "invalid_request", "invalid_grant", "validation_failed":
 		return http.StatusBadRequest
-	case "unauthorized":
+	case "invalid_credentials", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized
-	case "forbidden":
+	case "forbidden", "permission_denied", "browser_origin_rejected", "step_up_required", "human_principal_required":
 		return http.StatusForbidden
 	case "not_found":
 		return http.StatusNotFound
@@ -31,6 +41,10 @@ func Status(code string) int {
 		return http.StatusConflict
 	case "rate_limited":
 		return http.StatusTooManyRequests
+	case "unavailable":
+		return http.StatusServiceUnavailable
+	case "not_implemented":
+		return http.StatusNotImplemented
 	default:
 		return http.StatusInternalServerError
 	}
@@ -38,8 +52,6 @@ func Status(code string) int {
 func Write(w http.ResponseWriter, e *Error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(Status(e.Code))
-	_ = json.NewEncoder(w).Encode(struct {
-		Error *Error `json:"error"`
-	}{e})
+	_ = json.NewEncoder(w).Encode(e)
 }
 func Wrap(code string, err error) *Error { return &Error{Code: code, Message: fmt.Sprintf("%s", err)} }

@@ -90,7 +90,7 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 }
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, a.space_id, a.name AS application_name FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
 `
 
 type GetAPIKeyByPrefixParams struct {
@@ -110,6 +110,7 @@ type GetAPIKeyByPrefixRow struct {
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	SpaceID         string             `json:"space_id"`
 	ApplicationName string             `json:"application_name"`
+	ClientID        string             `json:"client_id"`
 }
 
 func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixParams) (GetAPIKeyByPrefixRow, error) {
@@ -128,6 +129,7 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.CreatedAt,
 		&i.SpaceID,
 		&i.ApplicationName,
+		&i.ClientID,
 	)
 	return i, err
 }

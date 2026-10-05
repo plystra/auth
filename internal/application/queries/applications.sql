@@ -1,5 +1,5 @@
 -- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, a.space_id, a.name AS application_name FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = sqlc.arg(prefix) LIMIT 1;
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = sqlc.arg(prefix) LIMIT 1;
 
 -- name: TouchAPIKey :exec
 UPDATE api_keys SET last_used_at = now() WHERE id = sqlc.arg(id);

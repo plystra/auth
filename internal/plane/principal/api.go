@@ -161,7 +161,7 @@ func bearer(s *security.Signer, value string) (security.Claims, error) {
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return security.Claims{}, apierr.New("unauthorized", "bearer token is required")
 	}
-	c, e := s.Verify(parts[1], nowUTC(), "principal")
+	c, e := s.Verify(parts[1], nowUTC(), security.DefaultApplicationAudience)
 	if e != nil {
 		return security.Claims{}, apierr.New("unauthorized", "access token is invalid")
 	}

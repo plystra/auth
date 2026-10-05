@@ -90,7 +90,7 @@ func (s *Service) Create(ctx context.Context, userID string, ip net.IP, userAgen
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, Audience: "principal", ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, Type: "access"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, Type: "access"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -149,7 +149,7 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 		return Tokens{}, err
 	}
 	jti, _ := randomToken("jti_")
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: "principal", ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "access"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "access"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -164,7 +164,39 @@ func (s *Service) Revoke(ctx context.Context, sid string) error {
 	})
 }
 func (s *Service) VerifyAccess(token string) (security.Claims, error) {
-	return s.Signer.Verify(token, time.Now().UTC(), "principal")
+	return s.Signer.Verify(token, time.Now().UTC(), security.DefaultApplicationAudience)
+}
+
+// Introspect verifies the token cryptographically and then checks the current
+// session and account state. A valid signature alone is insufficient because
+// access tokens are intentionally short lived but session revocation is meant
+// to take effect immediately for online callers.
+func (s *Service) Introspect(ctx context.Context, token, audience string) (security.Claims, bool, error) {
+	claims, err := s.Signer.Verify(token, time.Now().UTC(), audience)
+	if err != nil || claims.Type != "access" || claims.SessionID == "" {
+		return security.Claims{}, false, nil
+	}
+	sess, err := s.Store.Queries().GetSession(ctx, db.GetSessionParams{ID: claims.SessionID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return security.Claims{}, false, nil
+		}
+		return security.Claims{}, false, err
+	}
+	if sess.UserID != claims.Subject || sess.RevokedAt.Valid || !sess.ExpiresAt.Valid || !sess.ExpiresAt.Time.After(time.Now().UTC()) {
+		return security.Claims{}, false, nil
+	}
+	user, err := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return security.Claims{}, false, nil
+		}
+		return security.Claims{}, false, err
+	}
+	if user.DisabledAt.Valid {
+		return security.Claims{}, false, nil
+	}
+	return claims, true, nil
 }
 func pgTime(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
 func nullable(v string) pgtype.Text         { return pgtype.Text{String: v, Valid: v != ""} }
