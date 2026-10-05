@@ -1,0 +1,27 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "migrations"
+    queries:
+      - "internal/account/queries"
+      - "internal/session/queries"
+      - "internal/space/queries"
+      - "internal/audit/queries"
+      - "internal/application/queries"
+      - "internal/factor"
+      - "internal/member"
+      - "internal/grant"
+      - "internal/store"
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        query_parameter_limit: 0
+
+
+
+
+
