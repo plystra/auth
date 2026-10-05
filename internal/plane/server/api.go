@@ -252,7 +252,10 @@ func (a *API) ownerRequest(ctx context.Context, memberID, permission, spaceID, g
 	if err != nil {
 		return nil, err
 	}
-	req := &engine.Request{MemberID: ownerID, PrincipalType: owner.Kind, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID, ResourceOwner: resourceOwner, Assignments: assignments}
+	// Owner-envelope evaluation answers whether the owner could perform the
+	// same action. Approval is a property of the acting Agent request; it must
+	// not be required recursively just to establish the owner's upper bound.
+	req := &engine.Request{MemberID: ownerID, PrincipalType: owner.Kind, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID, ResourceOwner: resourceOwner, Assignments: assignments, SkipApproval: true}
 	if owner.Kind == "agent" {
 		req.Owner, err = a.ownerRequest(ctx, ownerID, permission, spaceID, groupID, resourceOwner, depth+1)
 		if err != nil {

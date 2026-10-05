@@ -73,3 +73,21 @@ func TestAgentApprovalAndPrincipalKind(t *testing.T) {
 		t.Fatalf("valid approval should allow: %+v", got)
 	}
 }
+
+func TestOwnerEnvelopeDoesNotPropagateOwnerApproval(t *testing.T) {
+	request := Request{
+		MemberID: "mem_child", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_child", Permissions: []string{"billing:write"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+		Owner: &Request{
+			MemberID: "mem_parent", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1",
+			Assignments: []Assignment{{MemberID: "mem_parent", Permissions: []string{"billing:write"}, AgentApprovalRequired: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+			Owner: &Request{
+				MemberID: "mem_human", Permission: "billing:write", ResourceSpace: "spc_1",
+				Assignments: []Assignment{{MemberID: "mem_human", Permissions: []string{"billing:write"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+			},
+		},
+	}
+	if got := Check(request); got.Effect != Allow {
+		t.Fatalf("owner approval must not be required while checking the envelope: %+v", got)
+	}
+}

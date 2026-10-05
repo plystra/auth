@@ -587,6 +587,9 @@ func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.As
 			if row.AnchorSpaceID.Valid {
 				anchor = row.AnchorSpaceID.String
 			}
+			if row.AnchorGroupID.Valid {
+				anchor = row.AnchorGroupID.String
+			}
 			var principalKinds []string
 			_ = json.Unmarshal(row.PrincipalKinds, &principalKinds)
 			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}, PrincipalKinds: principalKinds, AgentApprovalRequired: row.AgentApproval == "required"}, seen: map[string]struct{}{}}

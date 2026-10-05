@@ -35,18 +35,29 @@ WHERE rp.role_id = sqlc.arg(role_id)
 ORDER BY p.key;
 
 -- name: ListMemberAssignments :many
-SELECT g.id AS grant_id, g.space_id, g.role_id, r.name AS role_name,
-       g.scope, g.anchor_space_id, g.grantee_member_id,
+WITH RECURSIVE member_groups AS (
+    SELECT gm.group_id
+    FROM group_members gm
+    WHERE gm.member_id = sqlc.arg(member_id)
+    UNION
+    SELECT g.parent_id
+    FROM groups g
+    JOIN member_groups mg ON mg.group_id = g.id
+    WHERE g.parent_id IS NOT NULL
+)
+SELECT ag.id AS grant_id, ag.space_id, ag.role_id, r.name AS role_name,
+       ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
        p.key AS permission_key, p.enabled, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
-FROM authorization_grants g
-JOIN roles r ON r.id = g.role_id
+FROM authorization_grants ag
+JOIN roles r ON r.id = ag.role_id
 JOIN role_permissions rp ON rp.role_id = r.id
 JOIN permissions p ON p.id = rp.permission_id
-JOIN spaces s ON s.id = g.space_id
-WHERE g.grantee_member_id = sqlc.arg(member_id)
-  AND g.revoked_at IS NULL
+JOIN spaces s ON s.id = ag.space_id
+LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
+WHERE (ag.grantee_member_id = sqlc.arg(member_id) OR mg.group_id IS NOT NULL)
+  AND ag.revoked_at IS NULL
   AND p.enabled = true
-ORDER BY g.id, p.key;
+ORDER BY ag.id, p.key;
 
 -- name: GetGrantInSpace :one
 SELECT id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at

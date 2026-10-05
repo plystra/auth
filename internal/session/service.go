@@ -240,33 +240,38 @@ func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (
 	if claims.Subject == "" {
 		return security.Claims{}, false, nil
 	}
-	row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: claims.Subject})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return security.Claims{}, false, nil
-		}
-		return security.Claims{}, false, err
-	}
 	now := time.Now().UTC()
-	if row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
-		return security.Claims{}, false, nil
-	}
-	ownerID := row.OwnerMemberID
-	for depth := 0; ownerID.Valid && ownerID.String != "" && depth < 8; depth++ {
-		owner, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: ownerID.String})
-		if err == nil {
-			if owner.Status != "active" || owner.GroupStatus != "active" || (owner.ExpiresAt.Valid && !owner.ExpiresAt.Time.After(now)) {
+	memberID := claims.Subject
+	for depth := 0; depth < 8; depth++ {
+		row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
 				return security.Claims{}, false, nil
 			}
-			ownerID = owner.OwnerMemberID
-			continue
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
 			return security.Claims{}, false, err
 		}
-		break
+		if (claims.SpaceID != "" && claims.SpaceID != row.SpaceID) || row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
+			return security.Claims{}, false, nil
+		}
+		if !row.OwnerMemberID.Valid || row.OwnerMemberID.String == "" {
+			return security.Claims{}, false, nil
+		}
+		owner, err := s.Store.Queries().GetMemberForAgentOwner(ctx, db.GetMemberForAgentOwnerParams{MemberID: row.OwnerMemberID.String})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return security.Claims{}, false, nil
+			}
+			return security.Claims{}, false, err
+		}
+		if owner.Status != "active" || (owner.ExpiresAt.Valid && !owner.ExpiresAt.Time.After(now)) {
+			return security.Claims{}, false, nil
+		}
+		if owner.Type != "agent" {
+			return claims, true, nil
+		}
+		memberID = owner.ID
 	}
-	return claims, true, nil
+	return security.Claims{}, false, nil
 }
 func pgTime(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
 func nullable(v string) pgtype.Text         { return pgtype.Text{String: v, Valid: v != ""} }

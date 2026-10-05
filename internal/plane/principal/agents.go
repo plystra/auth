@@ -195,18 +195,22 @@ func (a *API) currentMember(ctx context.Context, authorization string) (string, 
 	if a.Authorization == nil {
 		return "", "", apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
+	spaceID := claims.SpaceID
+	if spaceID == "" {
+		spaceID = account.DefaultSpaceID
+	}
 	if claims.MemberID != "" {
-		member, err := a.Authorization.GetMember(ctx, claims.MemberID, account.DefaultSpaceID)
+		member, err := a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
 		if err != nil {
 			return "", "", err
 		}
-		binding, bindErr := a.Authorization.GetMemberForUser(ctx, claims.Subject, account.DefaultSpaceID)
+		binding, bindErr := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 		if bindErr != nil || binding.ID != member.ID {
 			return "", "", apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
 		}
 		return member.ID, claims.Subject, nil
 	}
-	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, account.DefaultSpaceID)
+	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 	if err != nil {
 		return "", "", err
 	}

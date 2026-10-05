@@ -36,7 +36,11 @@ type Request struct {
 	Assignments   []Assignment
 	Owner         *Request
 	ApprovalValid bool
-	SelfOwners    []string
+	// SkipApproval is used only while evaluating an Agent's owner envelope.
+	// Approval belongs to the acting Agent request and must not make an
+	// otherwise valid owner permission disappear from the envelope.
+	SkipApproval bool
+	SelfOwners   []string
 }
 type Decision struct {
 	Effect Effect   `json:"effect"`
@@ -83,12 +87,14 @@ func Check(in Request) Decision {
 		if in.Owner == nil {
 			return Decision{Effect: Deny, Code: "OWNER_INACTIVE", Trace: append(trace, "owner chain missing")}
 		}
-		owner := Check(*in.Owner)
+		ownerRequest := *in.Owner
+		ownerRequest.SkipApproval = true
+		owner := Check(ownerRequest)
 		if owner.Effect != Allow {
 			return Decision{Effect: Deny, Code: "OWNER_ENVELOPE_EXCLUDED", Trace: append(trace, "owner envelope denied")}
 		}
 		for _, a := range matches {
-			if a.AgentApprovalRequired && !in.ApprovalValid {
+			if a.AgentApprovalRequired && !in.ApprovalValid && !in.SkipApproval {
 				return Decision{Effect: Deny, Code: "APPROVAL_REQUIRED", Trace: append(trace, "human approval required")}
 			}
 		}
