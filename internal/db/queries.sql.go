@@ -1605,6 +1605,29 @@ func (q *Queries) RevokeAgentCredentials(ctx context.Context, arg RevokeAgentCre
 	return err
 }
 
+const revokeAgentCredentialsInGroupSubtree = `-- name: RevokeAgentCredentialsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = $1
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE agent_credentials c
+SET revoked_at = now()
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id
+JOIN tree t ON t.id = gm.group_id
+WHERE c.member_id = m.id AND c.revoked_at IS NULL
+`
+
+type RevokeAgentCredentialsInGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) RevokeAgentCredentialsInGroupSubtree(ctx context.Context, arg RevokeAgentCredentialsInGroupSubtreeParams) error {
+	_, err := q.db.Exec(ctx, revokeAgentCredentialsInGroupSubtree, arg.GroupID)
+	return err
+}
+
 const revokeGrant = `-- name: RevokeGrant :exec
 UPDATE authorization_grants SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL

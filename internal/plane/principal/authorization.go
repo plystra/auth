@@ -418,7 +418,7 @@ func (a *API) authenticateHuman(ctx context.Context, authorizationHeader string)
 		return security.Claims{}, err
 	}
 	if claims.Type == "agent" {
-		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+		return security.Claims{}, apierr.New("USER_ACCOUNT_REQUIRED", "A user account is required for this operation.")
 	}
 	return claims, nil
 }

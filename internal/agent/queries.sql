@@ -121,6 +121,19 @@ WHERE id = sqlc.arg(id) AND revoked_at IS NULL;
 UPDATE agent_credentials SET revoked_at = now()
 WHERE member_id = sqlc.arg(member_id) AND revoked_at IS NULL;
 
+-- name: RevokeAgentCredentialsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = sqlc.arg(group_id)
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE agent_credentials c
+SET revoked_at = now()
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id
+JOIN tree t ON t.id = gm.group_id
+WHERE c.member_id = m.id AND c.revoked_at IS NULL;
+
 -- name: ListActiveAgentCredentials :many
 SELECT id, member_id, kind, prefix, family_id, expires_at, revoked_at, last_used_at, created_at
 FROM agent_credentials

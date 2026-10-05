@@ -295,7 +295,7 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action st
 		if err := fn(q, row.HomeGroupID.String); err != nil {
 			return err
 		}
-		if err := q.RevokeAgentCredentials(ctx, db.RevokeAgentCredentialsParams{MemberID: memberID}); err != nil {
+		if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: row.HomeGroupID.String}); err != nil {
 			return err
 		}
 		return audit.Write(ctx, q, "member", ownerMemberID, "agent."+action, memberID, "success")
