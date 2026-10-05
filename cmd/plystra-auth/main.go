@@ -25,6 +25,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
@@ -187,6 +188,7 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	settings := &space.Service{Store: st}
+	authorizationSvc := &authorization.Service{Store: st}
 	dataKey, e := decodeDataKey(c.DataKey)
 	if e != nil {
 		return e
@@ -201,10 +203,10 @@ func serve(ctx context.Context) error {
 		return session.Settings{AccessTTL: v.AccessTokenTTL, RefreshTTL: v.RefreshTokenTTL, RefreshIdleTTL: v.RefreshIdleTTL}, nil
 	}
 	limiter := &store.RateLimiter{Store: st}
-	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter}
+	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
 	apps := &application.Service{Store: st}
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer}
-	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Sessions: sessionSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc}
+	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
 		return e

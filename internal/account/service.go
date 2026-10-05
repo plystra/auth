@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/security"
@@ -24,11 +25,12 @@ type User struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 type Service struct {
-	Store     *store.Store
-	Passwords security.PasswordHasher
-	Sessions  *session.Service
-	Settings  *space.Service
-	Limiter   *store.RateLimiter
+	Store         *store.Store
+	Passwords     security.PasswordHasher
+	Sessions      *session.Service
+	Settings      *space.Service
+	Limiter       *store.RateLimiter
+	Authorization *authorization.Service
 }
 type RegisterInput struct {
 	Email    string
@@ -85,6 +87,11 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 			return AuthResult{}, apierr.New("conflict", "an account with this email already exists")
 		}
 		return AuthResult{}, e
+	}
+	if s.Authorization != nil {
+		if e := s.Authorization.EnsureDefaultMembership(ctx, u.ID, email); e != nil {
+			return AuthResult{}, e
+		}
 	}
 	tokens, e := s.Sessions.Create(ctx, u.ID, ip, ua, 1)
 	if e != nil {

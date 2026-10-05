@@ -13,23 +13,55 @@
             "readOnly": true,
             "type": "string"
           },
+          "action": {
+            "type": "string"
+          },
           "member_id": {
             "type": "string"
           },
           "permission": {
             "type": "string"
           },
+          "resource": {
+            "$ref": "#/components/schemas/CheckResource"
+          },
           "resource_owner": {
             "type": "string"
           },
           "resource_space": {
             "type": "string"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/CheckSubject"
           }
         },
         "required": [
-          "member_id",
-          "permission",
-          "resource_space"
+          "subject",
+          "action",
+          "resource"
+        ],
+        "type": "object"
+      },
+      "CheckDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "deny_code": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "decision_id",
+          "policy_version"
         ],
         "type": "object"
       },
@@ -46,12 +78,55 @@
             "type": "string"
           },
           "data": {
-            "$ref": "#/components/schemas/Decision"
+            "$ref": "#/components/schemas/CheckDecision"
           }
         },
         "required": [
           "data"
         ],
+        "type": "object"
+      },
+      "CheckResource": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "owner_member_id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id"
+        ],
+        "type": "object"
+      },
+      "CheckSubject": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "DataStruct": {
@@ -73,32 +148,6 @@
         },
         "required": [
           "active"
-        ],
-        "type": "object"
-      },
-      "Decision": {
-        "additionalProperties": false,
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "effect": {
-            "type": "string"
-          },
-          "trace": {
-            "items": {
-              "type": "string"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "effect",
-          "code",
-          "trace"
         ],
         "type": "object"
       },

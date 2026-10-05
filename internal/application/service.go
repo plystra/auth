@@ -21,11 +21,12 @@ import (
 
 type Service struct{ Store *store.Store }
 type Key struct {
-	ID            string
-	ApplicationID string
-	ClientID      string
-	SpaceID       string
-	Scopes        []string
+	ID                    string
+	ApplicationID         string
+	ClientID              string
+	SpaceID               string
+	Scopes                []string
+	AllowSubjectAssertion bool
 }
 
 func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) {
@@ -54,7 +55,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	}
 	var scopes []string
 	_ = json.Unmarshal(row.Scopes, &scopes)
-	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes}, nil
+	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
 }
 func GenerateSecret() (string, string, []byte, error) {
 	b := make([]byte, 32)

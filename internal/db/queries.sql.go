@@ -85,6 +85,49 @@ func (q *Queries) CreateFactor(ctx context.Context, arg CreateFactorParams) (Fac
 	return i, err
 }
 
+const createGrant = `-- name: CreateGrant :one
+INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+`
+
+type CreateGrantParams struct {
+	ID              string      `json:"id"`
+	SpaceID         string      `json:"space_id"`
+	RoleID          string      `json:"role_id"`
+	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
+	Scope           string      `json:"scope"`
+	AnchorSpaceID   pgtype.Text `json:"anchor_space_id"`
+	GrantedBy       string      `json:"granted_by"`
+}
+
+func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (AuthorizationGrant, error) {
+	row := q.db.QueryRow(ctx, createGrant,
+		arg.ID,
+		arg.SpaceID,
+		arg.RoleID,
+		arg.GranteeMemberID,
+		arg.Scope,
+		arg.AnchorSpaceID,
+		arg.GrantedBy,
+	)
+	var i AuthorizationGrant
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.RoleID,
+		&i.GranteeMemberID,
+		&i.GranteeGroupID,
+		&i.Scope,
+		&i.AnchorSpaceID,
+		&i.AnchorGroupID,
+		&i.GrantedBy,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const createMember = `-- name: CreateMember :one
 INSERT INTO members (id, space_id, name, kind) VALUES ($1, $2, $3, $4) RETURNING id, space_id, name, kind, created_at
 `
@@ -96,19 +139,72 @@ type CreateMemberParams struct {
 	Kind    string `json:"kind"`
 }
 
-func (q *Queries) CreateMember(ctx context.Context, arg CreateMemberParams) (Member, error) {
+type CreateMemberRow struct {
+	ID        string             `json:"id"`
+	SpaceID   string             `json:"space_id"`
+	Name      string             `json:"name"`
+	Kind      string             `json:"kind"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) CreateMember(ctx context.Context, arg CreateMemberParams) (CreateMemberRow, error) {
 	row := q.db.QueryRow(ctx, createMember,
 		arg.ID,
 		arg.SpaceID,
 		arg.Name,
 		arg.Kind,
 	)
-	var i Member
+	var i CreateMemberRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
 		&i.Name,
 		&i.Kind,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createMemberWithPolicy = `-- name: CreateMemberWithPolicy :one
+INSERT INTO members (id, space_id, name, kind, binding_policy)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, space_id, name, kind, binding_policy, status, created_at
+`
+
+type CreateMemberWithPolicyParams struct {
+	ID            string `json:"id"`
+	SpaceID       string `json:"space_id"`
+	Name          string `json:"name"`
+	Kind          string `json:"kind"`
+	BindingPolicy string `json:"binding_policy"`
+}
+
+type CreateMemberWithPolicyRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) CreateMemberWithPolicy(ctx context.Context, arg CreateMemberWithPolicyParams) (CreateMemberWithPolicyRow, error) {
+	row := q.db.QueryRow(ctx, createMemberWithPolicy,
+		arg.ID,
+		arg.SpaceID,
+		arg.Name,
+		arg.Kind,
+		arg.BindingPolicy,
+	)
+	var i CreateMemberWithPolicyRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Kind,
+		&i.BindingPolicy,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -124,9 +220,16 @@ type CreatePermissionParams struct {
 	Description string `json:"description"`
 }
 
-func (q *Queries) CreatePermission(ctx context.Context, arg CreatePermissionParams) (Permission, error) {
+type CreatePermissionRow struct {
+	ID          string             `json:"id"`
+	Key         string             `json:"key"`
+	Description string             `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) CreatePermission(ctx context.Context, arg CreatePermissionParams) (CreatePermissionRow, error) {
 	row := q.db.QueryRow(ctx, createPermission, arg.ID, arg.Key, arg.Description)
-	var i Permission
+	var i CreatePermissionRow
 	err := row.Scan(
 		&i.ID,
 		&i.Key,
@@ -168,8 +271,38 @@ func (q *Queries) CreateRole(ctx context.Context, arg CreateRoleParams) (Role, e
 	return i, err
 }
 
+const getGrantInSpace = `-- name: GetGrantInSpace :one
+SELECT id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+FROM authorization_grants
+WHERE id = $1 AND space_id = $2
+`
+
+type GetGrantInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) GetGrantInSpace(ctx context.Context, arg GetGrantInSpaceParams) (AuthorizationGrant, error) {
+	row := q.db.QueryRow(ctx, getGrantInSpace, arg.ID, arg.SpaceID)
+	var i AuthorizationGrant
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.RoleID,
+		&i.GranteeMemberID,
+		&i.GranteeGroupID,
+		&i.Scope,
+		&i.AnchorSpaceID,
+		&i.AnchorGroupID,
+		&i.GrantedBy,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getMemberForUser = `-- name: GetMemberForUser :one
-SELECT m.id, m.space_id, m.name, m.kind, m.created_at FROM members m JOIN user_members um ON um.member_id=m.id WHERE um.user_id=$1 AND m.space_id=$2 LIMIT 1
+SELECT m.id, m.space_id, m.name, m.kind, m.binding_policy, m.status, m.created_at FROM members m JOIN user_members um ON um.member_id=m.id WHERE um.user_id=$1 AND um.status = 'active' AND (um.expires_at IS NULL OR um.expires_at > now()) AND um.revoked_at IS NULL AND m.status = 'active' AND m.space_id=$2 LIMIT 1
 `
 
 type GetMemberForUserParams struct {
@@ -177,14 +310,61 @@ type GetMemberForUserParams struct {
 	SpaceID string `json:"space_id"`
 }
 
-func (q *Queries) GetMemberForUser(ctx context.Context, arg GetMemberForUserParams) (Member, error) {
+type GetMemberForUserRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetMemberForUser(ctx context.Context, arg GetMemberForUserParams) (GetMemberForUserRow, error) {
 	row := q.db.QueryRow(ctx, getMemberForUser, arg.UserID, arg.SpaceID)
-	var i Member
+	var i GetMemberForUserRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
 		&i.Name,
 		&i.Kind,
+		&i.BindingPolicy,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getMemberInSpace = `-- name: GetMemberInSpace :one
+SELECT id, space_id, name, kind, binding_policy, status, created_at
+FROM members WHERE id = $1 AND space_id = $2
+`
+
+type GetMemberInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+type GetMemberInSpaceRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetMemberInSpace(ctx context.Context, arg GetMemberInSpaceParams) (GetMemberInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, getMemberInSpace, arg.ID, arg.SpaceID)
+	var i GetMemberInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Kind,
+		&i.BindingPolicy,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -198,13 +378,44 @@ type GetPermissionByKeyParams struct {
 	Key string `json:"key"`
 }
 
-func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKeyParams) (Permission, error) {
+type GetPermissionByKeyRow struct {
+	ID          string             `json:"id"`
+	Key         string             `json:"key"`
+	Description string             `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKeyParams) (GetPermissionByKeyRow, error) {
 	row := q.db.QueryRow(ctx, getPermissionByKey, arg.Key)
-	var i Permission
+	var i GetPermissionByKeyRow
 	err := row.Scan(
 		&i.ID,
 		&i.Key,
 		&i.Description,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getRoleInSpace = `-- name: GetRoleInSpace :one
+SELECT id, space_id, name, description, managed, created_at FROM roles
+WHERE id = $1 AND space_id = $2
+`
+
+type GetRoleInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) GetRoleInSpace(ctx context.Context, arg GetRoleInSpaceParams) (Role, error) {
+	row := q.db.QueryRow(ctx, getRoleInSpace, arg.ID, arg.SpaceID)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Description,
+		&i.Managed,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -277,6 +488,71 @@ func (q *Queries) ListFactors(ctx context.Context, arg ListFactorsParams) ([]Fac
 	return items, nil
 }
 
+const listMemberAssignments = `-- name: ListMemberAssignments :many
+SELECT g.id AS grant_id, g.space_id, g.role_id, r.name AS role_name,
+       g.scope, g.anchor_space_id, g.grantee_member_id,
+       p.key AS permission_key, p.enabled, p.delegable, s.policy_version
+FROM authorization_grants g
+JOIN roles r ON r.id = g.role_id
+JOIN role_permissions rp ON rp.role_id = r.id
+JOIN permissions p ON p.id = rp.permission_id
+JOIN spaces s ON s.id = g.space_id
+WHERE g.grantee_member_id = $1
+  AND g.revoked_at IS NULL
+  AND p.enabled = true
+ORDER BY g.id, p.key
+`
+
+type ListMemberAssignmentsParams struct {
+	MemberID pgtype.Text `json:"member_id"`
+}
+
+type ListMemberAssignmentsRow struct {
+	GrantID         string      `json:"grant_id"`
+	SpaceID         string      `json:"space_id"`
+	RoleID          string      `json:"role_id"`
+	RoleName        string      `json:"role_name"`
+	Scope           string      `json:"scope"`
+	AnchorSpaceID   pgtype.Text `json:"anchor_space_id"`
+	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
+	PermissionKey   string      `json:"permission_key"`
+	Enabled         bool        `json:"enabled"`
+	Delegable       bool        `json:"delegable"`
+	PolicyVersion   int64       `json:"policy_version"`
+}
+
+func (q *Queries) ListMemberAssignments(ctx context.Context, arg ListMemberAssignmentsParams) ([]ListMemberAssignmentsRow, error) {
+	rows, err := q.db.Query(ctx, listMemberAssignments, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberAssignmentsRow{}
+	for rows.Next() {
+		var i ListMemberAssignmentsRow
+		if err := rows.Scan(
+			&i.GrantID,
+			&i.SpaceID,
+			&i.RoleID,
+			&i.RoleName,
+			&i.Scope,
+			&i.AnchorSpaceID,
+			&i.GranteeMemberID,
+			&i.PermissionKey,
+			&i.Enabled,
+			&i.Delegable,
+			&i.PolicyVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMemberPermissions = `-- name: ListMemberPermissions :many
 SELECT m.id AS member_id, r.name AS role_name, p.key AS permission_key FROM members m JOIN member_roles mr ON mr.member_id=m.id JOIN roles r ON r.id=mr.role_id JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE m.id=$1
 `
@@ -301,6 +577,128 @@ func (q *Queries) ListMemberPermissions(ctx context.Context, arg ListMemberPermi
 	for rows.Next() {
 		var i ListMemberPermissionsRow
 		if err := rows.Scan(&i.MemberID, &i.RoleName, &i.PermissionKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMembersInSpace = `-- name: ListMembersInSpace :many
+SELECT id, space_id, name, kind, binding_policy, status, created_at
+FROM members WHERE space_id = $1 AND status <> 'removed'
+ORDER BY created_at, id
+`
+
+type ListMembersInSpaceParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+type ListMembersInSpaceRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListMembersInSpace(ctx context.Context, arg ListMembersInSpaceParams) ([]ListMembersInSpaceRow, error) {
+	rows, err := q.db.Query(ctx, listMembersInSpace, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMembersInSpaceRow{}
+	for rows.Next() {
+		var i ListMembersInSpaceRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.Kind,
+			&i.BindingPolicy,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRolePermissions = `-- name: ListRolePermissions :many
+SELECT p.key, p.enabled, p.delegable
+FROM role_permissions rp
+JOIN permissions p ON p.id = rp.permission_id
+WHERE rp.role_id = $1
+ORDER BY p.key
+`
+
+type ListRolePermissionsParams struct {
+	RoleID string `json:"role_id"`
+}
+
+type ListRolePermissionsRow struct {
+	Key       string `json:"key"`
+	Enabled   bool   `json:"enabled"`
+	Delegable bool   `json:"delegable"`
+}
+
+func (q *Queries) ListRolePermissions(ctx context.Context, arg ListRolePermissionsParams) ([]ListRolePermissionsRow, error) {
+	rows, err := q.db.Query(ctx, listRolePermissions, arg.RoleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRolePermissionsRow{}
+	for rows.Next() {
+		var i ListRolePermissionsRow
+		if err := rows.Scan(&i.Key, &i.Enabled, &i.Delegable); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRolesInSpace = `-- name: ListRolesInSpace :many
+SELECT id, space_id, name, description, managed, created_at FROM roles
+WHERE space_id = $1 ORDER BY name, id
+`
+
+type ListRolesInSpaceParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) ListRolesInSpace(ctx context.Context, arg ListRolesInSpaceParams) ([]Role, error) {
+	rows, err := q.db.Query(ctx, listRolesInSpace, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Role{}
+	for rows.Next() {
+		var i Role
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.Description,
+			&i.Managed,
+			&i.CreatedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -348,6 +746,20 @@ func (q *Queries) LockTOTPFactors(ctx context.Context, arg LockTOTPFactorsParams
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeGrant = `-- name: RevokeGrant :exec
+UPDATE authorization_grants SET revoked_at = now()
+WHERE id = $1 AND revoked_at IS NULL
+`
+
+type RevokeGrantParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) RevokeGrant(ctx context.Context, arg RevokeGrantParams) error {
+	_, err := q.db.Exec(ctx, revokeGrant, arg.ID)
+	return err
 }
 
 const touchFactor = `-- name: TouchFactor :exec

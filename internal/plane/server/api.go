@@ -2,43 +2,82 @@ package server
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/session"
 )
 
 type API struct {
-	Applications *application.Service
-	Members      *member.Service
-	Sessions     *session.Service
+	Applications  *application.Service
+	Members       *member.Service
+	Authorization *authorization.Service
+	Sessions      *session.Service
 }
+
+type CheckSubject struct {
+	Token    string `json:"token,omitempty"`
+	MemberID string `json:"member_id,omitempty"`
+	UserID   string `json:"user_id,omitempty"`
+	AgentID  string `json:"agent_id,omitempty"`
+}
+
+type CheckResource struct {
+	Type          string `json:"type"`
+	ID            string `json:"id"`
+	SpaceID       string `json:"space_id,omitempty"`
+	GroupID       string `json:"group_id,omitempty"`
+	OwnerMemberID string `json:"owner_member_id,omitempty"`
+}
+
 type CheckBody struct {
-	MemberID      string `json:"member_id"`
-	Permission    string `json:"permission"`
-	ResourceSpace string `json:"resource_space"`
+	Subject  CheckSubject  `json:"subject"`
+	Action   string        `json:"action"`
+	Resource CheckResource `json:"resource"`
+	// Deprecated flat fields remain accepted for one release so older SDKs can
+	// migrate to the documented subject/action/resource shape without bypassing
+	// the same server-side checks.
+	MemberID      string `json:"member_id,omitempty"`
+	Permission    string `json:"permission,omitempty"`
+	ResourceSpace string `json:"resource_space,omitempty"`
 	ResourceOwner string `json:"resource_owner,omitempty"`
 }
+
 type CheckInput struct {
 	Authorization string `header:"Authorization"`
 	Body          CheckBody
 }
+
+type CheckDecision struct {
+	Decision      string `json:"decision"`
+	DenyCode      string `json:"deny_code,omitempty"`
+	DecisionID    string `json:"decision_id"`
+	PolicyVersion string `json:"policy_version"`
+}
+
 type CheckOutput struct {
 	Body struct {
-		Data engine.Decision `json:"data"`
+		Data CheckDecision `json:"data"`
 	}
 }
+
 type IntrospectInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
 		Token string `json:"token"`
 	}
 }
+
 type IntrospectOutput struct {
 	Body struct {
 		Data struct {
@@ -54,44 +93,168 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
 	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
 }
+
 func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
-	key, e := a.key(ctx, in.Authorization)
-	if e != nil {
-		return nil, e
+	if in.Body.Action == "" && in.Body.Permission != "" {
+		in.Body.Action = in.Body.Permission
+		if in.Body.Subject.MemberID == "" {
+			in.Body.Subject.MemberID = in.Body.MemberID
+		}
+		if in.Body.Resource.SpaceID == "" {
+			in.Body.Resource.SpaceID = in.Body.ResourceSpace
+		}
+		if in.Body.Resource.OwnerMemberID == "" {
+			in.Body.Resource.OwnerMemberID = in.Body.ResourceOwner
+		}
+	}
+	key, err := a.key(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
 	}
 	if !contains(key.Scopes, "auth.authz:check") {
-		return nil, apierr.New("forbidden", "API key is not scoped for authz checks")
+		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for authorization checks.")
 	}
-	perms, e := a.Members.Permissions(ctx, in.Body.MemberID)
-	if e != nil {
-		return nil, e
+	spaceID := strings.TrimSpace(in.Body.Resource.SpaceID)
+	if spaceID == "" {
+		spaceID = key.SpaceID
 	}
-	keys := make([]string, 0, len(perms))
-	for _, p := range perms {
-		keys = append(keys, p.Key)
+	if spaceID != key.SpaceID {
+		return a.writeDecision(ctx, key, in.Body, "", spaceID, engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"})
 	}
-	decision := engine.Check(engine.Request{MemberID: in.Body.MemberID, Permission: in.Body.Permission, ResourceSpace: in.Body.ResourceSpace, ResourceOwner: in.Body.ResourceOwner, Assignments: []engine.Assignment{{MemberID: in.Body.MemberID, Role: "member", Permissions: keys, Scope: engine.Scope{Anchor: key.SpaceID, IncludeDescendants: true}}}})
+	memberID, err := a.resolveSubject(ctx, key, in.Body.Subject, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	var assignments []engine.Assignment
+	var policyVersion int64
+	if a.Authorization != nil {
+		assignments, policyVersion, err = a.Authorization.Assignments(ctx, memberID)
+		if err != nil {
+			return nil, err
+		}
+	} else if a.Members != nil {
+		permissions, err := a.Members.Permissions(ctx, memberID)
+		if err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(permissions))
+		for _, permission := range permissions {
+			keys = append(keys, permission.Key)
+		}
+		assignments = []engine.Assignment{{MemberID: memberID, Role: "legacy", Permissions: keys, Scope: engine.Scope{Kind: "space", Anchor: spaceID}}}
+	} else {
+		return nil, apierr.New("UNAVAILABLE", "authorization is unavailable")
+	}
+	if policyVersion == 0 && a.Authorization != nil {
+		policyVersion, err = a.Authorization.PolicyVersion(ctx, spaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	decision := engine.Check(engine.Request{
+		MemberID: memberID, Permission: strings.TrimSpace(in.Body.Action), ResourceSpace: spaceID,
+		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID, Assignments: assignments,
+	})
+	return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, decision, policyVersion)
+}
+
+func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (string, error) {
+	if subject.AgentID != "" {
+		return "", apierr.New("SUBJECT_NOT_FOUND", "agent subjects are not enabled for this authorization operation")
+	}
+	if subject.Token != "" {
+		if a.Sessions == nil {
+			return "", apierr.New("UNAVAILABLE", "authentication is unavailable")
+		}
+		claims, active, err := a.Sessions.Introspect(ctx, subject.Token, key.ClientID)
+		if err != nil {
+			return "", err
+		}
+		if !active {
+			return "", apierr.New("UNAUTHENTICATED", "the subject token is invalid")
+		}
+		if a.Authorization == nil {
+			return "", apierr.New("UNAVAILABLE", "authorization is unavailable")
+		}
+		member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+		if err != nil {
+			return "", err
+		}
+		if subject.MemberID != "" && subject.MemberID != member.ID {
+			return "", apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
+		}
+		return member.ID, nil
+	}
+	if subject.MemberID == "" {
+		return "", apierr.New("VALIDATION_FAILED", "subject.token is required")
+	}
+	if !key.AllowSubjectAssertion {
+		return "", apierr.New("VALIDATION_FAILED", "member_id subject assertions are not enabled for this API key")
+	}
+	if a.Authorization == nil {
+		return subject.MemberID, nil
+	}
+	member, err := a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
+	if err != nil {
+		return "", err
+	}
+	if subject.UserID != "" {
+		bound, err := a.Authorization.GetMemberForUser(ctx, subject.UserID, spaceID)
+		if err != nil || bound.ID != member.ID {
+			return "", apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
+		}
+	}
+	return member.ID, nil
+}
+
+func (a *API) writeDecision(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision) (*CheckOutput, error) {
+	version := int64(0)
+	if a.Authorization != nil && spaceID != "" {
+		var err error
+		version, err = a.Authorization.PolicyVersion(ctx, spaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, decision, version)
+}
+
+func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision, policyVersion int64) (*CheckOutput, error) {
 	out := &CheckOutput{}
-	out.Body.Data = decision
+	out.Body.Data.Decision = string(decision.Effect)
+	out.Body.Data.DecisionID = string(ids.New[ids.ID]("dec"))
+	out.Body.Data.PolicyVersion = strconv.FormatInt(policyVersion, 10)
+	if decision.Effect == engine.Deny {
+		out.Body.Data.DenyCode = decision.Code
+		if a.Applications != nil && a.Applications.Store != nil {
+			err := a.Applications.Store.InTx(ctx, func(q *db.Queries) error {
+				return audit.Write(ctx, q, "application", key.ID, "authz.check", body.Resource.ID, "deny")
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
 	return out, nil
 }
+
 func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectOutput, error) {
-	key, e := a.key(ctx, in.Authorization)
-	if e != nil {
-		return nil, e
+	key, err := a.key(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
 	}
 	if !contains(key.Scopes, "auth.tokens:introspect") {
-		return nil, apierr.New("forbidden", "API key is not scoped for token introspection")
+		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for token introspection.")
 	}
 	if strings.TrimSpace(in.Body.Token) == "" {
-		return nil, apierr.New("invalid_request", "token is required")
+		return nil, apierr.New("VALIDATION_FAILED", "token is required")
 	}
 	if a.Sessions == nil {
-		return nil, apierr.New("unavailable", "token introspection is unavailable")
+		return nil, apierr.New("UNAVAILABLE", "token introspection is unavailable")
 	}
-	claims, active, e := a.Sessions.Introspect(ctx, in.Body.Token, key.ClientID)
-	if e != nil {
-		return nil, e
+	claims, active, err := a.Sessions.Introspect(ctx, in.Body.Token, key.ClientID)
+	if err != nil {
+		return nil, err
 	}
 	out := &IntrospectOutput{}
 	out.Body.Data.Active = active
@@ -102,13 +265,18 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 	}
 	return out, nil
 }
+
 func (a *API) key(ctx context.Context, value string) (application.Key, error) {
 	parts := strings.Fields(value)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return application.Key{}, apierr.New("unauthorized", "application API key is required")
+		return application.Key{}, apierr.New("CREDENTIAL_PLANE_MISMATCH", "an application API key is required")
+	}
+	if a.Applications == nil {
+		return application.Key{}, apierr.New("UNAVAILABLE", "application credentials are unavailable")
 	}
 	return a.Applications.AuthenticateKey(ctx, parts[1])
 }
+
 func contains(ss []string, w string) bool {
 	for _, s := range ss {
 		if s == w {

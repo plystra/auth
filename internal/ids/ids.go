@@ -20,6 +20,7 @@ type GroupID string
 type MemberID string
 type RoleID string
 type PermissionID string
+type GrantID string
 type ApplicationID string
 type APIKeyID string
 type AgentID string
@@ -44,6 +45,7 @@ func (id GroupID) Valid() bool           { return valid(string(id), "grp") }
 func (id MemberID) Valid() bool          { return valid(string(id), "mem") }
 func (id RoleID) Valid() bool            { return valid(string(id), "rol") }
 func (id PermissionID) Valid() bool      { return valid(string(id), "prm") }
+func (id GrantID) Valid() bool           { return valid(string(id), "grt") }
 func (id ApplicationID) Valid() bool     { return valid(string(id), "app") }
 func (id APIKeyID) Valid() bool          { return valid(string(id), "key") }
 func (id AgentID) Valid() bool           { return valid(string(id), "agt") }

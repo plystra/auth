@@ -77,3 +77,39 @@ func (q *Queries) GetSpace(ctx context.Context, arg GetSpaceParams) (Space, erro
 	)
 	return i, err
 }
+
+const listChildSpaces = `-- name: ListChildSpaces :many
+SELECT id, name, slug, parent_id, policy_version, created_at FROM spaces
+WHERE parent_id = $1 ORDER BY created_at, id
+`
+
+type ListChildSpacesParams struct {
+	ParentID pgtype.Text `json:"parent_id"`
+}
+
+func (q *Queries) ListChildSpaces(ctx context.Context, arg ListChildSpacesParams) ([]Space, error) {
+	rows, err := q.db.Query(ctx, listChildSpaces, arg.ParentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Space{}
+	for rows.Next() {
+		var i Space
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.ParentID,
+			&i.PolicyVersion,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

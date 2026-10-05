@@ -17,16 +17,17 @@ type Agent struct {
 }
 
 type ApiKey struct {
-	ID            string             `json:"id"`
-	ApplicationID string             `json:"application_id"`
-	Name          string             `json:"name"`
-	Prefix        string             `json:"prefix"`
-	SecretHash    []byte             `json:"secret_hash"`
-	Scopes        []byte             `json:"scopes"`
-	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
-	LastUsedAt    pgtype.Timestamptz `json:"last_used_at"`
-	RevokedAt     pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	SecretHash            []byte             `json:"secret_hash"`
+	Scopes                []byte             `json:"scopes"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
 
 type Application struct {
@@ -63,6 +64,20 @@ type AuthorizationCode struct {
 	Scope               string             `json:"scope"`
 	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+}
+
+type AuthorizationGrant struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	RoleID          string             `json:"role_id"`
+	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
+	Scope           string             `json:"scope"`
+	AnchorSpaceID   pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text        `json:"anchor_group_id"`
+	GrantedBy       string             `json:"granted_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
 }
 
 type EmailVerificationToken struct {
@@ -113,11 +128,13 @@ type InstanceSetting struct {
 }
 
 type Member struct {
-	ID        string             `json:"id"`
-	SpaceID   string             `json:"space_id"`
-	Name      string             `json:"name"`
-	Kind      string             `json:"kind"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Kind          string             `json:"kind"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
 }
 
 type MemberRole struct {
@@ -174,6 +191,8 @@ type Permission struct {
 	Key         string             `json:"key"`
 	Description string             `json:"description"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	Enabled     bool               `json:"enabled"`
+	Delegable   bool               `json:"delegable"`
 }
 
 type RateLimitBucket struct {
@@ -245,4 +264,7 @@ type UserMember struct {
 	UserID    string             `json:"user_id"`
 	MemberID  string             `json:"member_id"`
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	Status    string             `json:"status"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
 }

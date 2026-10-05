@@ -12,17 +12,18 @@ import (
 )
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), $7) RETURNING id, application_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, revoked_at, created_at
+INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, expires_at, allow_subject_assertion) VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), $7, $8) RETURNING id, application_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 `
 
 type CreateAPIKeyParams struct {
-	ID            string             `json:"id"`
-	ApplicationID string             `json:"application_id"`
-	Name          string             `json:"name"`
-	Prefix        string             `json:"prefix"`
-	SecretHash    []byte             `json:"secret_hash"`
-	Scopes        interface{}        `json:"scopes"`
-	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	SecretHash            []byte             `json:"secret_hash"`
+	Scopes                interface{}        `json:"scopes"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
 
 func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error) {
@@ -34,6 +35,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		arg.SecretHash,
 		arg.Scopes,
 		arg.ExpiresAt,
+		arg.AllowSubjectAssertion,
 	)
 	var i ApiKey
 	err := row.Scan(
@@ -47,6 +49,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		&i.LastUsedAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.AllowSubjectAssertion,
 	)
 	return i, err
 }
@@ -90,7 +93,7 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 }
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
 `
 
 type GetAPIKeyByPrefixParams struct {
@@ -98,19 +101,20 @@ type GetAPIKeyByPrefixParams struct {
 }
 
 type GetAPIKeyByPrefixRow struct {
-	ID              string             `json:"id"`
-	ApplicationID   string             `json:"application_id"`
-	Name            string             `json:"name"`
-	Prefix          string             `json:"prefix"`
-	SecretHash      []byte             `json:"secret_hash"`
-	Scopes          []byte             `json:"scopes"`
-	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
-	LastUsedAt      pgtype.Timestamptz `json:"last_used_at"`
-	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	SpaceID         string             `json:"space_id"`
-	ApplicationName string             `json:"application_name"`
-	ClientID        string             `json:"client_id"`
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	SecretHash            []byte             `json:"secret_hash"`
+	Scopes                []byte             `json:"scopes"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+	SpaceID               string             `json:"space_id"`
+	ApplicationName       string             `json:"application_name"`
+	ClientID              string             `json:"client_id"`
 }
 
 func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixParams) (GetAPIKeyByPrefixRow, error) {
@@ -127,6 +131,7 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.LastUsedAt,
 		&i.RevokedAt,
 		&i.CreatedAt,
+		&i.AllowSubjectAssertion,
 		&i.SpaceID,
 		&i.ApplicationName,
 		&i.ClientID,

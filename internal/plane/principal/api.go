@@ -9,15 +9,17 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 )
 
 type API struct {
-	Accounts *account.Service
-	Sessions *session.Service
-	Signer   *security.Signer
+	Accounts      *account.Service
+	Sessions      *session.Service
+	Signer        *security.Signer
+	Authorization *authorization.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
@@ -92,6 +94,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
 	route.Register(api, route.Spec{Name: "auth.password_forgot", Method: "POST", Path: "/v1/auth/password/forgot", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
 	route.Register(api, route.Spec{Name: "auth.password_reset", Method: "POST", Path: "/v1/auth/password/reset", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetConfirm)
+	a.registerAuthorizationRoutes(api)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
 	r := in.Body
