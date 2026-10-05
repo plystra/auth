@@ -6,11 +6,18 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/session"
 )
 
-type HTTP struct{ Issuer string }
+type HTTP struct {
+	Issuer   string
+	Agents   *agent.Service
+	Sessions *session.Service
+}
 
 func (h HTTP) Register(mux *http.ServeMux) {
 	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.metadata", Method: "GET", Path: "/.well-known/oauth-authorization-server", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.metadata))
@@ -46,11 +53,66 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "form body is invalid"))
 		return
 	}
-	if r.Form.Get("grant_type") == "authorization_code" && r.Form.Get("code_verifier") == "" {
+	grantType := r.Form.Get("grant_type")
+	if grantType == "urn:ietf:params:oauth:grant-type:token-exchange" && r.Form.Get("actor_token") != "" {
+		h.tokenExchange(w, r)
+		return
+	}
+	if grantType == "agent_key" || (grantType == "urn:ietf:params:oauth:grant-type:token-exchange" && r.Form.Get("agent_key") != "") {
+		if h.Agents == nil || h.Sessions == nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "agent token exchange is unavailable"))
+			return
+		}
+		credential := r.Form.Get("agent_key")
+		if credential == "" {
+			credential = r.Form.Get("subject_token")
+		}
+		c, err := h.Agents.AuthenticateKey(r.Context(), credential)
+		if err != nil {
+			writeErr(w, apierr.New("invalid_grant", "agent credential is invalid"))
+			return
+		}
+		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), c.MemberID, c.SpaceID, r.Form.Get("resource"))
+		if err != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "agent token exchange is unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn})
+		return
+	}
+	if grantType == "authorization_code" && r.Form.Get("code_verifier") == "" {
 		writeErr(w, apierr.New("invalid_request", "code_verifier is required"))
 		return
 	}
 	writeErr(w, apierr.New("invalid_grant", "authorization grant is invalid or expired"))
+}
+
+func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
+	if h.Agents == nil || h.Sessions == nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
+		return
+	}
+	actor, err := h.Agents.AuthenticateKey(r.Context(), r.Form.Get("actor_token"))
+	if err != nil {
+		writeErr(w, apierr.New("invalid_grant", "actor token is invalid"))
+		return
+	}
+	parentClaims, active, err := h.Sessions.Introspect(r.Context(), r.Form.Get("subject_token"), security.DefaultApplicationAudience)
+	if err != nil || !active {
+		writeErr(w, apierr.New("invalid_grant", "subject token is invalid"))
+		return
+	}
+	owner, err := h.Agents.Owner(r.Context(), actor.MemberID)
+	if err != nil || owner != parentClaims.Subject {
+		writeErr(w, apierr.New("invalid_grant", "actor token is not delegated by the subject"))
+		return
+	}
+	tokens, err := h.Sessions.CreateAgentAccess(r.Context(), actor.MemberID, actor.SpaceID, r.Form.Get("resource"))
+	if err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"})
 }
 func (h HTTP) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, apierr.New("not_implemented", "protocol operation is not enabled for this deployment"))

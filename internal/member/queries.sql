@@ -1,10 +1,12 @@
 -- name: CreateMember :one
-INSERT INTO members (id, space_id, name, kind) VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(kind)) RETURNING id, space_id, name, kind, created_at;
+INSERT INTO members (id, space_id, name, kind, type)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(kind), sqlc.arg(type))
+RETURNING id, space_id, name, type, created_at;
 
 -- name: CreateMemberWithPolicy :one
-INSERT INTO members (id, space_id, name, kind, binding_policy)
-VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(kind), sqlc.arg(binding_policy))
-RETURNING id, space_id, name, kind, binding_policy, status, created_at;
+INSERT INTO members (id, space_id, name, kind, type, binding_policy)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), CASE sqlc.arg(type) WHEN 'human' THEN 'user' WHEN 'application' THEN 'service' ELSE sqlc.arg(type) END, sqlc.arg(type), sqlc.arg(binding_policy))
+RETURNING id, space_id, name, type, binding_policy, status, created_at;
 
 -- name: LinkUserMember :exec
 INSERT INTO user_members (user_id, member_id) VALUES (sqlc.arg(user_id), sqlc.arg(member_id)) ON CONFLICT DO NOTHING;
@@ -34,15 +36,15 @@ WHERE um.member_id = sqlc.arg(member_id)
 ORDER BY um.created_at, um.user_id;
 
 -- name: GetMemberForUser :one
-SELECT m.id, m.space_id, m.name, m.kind, m.binding_policy, m.status, m.created_at FROM members m JOIN user_members um ON um.member_id=m.id WHERE um.user_id=sqlc.arg(user_id) AND um.status = 'active' AND (um.expires_at IS NULL OR um.expires_at > now()) AND um.revoked_at IS NULL AND m.status = 'active' AND m.space_id=sqlc.arg(space_id) LIMIT 1;
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at FROM members m JOIN user_members um ON um.member_id=m.id WHERE um.user_id=sqlc.arg(user_id) AND um.status = 'active' AND (um.expires_at IS NULL OR um.expires_at > now()) AND um.revoked_at IS NULL AND m.status = 'active' AND m.space_id=sqlc.arg(space_id) LIMIT 1;
 
 -- name: ListMembersInSpace :many
-SELECT id, space_id, name, kind, binding_policy, status, created_at
+SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = sqlc.arg(space_id) AND status <> 'removed'
 ORDER BY created_at, id;
 
 -- name: GetMemberInSpace :one
-SELECT id, space_id, name, kind, binding_policy, status, created_at
+SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
 -- name: SetMemberStatus :exec

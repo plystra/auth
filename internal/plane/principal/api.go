@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/account"
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/route"
@@ -20,6 +21,7 @@ type API struct {
 	Sessions      *session.Service
 	Signer        *security.Signer
 	Authorization *authorization.Service
+	Agents        *agent.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
@@ -46,7 +48,7 @@ type BearerInput struct {
 }
 type MeOutput struct {
 	Body struct {
-		Data account.User `json:"data"`
+		Data any `json:"data"`
 	}
 }
 type LoginInput struct {
@@ -89,11 +91,12 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_up", Method: "POST", Path: "/v1/auth/sign-up", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.register)
 	route.Register(api, route.Spec{Name: "auth.sign_in", Method: "POST", Path: "/v1/auth/sign-in", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
 	route.Register(api, route.Spec{Name: "auth.refresh", Method: "POST", Path: "/v1/auth/refresh", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.refresh)
-	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.Human}}, a.me)
+	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.me)
 	route.Register(api, route.Spec{Name: "auth.sign_out", Method: "POST", Path: "/v1/auth/sign-out", Plane: route.Principal, Permission: "session:revoke", Subjects: []route.Subject{route.Human}}, a.logout)
 	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
 	route.Register(api, route.Spec{Name: "auth.password_forgot", Method: "POST", Path: "/v1/auth/password/forgot", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
 	route.Register(api, route.Spec{Name: "auth.password_reset", Method: "POST", Path: "/v1/auth/password/reset", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetConfirm)
+	a.registerAgentRoutes(api)
 	a.registerAuthorizationRoutes(api)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
@@ -143,12 +146,26 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	if !active {
 		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
 	}
-	u, e := a.Accounts.Me(ctx, claims)
-	if e != nil {
-		return nil, e
-	}
 	out := &MeOutput{}
-	out.Body.Data = u
+	if claims.Type == "agent" {
+		if a.Agents == nil {
+			return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
+		}
+		ag, err := a.Agents.Get(ctx, claims.Subject)
+		if err != nil {
+			return nil, err
+		}
+		out.Body.Data = struct {
+			Type  string      `json:"type"`
+			Agent agent.Agent `json:"agent"`
+		}{Type: "agent", Agent: ag}
+	} else {
+		u, e := a.Accounts.Me(ctx, claims)
+		if e != nil {
+			return nil, e
+		}
+		out.Body.Data = u
+	}
 	return out, nil
 }
 func (a *API) logout(ctx context.Context, in *BearerInput) (*LogoutOutput, error) {

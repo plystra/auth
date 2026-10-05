@@ -24,11 +24,18 @@ type Permission struct {
 }
 
 func (s *Service) Create(ctx context.Context, spaceID, name, kind string) (Member, error) {
-	row, e := s.Store.Queries().CreateMember(ctx, db.CreateMemberParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Kind: kind})
+	typeName := kind
+	if typeName == "user" {
+		typeName = "human"
+	}
+	if typeName == "service" {
+		typeName = "application"
+	}
+	row, e := s.Store.Queries().CreateMember(ctx, db.CreateMemberParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Kind: kind, Type: typeName})
 	if e != nil {
 		return Member{}, e
 	}
-	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind}, nil
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type}, nil
 }
 func (s *Service) LinkUser(ctx context.Context, userID, memberID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -43,7 +50,7 @@ func (s *Service) ForUser(ctx context.Context, userID, spaceID string) (Member, 
 	if e != nil {
 		return Member{}, e
 	}
-	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind}, nil
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type}, nil
 }
 func (s *Service) Permissions(ctx context.Context, memberID string) ([]Permission, error) {
 	rows, e := s.Store.Queries().ListMemberPermissions(ctx, db.ListMemberPermissionsParams{MemberID: memberID})

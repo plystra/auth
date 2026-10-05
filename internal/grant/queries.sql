@@ -37,7 +37,7 @@ ORDER BY p.key;
 -- name: ListMemberAssignments :many
 SELECT g.id AS grant_id, g.space_id, g.role_id, r.name AS role_name,
        g.scope, g.anchor_space_id, g.grantee_member_id,
-       p.key AS permission_key, p.enabled, p.delegable, s.policy_version
+       p.key AS permission_key, p.enabled, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants g
 JOIN roles r ON r.id = g.role_id
 JOIN role_permissions rp ON rp.role_id = r.id

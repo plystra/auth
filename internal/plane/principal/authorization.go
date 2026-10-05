@@ -29,7 +29,7 @@ type createMemberInput struct {
 	ID            string `path:"id"`
 	Body          struct {
 		Name          string `json:"name"`
-		Kind          string `json:"kind"`
+		Kind          string `json:"type"`
 		BindingPolicy string `json:"binding_policy"`
 		UserID        string `json:"user_id,omitempty"`
 	}
@@ -114,13 +114,13 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.Spec{Name: "spaces.children", Method: "GET", Path: "/v1/spaces/{id}/children", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listChildren)
 	route.Register(api, route.Spec{Name: "members.list", Method: "GET", Path: "/v1/spaces/{id}/members", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listMembers)
 	route.Register(api, route.Spec{Name: "members.create", Method: "POST", Path: "/v1/spaces/{id}/members", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createMember)
-	route.Register(api, route.Spec{Name: "members.update", Method: "PATCH", Path: "/v1/spaces/{id}/members/{mid}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.updateMember)
-	route.Register(api, route.Spec{Name: "members.suspend", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/suspend", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.suspendMember)
-	route.Register(api, route.Spec{Name: "members.resume", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/resume", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.resumeMember)
-	route.Register(api, route.Spec{Name: "members.remove", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/remove", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.removeMember)
-	route.Register(api, route.Spec{Name: "members.bindings.list", Method: "GET", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.Human}}, a.listBindings)
-	route.Register(api, route.Spec{Name: "members.bindings.create", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, StepUp: true, AuthoritativeCheck: true}, a.bindUser)
-	route.Register(api, route.Spec{Name: "members.bindings.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/members/{mid}/users/{user_id}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.unbindUser)
+	route.Register(api, route.Spec{Name: "members.update", Method: "PATCH", Path: "/v1/spaces/{id}/members/{mid}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.updateMember)
+	route.Register(api, route.Spec{Name: "members.suspend", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/suspend", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.HumanAgent}}, a.suspendMember)
+	route.Register(api, route.Spec{Name: "members.resume", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/resume", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.HumanAgent}}, a.resumeMember)
+	route.Register(api, route.Spec{Name: "members.remove", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/remove", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.HumanAgent}}, a.removeMember)
+	route.Register(api, route.Spec{Name: "members.bindings.list", Method: "GET", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listBindings)
+	route.Register(api, route.Spec{Name: "members.bindings.create", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true, AuthoritativeCheck: true}, a.bindUser)
+	route.Register(api, route.Spec{Name: "members.bindings.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/members/{mid}/users/{user_id}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.unbindUser)
 	route.Register(api, route.Spec{Name: "roles.list", Method: "GET", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}}, a.listRoles)
 	route.Register(api, route.Spec{Name: "roles.create", Method: "POST", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createRole)
 	route.Register(api, route.Spec{Name: "grants.create", Method: "POST", Path: "/v1/spaces/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createGrant)
@@ -199,11 +199,11 @@ func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authori
 	}
 	policy := in.Body.BindingPolicy
 	if policy == "" {
-		policy = "individual"
+		policy = "single"
 	}
 	kind := in.Body.Kind
 	if kind == "" {
-		kind = "user"
+		kind = "human"
 	}
 	member, err := a.Authorization.CreateMember(ctx, actor.ID, in.Body.UserID, in.ID, in.Body.Name, kind, policy)
 	if err != nil {

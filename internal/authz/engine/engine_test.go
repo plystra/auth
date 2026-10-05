@@ -39,3 +39,37 @@ func TestCheckRespectsGrantScopeAndDefaultDeny(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentAuthorityIsBoundToOwnerEnvelope(t *testing.T) {
+	owner := Request{
+		MemberID: "mem_owner", Permission: "invoice:approve", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_owner", Permissions: []string{"invoice:approve"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+	}
+	agent := Request{
+		MemberID: "mem_agent", PrincipalType: "agent", Permission: "invoice:approve", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_agent", Permissions: []string{"invoice:approve"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+		Owner:       &owner,
+	}
+	if got := Check(agent); got.Effect != Allow {
+		t.Fatalf("agent should be allowed while owner is allowed: %+v", got)
+	}
+	owner.Assignments[0].Permissions = []string{"invoice:read"}
+	if got := Check(agent); got.Code != "OWNER_ENVELOPE_EXCLUDED" {
+		t.Fatalf("agent should follow owner envelope: %+v", got)
+	}
+}
+
+func TestAgentApprovalAndPrincipalKind(t *testing.T) {
+	request := Request{
+		MemberID: "mem_agent", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_agent", Permissions: []string{"billing:write"}, PrincipalKinds: []string{"agent"}, AgentApprovalRequired: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+		Owner:       &Request{MemberID: "mem_owner", Permission: "billing:write", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_owner", Permissions: []string{"billing:write"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}},
+	}
+	if got := Check(request); got.Code != "APPROVAL_REQUIRED" {
+		t.Fatalf("expected approval requirement: %+v", got)
+	}
+	request.ApprovalValid = true
+	if got := Check(request); got.Effect != Allow {
+		t.Fatalf("valid approval should allow: %+v", got)
+	}
+}

@@ -20,6 +20,8 @@ import (
 type Claims struct {
 	Issuer    string `json:"iss"`
 	Subject   string `json:"sub"`
+	MemberID  string `json:"mid,omitempty"`
+	SpaceID   string `json:"spc,omitempty"`
 	Audience  string `json:"aud"`
 	ExpiresAt int64  `json:"exp"`
 	IssuedAt  int64  `json:"iat"`

@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/plystra/auth/internal/account"
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
@@ -189,6 +190,7 @@ func serve(ctx context.Context) error {
 	}
 	settings := &space.Service{Store: st}
 	authorizationSvc := &authorization.Service{Store: st}
+	agentSvc := &agent.Service{Store: st}
 	dataKey, e := decodeDataKey(c.DataKey)
 	if e != nil {
 		return e
@@ -205,8 +207,8 @@ func serve(ctx context.Context) error {
 	limiter := &store.RateLimiter{Store: st}
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
 	apps := &application.Service{Store: st}
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc}
-	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc}
+	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
 		return e
@@ -220,7 +222,7 @@ func serve(ctx context.Context) error {
 	scfg := huma.DefaultConfig("Plystra Auth server", "1.0.0")
 	ocfg := huma.DefaultConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
-	protocol.HTTP{Issuer: c.Issuer}.Register(principalMux)
+	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	route.RegisterNonJSON(principalMux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

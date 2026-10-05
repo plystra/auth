@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -57,6 +58,10 @@ func randomToken(prefix string) (string, error) {
 	return prefix + base64.RawURLEncoding.EncodeToString(b), nil
 }
 func (s *Service) Create(ctx context.Context, userID string, ip net.IP, userAgent string, assurance int) (Tokens, error) {
+	return s.CreateForMember(ctx, userID, "", ip, userAgent, assurance)
+}
+
+func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, ip net.IP, userAgent string, assurance int) (Tokens, error) {
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
@@ -90,7 +95,7 @@ func (s *Service) Create(ctx context.Context, userID string, ip net.IP, userAgen
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, Type: "access"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -149,11 +154,37 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 		return Tokens{}, err
 	}
 	jti, _ := randomToken("jti_")
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "access"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
 	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: next, SessionID: sid}, nil
+}
+
+// CreateAgentAccess exchanges a one-time agent credential validation for a
+// short-lived access token. Agent sessions are intentionally stateless: live
+// member and owner-chain status is checked during introspection/authz checks.
+func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audience string) (Tokens, error) {
+	st, err := s.Settings(ctx)
+	if err != nil {
+		return Tokens{}, err
+	}
+	if st.AccessTTL <= 0 {
+		return Tokens{}, errors.New("invalid session settings")
+	}
+	now := time.Now().UTC()
+	jti, err := randomToken("jti_")
+	if err != nil {
+		return Tokens{}, err
+	}
+	if strings.TrimSpace(audience) == "" {
+		audience = security.DefaultApplicationAudience
+	}
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, Type: "agent"})
+	if err != nil {
+		return Tokens{}, err
+	}
+	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second)}, nil
 }
 func (s *Service) Revoke(ctx context.Context, sid string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -173,7 +204,13 @@ func (s *Service) VerifyAccess(token string) (security.Claims, error) {
 // to take effect immediately for online callers.
 func (s *Service) Introspect(ctx context.Context, token, audience string) (security.Claims, bool, error) {
 	claims, err := s.Signer.Verify(token, time.Now().UTC(), audience)
-	if err != nil || claims.Type != "access" || claims.SessionID == "" {
+	if err != nil || (claims.Type != "user" && claims.Type != "access" && claims.Type != "agent") {
+		return security.Claims{}, false, nil
+	}
+	if claims.Type == "agent" {
+		return s.introspectAgent(ctx, claims)
+	}
+	if claims.SessionID == "" {
 		return security.Claims{}, false, nil
 	}
 	sess, err := s.Store.Queries().GetSession(ctx, db.GetSessionParams{ID: claims.SessionID})
@@ -195,6 +232,39 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 	}
 	if user.DisabledAt.Valid || user.Status != "active" {
 		return security.Claims{}, false, nil
+	}
+	return claims, true, nil
+}
+
+func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (security.Claims, bool, error) {
+	if claims.Subject == "" {
+		return security.Claims{}, false, nil
+	}
+	row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: claims.Subject})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return security.Claims{}, false, nil
+		}
+		return security.Claims{}, false, err
+	}
+	now := time.Now().UTC()
+	if row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
+		return security.Claims{}, false, nil
+	}
+	ownerID := row.OwnerMemberID
+	for depth := 0; ownerID.Valid && ownerID.String != "" && depth < 8; depth++ {
+		owner, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: ownerID.String})
+		if err == nil {
+			if owner.Status != "active" || owner.GroupStatus != "active" || (owner.ExpiresAt.Valid && !owner.ExpiresAt.Time.After(now)) {
+				return security.Claims{}, false, nil
+			}
+			ownerID = owner.OwnerMemberID
+			continue
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return security.Claims{}, false, err
+		}
+		break
 	}
 	return claims, true, nil
 }

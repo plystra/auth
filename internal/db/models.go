@@ -16,6 +16,19 @@ type Agent struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
+type AgentCredential struct {
+	ID         string             `json:"id"`
+	MemberID   string             `json:"member_id"`
+	Kind       string             `json:"kind"`
+	Prefix     string             `json:"prefix"`
+	SecretHash []byte             `json:"secret_hash"`
+	FamilyID   pgtype.Text        `json:"family_id"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt  pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt pgtype.Timestamptz `json:"last_used_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+}
+
 type ApiKey struct {
 	ID                    string             `json:"id"`
 	ApplicationID         string             `json:"application_id"`
@@ -102,16 +115,20 @@ type Factor struct {
 }
 
 type Group struct {
-	ID        string             `json:"id"`
-	SpaceID   string             `json:"space_id"`
-	Name      string             `json:"name"`
-	ParentID  pgtype.Text        `json:"parent_id"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	ParentID      pgtype.Text        `json:"parent_id"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Kind          string             `json:"kind"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	Status        string             `json:"status"`
 }
 
 type GroupMember struct {
 	GroupID  string `json:"group_id"`
 	MemberID string `json:"member_id"`
+	Source   string `json:"source"`
 }
 
 type InstanceSetting struct {
@@ -128,13 +145,23 @@ type InstanceSetting struct {
 }
 
 type Member struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Kind          string             `json:"kind"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	BindingPolicy string             `json:"binding_policy"`
-	Status        string             `json:"status"`
+	ID                string             `json:"id"`
+	SpaceID           string             `json:"space_id"`
+	Name              string             `json:"name"`
+	Kind              string             `json:"kind"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	BindingPolicy     string             `json:"binding_policy"`
+	Status            string             `json:"status"`
+	Type              string             `json:"type"`
+	Version           int64              `json:"version"`
+	Metadata          []byte             `json:"metadata"`
+	HomeGroupID       pgtype.Text        `json:"home_group_id"`
+	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
+	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 }
 
 type MemberRole struct {
@@ -187,12 +214,15 @@ type PasswordResetToken struct {
 }
 
 type Permission struct {
-	ID          string             `json:"id"`
-	Key         string             `json:"key"`
-	Description string             `json:"description"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	Enabled     bool               `json:"enabled"`
-	Delegable   bool               `json:"delegable"`
+	ID             string             `json:"id"`
+	Key            string             `json:"key"`
+	Description    string             `json:"description"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	Enabled        bool               `json:"enabled"`
+	Delegable      bool               `json:"delegable"`
+	Risk           string             `json:"risk"`
+	PrincipalKinds []byte             `json:"principal_kinds"`
+	AgentApproval  string             `json:"agent_approval"`
 }
 
 type RateLimitBucket struct {

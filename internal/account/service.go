@@ -115,7 +115,15 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 	if settings.RequireEmailVerification {
 		return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time)}, nil
 	}
-	tokens, e := s.Sessions.Create(ctx, u.ID, ip, ua, 1)
+	memberID := ""
+	if s.Authorization != nil {
+		if member, memberErr := s.Authorization.GetMemberForUser(ctx, u.ID, DefaultSpaceID); memberErr == nil {
+			memberID = member.ID
+		} else {
+			return AuthResult{}, memberErr
+		}
+	}
+	tokens, e := s.Sessions.CreateForMember(ctx, u.ID, memberID, ip, ua, 1)
 	if e != nil {
 		return AuthResult{}, e
 	}
@@ -157,7 +165,15 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 	if u.Status != "active" {
 		return AuthResult{}, apierr.New("UNAUTHENTICATED", "this account is not active")
 	}
-	tokens, e := s.Sessions.Create(ctx, u.ID, in.IP, in.UserAgent, 1)
+	memberID := ""
+	if s.Authorization != nil {
+		if member, memberErr := s.Authorization.GetMemberForUser(ctx, u.ID, DefaultSpaceID); memberErr == nil {
+			memberID = member.ID
+		} else {
+			return AuthResult{}, memberErr
+		}
+	}
+	tokens, e := s.Sessions.CreateForMember(ctx, u.ID, memberID, in.IP, in.UserAgent, 1)
 	if e != nil {
 		return AuthResult{}, e
 	}

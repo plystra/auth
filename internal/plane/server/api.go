@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
@@ -23,6 +24,7 @@ type API struct {
 	Members       *member.Service
 	Authorization *authorization.Service
 	Sessions      *session.Service
+	Agents        *agent.Service
 }
 
 type CheckSubject struct {
@@ -89,6 +91,11 @@ type IntrospectOutput struct {
 	}
 }
 
+type resolvedSubject struct {
+	ID   string
+	Type string
+}
+
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
 	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
@@ -121,10 +128,11 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	if spaceID != key.SpaceID {
 		return a.writeDecision(ctx, key, in.Body, "", spaceID, engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"})
 	}
-	memberID, err := a.resolveSubject(ctx, key, in.Body.Subject, spaceID)
+	resolved, err := a.resolveSubject(ctx, key, in.Body.Subject, spaceID)
 	if err != nil {
 		return nil, err
 	}
+	memberID := resolved.ID
 	var assignments []engine.Assignment
 	var policyVersion int64
 	if a.Authorization != nil {
@@ -151,60 +159,107 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 			return nil, err
 		}
 	}
-	decision := engine.Check(engine.Request{
-		MemberID: memberID, Permission: strings.TrimSpace(in.Body.Action), ResourceSpace: spaceID,
-		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID, Assignments: assignments,
-	})
+	request := engine.Request{MemberID: memberID, PrincipalType: resolved.Type, Permission: strings.TrimSpace(in.Body.Action), ResourceSpace: spaceID,
+		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID, Assignments: assignments}
+	if resolved.Type == "agent" {
+		request.Owner, err = a.ownerRequest(ctx, memberID, request.Permission, request.ResourceSpace, request.ResourceGroup, request.ResourceOwner, 0)
+		if err != nil {
+			return nil, err
+		}
+	}
+	decision := engine.Check(request)
 	return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, decision, policyVersion)
 }
 
-func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (string, error) {
+func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
 	if subject.AgentID != "" {
-		return "", apierr.New("SUBJECT_NOT_FOUND", "agent subjects are not enabled for this authorization operation")
+		if !key.AllowSubjectAssertion || a.Agents == nil {
+			return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "agent subject assertions are not enabled for this API key")
+		}
+		if _, err := a.Agents.Owner(ctx, subject.AgentID); err != nil {
+			return resolvedSubject{}, err
+		}
+		return resolvedSubject{ID: subject.AgentID, Type: "agent"}, nil
 	}
 	if subject.Token != "" {
+		if strings.HasPrefix(subject.Token, "ply_ag_") && a.Agents != nil {
+			credential, err := a.Agents.AuthenticateKey(ctx, subject.Token)
+			if err != nil {
+				return resolvedSubject{}, err
+			}
+			return resolvedSubject{ID: credential.MemberID, Type: "agent"}, nil
+		}
 		if a.Sessions == nil {
-			return "", apierr.New("UNAVAILABLE", "authentication is unavailable")
+			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
 		}
 		claims, active, err := a.Sessions.Introspect(ctx, subject.Token, key.ClientID)
 		if err != nil {
-			return "", err
+			return resolvedSubject{}, err
 		}
 		if !active {
-			return "", apierr.New("UNAUTHENTICATED", "the subject token is invalid")
+			return resolvedSubject{}, apierr.New("UNAUTHENTICATED", "the subject token is invalid")
+		}
+		if claims.Type == "agent" {
+			return resolvedSubject{ID: claims.Subject, Type: "agent"}, nil
 		}
 		if a.Authorization == nil {
-			return "", apierr.New("UNAVAILABLE", "authorization is unavailable")
+			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 		}
 		member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 		if err != nil {
-			return "", err
+			return resolvedSubject{}, err
 		}
 		if subject.MemberID != "" && subject.MemberID != member.ID {
-			return "", apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
+			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
 		}
-		return member.ID, nil
+		return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
 	}
 	if subject.MemberID == "" {
-		return "", apierr.New("VALIDATION_FAILED", "subject.token is required")
+		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "subject.token is required")
 	}
 	if !key.AllowSubjectAssertion {
-		return "", apierr.New("VALIDATION_FAILED", "member_id subject assertions are not enabled for this API key")
+		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "member_id subject assertions are not enabled for this API key")
 	}
 	if a.Authorization == nil {
-		return subject.MemberID, nil
+		return resolvedSubject{ID: subject.MemberID, Type: "human"}, nil
 	}
 	member, err := a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
 	if err != nil {
-		return "", err
+		return resolvedSubject{}, err
 	}
 	if subject.UserID != "" {
 		bound, err := a.Authorization.GetMemberForUser(ctx, subject.UserID, spaceID)
 		if err != nil || bound.ID != member.ID {
-			return "", apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
+			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
 		}
 	}
-	return member.ID, nil
+	return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
+}
+
+func (a *API) ownerRequest(ctx context.Context, memberID, permission, spaceID, groupID, resourceOwner string, depth int) (*engine.Request, error) {
+	if depth >= 8 || a.Agents == nil || a.Authorization == nil {
+		return nil, apierr.New("OWNER_INACTIVE", "agent owner chain is invalid")
+	}
+	ownerID, err := a.Agents.Owner(ctx, memberID)
+	if err != nil {
+		return nil, err
+	}
+	assignments, _, err := a.Authorization.Assignments(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	owner, err := a.Authorization.GetMember(ctx, ownerID, spaceID)
+	if err != nil {
+		return nil, err
+	}
+	req := &engine.Request{MemberID: ownerID, PrincipalType: owner.Kind, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID, ResourceOwner: resourceOwner, Assignments: assignments}
+	if owner.Kind == "agent" {
+		req.Owner, err = a.ownerRequest(ctx, ownerID, permission, spaceID, groupID, resourceOwner, depth+1)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return req, nil
 }
 
 func (a *API) writeDecision(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision) (*CheckOutput, error) {

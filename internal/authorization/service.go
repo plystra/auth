@@ -2,6 +2,7 @@ package authorization
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"sort"
@@ -33,7 +34,7 @@ type Member struct {
 	ID            string `json:"id"`
 	SpaceID       string `json:"space_id"`
 	Name          string `json:"name"`
-	Kind          string `json:"kind"`
+	Kind          string `json:"type"`
 	BindingPolicy string `json:"binding_policy"`
 	Status        string `json:"status"`
 }
@@ -94,7 +95,7 @@ func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (S
 			return normalizeDBError(err)
 		}
 		memberRow, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
-			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceRow.ID, Name: name, Kind: "user", BindingPolicy: "individual",
+			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceRow.ID, Name: name, Type: "human", BindingPolicy: "single",
 		})
 		if err != nil {
 			return err
@@ -120,7 +121,7 @@ func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (S
 			return err
 		}
 		outSpace = toSpace(spaceRow)
-		outMember = Member{ID: memberRow.ID, SpaceID: memberRow.SpaceID, Name: memberRow.Name, Kind: memberRow.Kind, BindingPolicy: memberRow.BindingPolicy, Status: memberRow.Status}
+		outMember = Member{ID: memberRow.ID, SpaceID: memberRow.SpaceID, Name: memberRow.Name, Kind: memberRow.Type, BindingPolicy: memberRow.BindingPolicy, Status: memberRow.Status}
 		return nil
 	})
 	return outSpace, outMember, err
@@ -157,7 +158,7 @@ func (s *Service) GetMemberForUser(ctx context.Context, userID, spaceID string) 
 	if err != nil {
 		return Member{}, err
 	}
-	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
 }
 
 func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Member, error) {
@@ -171,7 +172,7 @@ func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Memb
 	if row.Status != "active" {
 		return Member{}, apierr.New("ACTOR_MEMBER_INACTIVE", "The member is not active.")
 	}
-	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
 }
 
 func (s *Service) PolicyVersion(ctx context.Context, spaceID string) (int64, error) {
@@ -192,7 +193,7 @@ func (s *Service) EnsureDefaultMembership(ctx context.Context, userID, displayNa
 			return err
 		}
 		member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
-			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: "spc_01h00000000000000000000000", Name: displayName, Kind: "user", BindingPolicy: "individual",
+			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: "spc_01h00000000000000000000000", Name: displayName, Type: "human", BindingPolicy: "single",
 		})
 		if err != nil {
 			return err
@@ -218,14 +219,20 @@ func (s *Service) ListMembers(ctx context.Context, spaceID string) ([]Member, er
 	}
 	out := make([]Member, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, BindingPolicy: row.BindingPolicy, Status: row.Status})
+		out = append(out, Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status})
 	}
 	return out, nil
 }
 
 func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, spaceID, name, kind, bindingPolicy string) (Member, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 128 || (kind != "user" && kind != "service") || (bindingPolicy != "individual" && bindingPolicy != "shared") {
+	if kind == "user" {
+		kind = "human"
+	}
+	if kind == "service" {
+		kind = "application"
+	}
+	if name == "" || len(name) > 128 || kind != "human" || (bindingPolicy != "single" && bindingPolicy != "shared") {
 		return Member{}, apierr.New("VALIDATION_FAILED", "member fields are invalid")
 	}
 	var out Member
@@ -233,12 +240,12 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.members:manage"); err != nil {
 			return err
 		}
-		memberRow, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Kind: kind, BindingPolicy: bindingPolicy})
+		memberRow, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Type: kind, BindingPolicy: bindingPolicy})
 		if err != nil {
 			return err
 		}
 		if userID != "" {
-			if kind != "user" {
+			if kind != "human" {
 				return apierr.New("VALIDATION_FAILED", "only human members can bind a user")
 			}
 			if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberRow.ID}); err != nil {
@@ -248,7 +255,7 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 		if err := audit.Write(ctx, q, "member", actorMemberID, "member.create", memberRow.ID, "success"); err != nil {
 			return err
 		}
-		out = Member{ID: memberRow.ID, SpaceID: memberRow.SpaceID, Name: memberRow.Name, Kind: memberRow.Kind, BindingPolicy: memberRow.BindingPolicy, Status: memberRow.Status}
+		out = Member{ID: memberRow.ID, SpaceID: memberRow.SpaceID, Name: memberRow.Name, Kind: memberRow.Type, BindingPolicy: memberRow.BindingPolicy, Status: memberRow.Status}
 		return nil
 	})
 	return out, err
@@ -305,8 +312,8 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if err != nil {
 			return err
 		}
-		if member.BindingPolicy == "individual" && count > 0 {
-			return apierr.New("CONFLICT", "an individual member can have only one active user binding")
+		if member.BindingPolicy == "single" && count > 0 {
+			return apierr.New("CONFLICT", "a single-binding member can have only one active user binding")
 		}
 		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err
@@ -353,8 +360,8 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 }
 
 func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, memberID, policy string) error {
-	if policy != "individual" && policy != "shared" {
-		return apierr.New("VALIDATION_FAILED", "binding_policy must be individual or shared")
+	if policy != "single" && policy != "shared" {
+		return apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
@@ -367,13 +374,13 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 			}
 			return err
 		}
-		if policy == "individual" {
+		if policy == "single" {
 			count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
 			if err != nil {
 				return err
 			}
 			if count > 1 {
-				return apierr.New("CONFLICT", "cannot make a member individual while it has multiple active bindings")
+				return apierr.New("CONFLICT", "cannot make a member single while it has multiple active bindings")
 			}
 		}
 		if err := q.SetMemberBindingPolicy(ctx, db.SetMemberBindingPolicyParams{ID: memberID, SpaceID: spaceID, BindingPolicy: policy}); err != nil {
@@ -580,7 +587,9 @@ func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.As
 			if row.AnchorSpaceID.Valid {
 				anchor = row.AnchorSpaceID.String
 			}
-			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}}, seen: map[string]struct{}{}}
+			var principalKinds []string
+			_ = json.Unmarshal(row.PrincipalKinds, &principalKinds)
+			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}, PrincipalKinds: principalKinds, AgentApprovalRequired: row.AgentApproval == "required"}, seen: map[string]struct{}{}}
 			aggs[row.GrantID] = item
 		}
 		if _, ok := item.seen[row.PermissionKey]; !ok {
@@ -607,6 +616,15 @@ func (s *Service) HasPermission(ctx context.Context, memberID, permission string
 			if key == permission {
 				return true, nil
 			}
+		}
+	}
+	legacy, err := s.Store.Queries().ListMemberPermissions(ctx, db.ListMemberPermissionsParams{MemberID: memberID})
+	if err != nil {
+		return false, err
+	}
+	for _, row := range legacy {
+		if row.PermissionKey == permission {
+			return true, nil
 		}
 	}
 	return false, nil
