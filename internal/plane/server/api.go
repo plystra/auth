@@ -134,53 +134,24 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 		return nil, err
 	}
 	memberID := resolved.ID
-	var assignments []engine.Assignment
-	var policyVersion int64
-	if a.Authorization != nil {
-		assignments, policyVersion, err = a.Authorization.Assignments(ctx, memberID)
-		if err != nil {
-			return nil, err
-		}
-	} else if a.Members != nil {
-		permissions, err := a.Members.Permissions(ctx, memberID)
-		if err != nil {
-			return nil, err
-		}
-		keys := make([]string, 0, len(permissions))
-		for _, permission := range permissions {
-			keys = append(keys, permission.Key)
-		}
-		assignments = []engine.Assignment{{MemberID: memberID, Role: "legacy", Permissions: keys, Scope: engine.Scope{Kind: "space", Anchor: spaceID}}}
-	} else {
+	if a.Authorization == nil {
 		return nil, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
-	if policyVersion == 0 && a.Authorization != nil {
-		policyVersion, err = a.Authorization.PolicyVersion(ctx, spaceID)
-		if err != nil {
-			return nil, err
+	permission := strings.TrimSpace(in.Body.Action)
+	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, permission) {
+		policyVersion, versionErr := a.Authorization.PolicyVersion(ctx, spaceID)
+		if versionErr != nil {
+			return nil, versionErr
 		}
-	}
-	request := engine.Request{MemberID: memberID, PrincipalType: resolved.Type, Permission: strings.TrimSpace(in.Body.Action), ResourceSpace: spaceID,
-		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID, Assignments: assignments}
-	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, request.Permission) {
 		return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion)
 	}
-	if in.Body.Resource.OwnerMemberID != "" && in.Body.Resource.OwnerMemberID != memberID && a.Agents != nil {
-		owned, ownerErr := a.Agents.CanManage(ctx, memberID, in.Body.Resource.OwnerMemberID)
-		if ownerErr != nil {
-			return nil, ownerErr
-		}
-		if owned {
-			request.SelfOwners = []string{in.Body.Resource.OwnerMemberID}
-		}
+	decision, policyVersion, err := a.Authorization.Check(ctx, authorization.CheckRequest{
+		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
+		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID,
+	})
+	if err != nil {
+		return nil, err
 	}
-	if resolved.Type == "agent" {
-		request.Owner, err = a.ownerRequest(ctx, memberID, request.Permission, request.ResourceSpace, request.ResourceGroup, request.ResourceOwner, 0)
-		if err != nil {
-			return nil, err
-		}
-	}
-	decision := engine.Check(request)
 	return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, decision, policyVersion)
 }
 
@@ -247,35 +218,6 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		}
 	}
 	return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
-}
-
-func (a *API) ownerRequest(ctx context.Context, memberID, permission, spaceID, groupID, resourceOwner string, depth int) (*engine.Request, error) {
-	if depth >= 8 || a.Agents == nil || a.Authorization == nil {
-		return nil, apierr.New("OWNER_INACTIVE", "agent owner chain is invalid")
-	}
-	ownerID, err := a.Agents.Owner(ctx, memberID)
-	if err != nil {
-		return nil, err
-	}
-	assignments, _, err := a.Authorization.Assignments(ctx, ownerID)
-	if err != nil {
-		return nil, err
-	}
-	owner, err := a.Authorization.GetMember(ctx, ownerID, spaceID)
-	if err != nil {
-		return nil, err
-	}
-	// Owner-envelope evaluation answers whether the owner could perform the
-	// same action. Approval is a property of the acting Agent request; it must
-	// not be required recursively just to establish the owner's upper bound.
-	req := &engine.Request{MemberID: ownerID, PrincipalType: owner.Kind, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID, ResourceOwner: resourceOwner, Assignments: assignments, SkipApproval: true}
-	if owner.Kind == "agent" {
-		req.Owner, err = a.ownerRequest(ctx, ownerID, permission, spaceID, groupID, resourceOwner, depth+1)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return req, nil
 }
 
 func (a *API) writeDecision(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision) (*CheckOutput, error) {

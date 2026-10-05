@@ -9,6 +9,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -115,20 +116,13 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 	}
 	requested := strings.Fields(r.Form.Get("scope"))
 	if len(requested) > 0 {
-		assignments, _, assignErr := h.Authorization.Assignments(r.Context(), actor.MemberID)
-		if assignErr != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
-			return
-		}
 		for _, permission := range requested {
-			allowed := false
-			for _, assignment := range assignments {
-				if contains(assignment.Permissions, permission) && (len(assignment.PrincipalKinds) == 0 || contains(assignment.PrincipalKinds, "agent")) {
-					allowed = true
-					break
-				}
+			decision, _, checkErr := h.Authorization.Check(r.Context(), authorization.CheckRequest{MemberID: actor.MemberID, Permission: permission, ResourceSpace: actor.SpaceID})
+			if checkErr != nil {
+				writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+				return
 			}
-			if !allowed {
+			if decision.Effect != engine.Allow {
 				writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
 				return
 			}
@@ -140,14 +134,6 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"})
-}
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 func (h HTTP) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, apierr.New("not_implemented", "protocol operation is not enabled for this deployment"))

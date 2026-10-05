@@ -10,6 +10,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
@@ -116,12 +117,16 @@ func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOu
 	if a.Authorization == nil || a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
-	allowed, err := a.Authorization.HasPermission(ctx, memberID, "auth.agents:create")
+	member, err := a.Authorization.GetMemberAnySpace(ctx, memberID)
 	if err != nil {
 		return nil, err
 	}
-	if !allowed {
-		return nil, apierr.New("PERMISSION_DENIED", "the current member cannot create agents")
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: memberID, Permission: "auth.agents:create", ResourceSpace: member.SpaceID, ResourceOwner: memberID})
+	if err != nil {
+		return nil, err
+	}
+	if decision.Effect != engine.Allow {
+		return nil, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 	}
 	var expires time.Time
 	if in.Body.ExpiresAt != nil {
@@ -145,6 +150,9 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 	}
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
+	}
+	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
+		return nil, err
 	}
 	key, err := a.Agents.Rotate(ctx, memberID, in.ID)
 	if err != nil {
@@ -191,6 +199,9 @@ func (a *API) stopAgent(ctx context.Context, in *agentPathInput) (*agentAccepted
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
+	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
+		return nil, err
+	}
 	if err := a.Agents.Stop(ctx, memberID, in.ID); err != nil {
 		return nil, err
 	}
@@ -205,6 +216,9 @@ func (a *API) deleteAgent(ctx context.Context, in *agentPathInput) (*agentAccept
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
+	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
+		return nil, err
+	}
 	if err := a.Agents.Delete(ctx, memberID, in.ID); err != nil {
 		return nil, err
 	}
@@ -215,6 +229,35 @@ func acceptedAgent() *agentAcceptedOutput {
 	out := &agentAcceptedOutput{}
 	out.Body.Data.Accepted = true
 	return out
+}
+
+func (a *API) authorizeAgentAction(ctx context.Context, actorID, targetID, permission string) error {
+	if a.Authorization == nil || a.Agents == nil {
+		return apierr.New("UNAVAILABLE", "authorization is unavailable")
+	}
+	member, err := a.Authorization.GetMemberAnySpace(ctx, actorID)
+	if err != nil {
+		return err
+	}
+	target, err := a.Agents.Get(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: actorID, Permission: permission, ResourceSpace: target.SpaceID, ResourceOwner: target.ID})
+	if err != nil {
+		return err
+	}
+	if decision.Effect != engine.Allow {
+		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+	}
+	canManage, err := a.Agents.CanManage(ctx, member.ID, target.ID)
+	if err != nil {
+		return err
+	}
+	if !canManage {
+		return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
+	}
+	return nil
 }
 
 func (a *API) currentMember(ctx context.Context, authorization string) (string, string, error) {

@@ -7,6 +7,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
@@ -110,7 +111,7 @@ type createdSpaceData struct {
 }
 
 func (a *API) registerAuthorizationRoutes(api huma.API) {
-	route.Register(api, route.Spec{Name: "spaces.create", Method: "POST", Path: "/v1/spaces", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.Human}}, a.createSpace)
+	route.Register(api, route.Spec{Name: "spaces.create", Method: "POST", Path: "/v1/spaces", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.createSpace)
 	route.Register(api, route.Spec{Name: "spaces.get", Method: "GET", Path: "/v1/spaces/{id}", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.getSpace)
 	route.Register(api, route.Spec{Name: "spaces.children", Method: "GET", Path: "/v1/spaces/{id}/children", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listChildren)
 	route.Register(api, route.Spec{Name: "members.list", Method: "GET", Path: "/v1/spaces/{id}/members", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listMembers)
@@ -122,10 +123,10 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.Spec{Name: "members.bindings.list", Method: "GET", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listBindings)
 	route.Register(api, route.Spec{Name: "members.bindings.create", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true, AuthoritativeCheck: true}, a.bindUser)
 	route.Register(api, route.Spec{Name: "members.bindings.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/members/{mid}/users/{user_id}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.unbindUser)
-	route.Register(api, route.Spec{Name: "roles.list", Method: "GET", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}}, a.listRoles)
-	route.Register(api, route.Spec{Name: "roles.create", Method: "POST", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createRole)
-	route.Register(api, route.Spec{Name: "grants.create", Method: "POST", Path: "/v1/spaces/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createGrant)
-	route.Register(api, route.Spec{Name: "grants.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/grants/{grant_id}", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.Human}}, a.revokeGrant)
+	route.Register(api, route.Spec{Name: "roles.list", Method: "GET", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.HumanAgent}}, a.listRoles)
+	route.Register(api, route.Spec{Name: "roles.create", Method: "POST", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createRole)
+	route.Register(api, route.Spec{Name: "grants.create", Method: "POST", Path: "/v1/spaces/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createGrant)
+	route.Register(api, route.Spec{Name: "grants.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/grants/{grant_id}", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}}, a.revokeGrant)
 }
 
 func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authorizationDataOutput[createdSpaceData], error) {
@@ -177,11 +178,8 @@ func (a *API) listChildren(ctx context.Context, in *spacePathInput) (*authorizat
 }
 
 func (a *API) listMembers(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Member], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
+	_, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
 	if err != nil {
-		return nil, err
-	}
-	if _, err := a.Authorization.HasPermission(ctx, actor.ID, "auth.members:read"); err != nil {
 		return nil, err
 	}
 	members, err := a.Authorization.ListMembers(ctx, in.ID)
@@ -294,11 +292,8 @@ func acceptedResponse() *authorizationDataOutput[acceptedData] {
 }
 
 func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Role], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	_, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
 	if err != nil {
-		return nil, err
-	}
-	if _, err := a.Authorization.HasPermission(ctx, actor.ID, "auth.roles:manage"); err != nil {
 		return nil, err
 	}
 	roles, err := a.Authorization.ListRoles(ctx, in.ID)
@@ -360,31 +355,49 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 }
 
 func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
-	claims, err := a.authenticateHuman(ctx, authorizationHeader)
+	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
 		return authorization.Member{}, err
 	}
 	if a.Authorization == nil {
 		return authorization.Member{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
-	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+	var member authorization.Member
+	if claims.Type == "agent" {
+		memberID := claims.MemberID
+		if memberID == "" {
+			memberID = claims.Subject
+		}
+		member, err = a.Authorization.GetMemberAnySpace(ctx, memberID)
+	} else if claims.MemberID != "" {
+		bound, boundErr := a.Authorization.UserBoundToMember(ctx, claims.Subject, claims.MemberID)
+		if boundErr != nil {
+			return authorization.Member{}, boundErr
+		}
+		if !bound {
+			return authorization.Member{}, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
+		}
+		member, err = a.Authorization.GetMemberAnySpace(ctx, claims.MemberID)
+	} else {
+		member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+	}
 	if err != nil {
 		return authorization.Member{}, err
 	}
-	has, err := a.Authorization.HasPermission(ctx, member.ID, permission)
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID})
 	if err != nil {
 		return authorization.Member{}, err
 	}
-	if !has {
-		return authorization.Member{}, &apierr.Error{Code: "PERMISSION_DENIED", Message: "The current member does not have the required permission.", Details: map[string]string{"permission": permission}}
+	if decision.Effect != engine.Allow {
+		return authorization.Member{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 	}
 	return member, nil
 }
 
-func (a *API) authenticateHuman(ctx context.Context, authorizationHeader string) (security.Claims, error) {
+func (a *API) authenticatePrincipal(ctx context.Context, authorizationHeader string) (security.Claims, error) {
 	parts := strings.Fields(authorizationHeader)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A bearer access token is required.")
 	}
 	if a.Sessions == nil {
 		return security.Claims{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
@@ -393,7 +406,18 @@ func (a *API) authenticateHuman(ctx context.Context, authorizationHeader string)
 	if err != nil {
 		return security.Claims{}, err
 	}
-	if !active || claims.Subject == "" {
+	if !active || claims.Subject == "" || (claims.Type != "user" && claims.Type != "agent" && claims.Type != "access") {
+		return security.Claims{}, apierr.New("UNAUTHENTICATED", "The access token is invalid.")
+	}
+	return claims, nil
+}
+
+func (a *API) authenticateHuman(ctx context.Context, authorizationHeader string) (security.Claims, error) {
+	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if claims.Type == "agent" {
 		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A user access token is required.")
 	}
 	return claims, nil

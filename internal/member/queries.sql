@@ -47,6 +47,11 @@ ORDER BY created_at, id;
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: GetMemberForAuthorization :one
+SELECT id, space_id, name, type, binding_policy, status, created_at
+FROM members
+WHERE id = sqlc.arg(id);
+
 -- name: LockMemberInSpace :one
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members
@@ -58,6 +63,3 @@ UPDATE members SET status = sqlc.arg(status) WHERE id = sqlc.arg(id) AND space_i
 
 -- name: SetMemberBindingPolicy :exec
 UPDATE members SET binding_policy = sqlc.arg(binding_policy) WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
-
--- name: ListMemberPermissions :many
-SELECT m.id AS member_id, r.name AS role_name, p.key AS permission_key FROM members m JOIN member_roles mr ON mr.member_id=m.id JOIN roles r ON r.id=mr.role_id JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE m.id=sqlc.arg(member_id);

@@ -17,12 +17,12 @@ func TestCheckRespectsGrantScopeAndDefaultDeny(t *testing.T) {
 		{
 			name:    "space grant denies a different resource",
 			request: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_2", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}},
-			want:    Deny, code: "missing_permission",
+			want:    Deny, code: "SCOPE_OUT_OF_BOUNDS",
 		},
 		{
 			name:    "self grant requires owner",
 			request: Request{MemberID: "mem_1", Permission: "profile:read", ResourceSpace: "spc_1", ResourceOwner: "mem_2", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"profile:read"}, Scope: Scope{Kind: "self"}}}},
-			want:    Deny, code: "missing_permission",
+			want:    Deny, code: "SCOPE_OUT_OF_BOUNDS",
 		},
 		{
 			name:    "global grant matches any resource",

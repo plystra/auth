@@ -17,11 +17,6 @@ type Member struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`
 }
-type Permission struct {
-	MemberID string
-	Role     string
-	Key      string
-}
 
 func (s *Service) Create(ctx context.Context, spaceID, name, kind string) (Member, error) {
 	typeName := kind
@@ -51,15 +46,4 @@ func (s *Service) ForUser(ctx context.Context, userID, spaceID string) (Member, 
 		return Member{}, e
 	}
 	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type}, nil
-}
-func (s *Service) Permissions(ctx context.Context, memberID string) ([]Permission, error) {
-	rows, e := s.Store.Queries().ListMemberPermissions(ctx, db.ListMemberPermissionsParams{MemberID: memberID})
-	if e != nil {
-		return nil, e
-	}
-	out := make([]Permission, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, Permission{MemberID: r.MemberID, Role: r.RoleName, Key: r.PermissionKey})
-	}
-	return out, nil
 }

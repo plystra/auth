@@ -479,7 +479,7 @@ func (q *Queries) CreateMemberWithPolicy(ctx context.Context, arg CreateMemberWi
 }
 
 const createPermission = `-- name: CreatePermission :one
-INSERT INTO permissions (id, key, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET description=EXCLUDED.description RETURNING id, key, description, created_at
+INSERT INTO permissions (id, key, description) VALUES ($1, $2, $3) ON CONFLICT (key) DO UPDATE SET description=EXCLUDED.description RETURNING id, key, description, status, created_at
 `
 
 type CreatePermissionParams struct {
@@ -492,6 +492,7 @@ type CreatePermissionRow struct {
 	ID          string             `json:"id"`
 	Key         string             `json:"key"`
 	Description string             `json:"description"`
+	Status      string             `json:"status"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -502,6 +503,7 @@ func (q *Queries) CreatePermission(ctx context.Context, arg CreatePermissionPara
 		&i.ID,
 		&i.Key,
 		&i.Description,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -774,6 +776,44 @@ func (q *Queries) GetGrantInSpace(ctx context.Context, arg GetGrantInSpaceParams
 	return i, err
 }
 
+const getGroupInSpace = `-- name: GetGroupInSpace :one
+SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
+FROM groups
+WHERE id = $1 AND space_id = $2
+`
+
+type GetGroupInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+type GetGroupInSpaceRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	ParentID      pgtype.Text        `json:"parent_id"`
+	Kind          string             `json:"kind"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetGroupInSpace(ctx context.Context, arg GetGroupInSpaceParams) (GetGroupInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, getGroupInSpace, arg.ID, arg.SpaceID)
+	var i GetGroupInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ParentID,
+		&i.Kind,
+		&i.OwnerMemberID,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const getMemberForAgentOwner = `-- name: GetMemberForAgentOwner :one
 SELECT id, space_id, name, type, status, version, home_group_id, expires_at
 FROM members
@@ -807,6 +847,41 @@ func (q *Queries) GetMemberForAgentOwner(ctx context.Context, arg GetMemberForAg
 		&i.Version,
 		&i.HomeGroupID,
 		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const getMemberForAuthorization = `-- name: GetMemberForAuthorization :one
+SELECT id, space_id, name, type, binding_policy, status, created_at
+FROM members
+WHERE id = $1
+`
+
+type GetMemberForAuthorizationParams struct {
+	ID string `json:"id"`
+}
+
+type GetMemberForAuthorizationRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetMemberForAuthorization(ctx context.Context, arg GetMemberForAuthorizationParams) (GetMemberForAuthorizationRow, error) {
+	row := q.db.QueryRow(ctx, getMemberForAuthorization, arg.ID)
+	var i GetMemberForAuthorizationRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Type,
+		&i.BindingPolicy,
+		&i.Status,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -896,7 +971,7 @@ func (q *Queries) GetMemberVersion(ctx context.Context, arg GetMemberVersionPara
 }
 
 const getPermissionByKey = `-- name: GetPermissionByKey :one
-SELECT id, key, description, created_at FROM permissions WHERE key=$1
+SELECT id, key, description, status, created_at FROM permissions WHERE key=$1
 `
 
 type GetPermissionByKeyParams struct {
@@ -907,6 +982,7 @@ type GetPermissionByKeyRow struct {
 	ID          string             `json:"id"`
 	Key         string             `json:"key"`
 	Description string             `json:"description"`
+	Status      string             `json:"status"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -917,6 +993,7 @@ func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKey
 		&i.ID,
 		&i.Key,
 		&i.Description,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -1176,10 +1253,10 @@ WITH RECURSIVE member_groups AS (
 )
 SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
        ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
-       p.key AS permission_key, p.enabled, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
+       p.key AS permission_key, p.status, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
 LEFT JOIN roles r ON r.id = ag.role_id
-JOIN permissions p ON p.enabled = true AND (
+JOIN permissions p ON p.status = 'active' AND (
     (ag.role_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM role_permissions rp
         WHERE rp.role_id = ag.role_id AND rp.permission_id = p.id
@@ -1190,7 +1267,7 @@ JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = $1 OR mg.group_id IS NOT NULL)
   AND ag.revoked_at IS NULL
-  AND p.enabled = true
+  AND p.status = 'active'
 ORDER BY ag.id, p.key
 `
 
@@ -1208,7 +1285,7 @@ type ListMemberAssignmentsRow struct {
 	AnchorGroupID   pgtype.Text `json:"anchor_group_id"`
 	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
 	PermissionKey   string      `json:"permission_key"`
-	Enabled         bool        `json:"enabled"`
+	Status          string      `json:"status"`
 	Delegable       bool        `json:"delegable"`
 	PrincipalKinds  []byte      `json:"principal_kinds"`
 	AgentApproval   string      `json:"agent_approval"`
@@ -1234,7 +1311,7 @@ func (q *Queries) ListMemberAssignments(ctx context.Context, arg ListMemberAssig
 			&i.AnchorGroupID,
 			&i.GranteeMemberID,
 			&i.PermissionKey,
-			&i.Enabled,
+			&i.Status,
 			&i.Delegable,
 			&i.PrincipalKinds,
 			&i.AgentApproval,
@@ -1297,40 +1374,6 @@ func (q *Queries) ListMemberBindings(ctx context.Context, arg ListMemberBindings
 	return items, nil
 }
 
-const listMemberPermissions = `-- name: ListMemberPermissions :many
-SELECT m.id AS member_id, r.name AS role_name, p.key AS permission_key FROM members m JOIN member_roles mr ON mr.member_id=m.id JOIN roles r ON r.id=mr.role_id JOIN role_permissions rp ON rp.role_id=r.id JOIN permissions p ON p.id=rp.permission_id WHERE m.id=$1
-`
-
-type ListMemberPermissionsParams struct {
-	MemberID string `json:"member_id"`
-}
-
-type ListMemberPermissionsRow struct {
-	MemberID      string `json:"member_id"`
-	RoleName      string `json:"role_name"`
-	PermissionKey string `json:"permission_key"`
-}
-
-func (q *Queries) ListMemberPermissions(ctx context.Context, arg ListMemberPermissionsParams) ([]ListMemberPermissionsRow, error) {
-	rows, err := q.db.Query(ctx, listMemberPermissions, arg.MemberID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []ListMemberPermissionsRow{}
-	for rows.Next() {
-		var i ListMemberPermissionsRow
-		if err := rows.Scan(&i.MemberID, &i.RoleName, &i.PermissionKey); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listMembersInSpace = `-- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = $1 AND status <> 'removed'
@@ -1380,7 +1423,7 @@ func (q *Queries) ListMembersInSpace(ctx context.Context, arg ListMembersInSpace
 }
 
 const listRolePermissions = `-- name: ListRolePermissions :many
-SELECT p.key, p.enabled, p.delegable
+SELECT p.key, p.status, p.delegable
 FROM role_permissions rp
 JOIN permissions p ON p.id = rp.permission_id
 WHERE rp.role_id = $1
@@ -1393,7 +1436,7 @@ type ListRolePermissionsParams struct {
 
 type ListRolePermissionsRow struct {
 	Key       string `json:"key"`
-	Enabled   bool   `json:"enabled"`
+	Status    string `json:"status"`
 	Delegable bool   `json:"delegable"`
 }
 
@@ -1406,7 +1449,7 @@ func (q *Queries) ListRolePermissions(ctx context.Context, arg ListRolePermissio
 	items := []ListRolePermissionsRow{}
 	for rows.Next() {
 		var i ListRolePermissionsRow
-		if err := rows.Scan(&i.Key, &i.Enabled, &i.Delegable); err != nil {
+		if err := rows.Scan(&i.Key, &i.Status, &i.Delegable); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

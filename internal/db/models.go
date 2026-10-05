@@ -219,11 +219,11 @@ type Permission struct {
 	Key            string             `json:"key"`
 	Description    string             `json:"description"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	Enabled        bool               `json:"enabled"`
 	Delegable      bool               `json:"delegable"`
 	Risk           string             `json:"risk"`
 	PrincipalKinds []byte             `json:"principal_kinds"`
 	AgentApproval  string             `json:"agent_approval"`
+	Status         string             `json:"status"`
 }
 
 type RateLimitBucket struct {

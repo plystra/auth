@@ -467,3 +467,26 @@ ALTER TABLE authorization_grants
 CREATE INDEX IF NOT EXISTS authorization_grants_inline_idx
     ON authorization_grants USING gin (permission_keys)
     WHERE permission_keys IS NOT NULL AND revoked_at IS NULL;
+
+
+ALTER TABLE permissions
+    ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'permissions_status_check'
+          AND conrelid = 'permissions'::regclass
+    ) THEN
+        ALTER TABLE permissions
+            ADD CONSTRAINT permissions_status_check
+            CHECK (status IN ('active', 'deprecated', 'disabled'));
+    END IF;
+END $$;
+
+UPDATE permissions
+SET status = CASE WHEN enabled THEN 'active' ELSE 'disabled' END
+WHERE status = 'active' AND enabled = false;
+
+ALTER TABLE permissions DROP COLUMN IF EXISTS enabled;

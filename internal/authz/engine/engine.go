@@ -2,7 +2,6 @@ package engine
 
 import (
 	"sort"
-	"strings"
 )
 
 type Effect string
@@ -27,15 +26,17 @@ type Scope struct {
 	IncludeDescendants bool
 }
 type Request struct {
-	MemberID      string
-	PrincipalType string
-	Permission    string
-	ResourceSpace string
-	ResourceGroup string
-	ResourceOwner string
-	Assignments   []Assignment
-	Owner         *Request
-	ApprovalValid bool
+	MemberID               string
+	PrincipalType          string
+	Permission             string
+	ResourceSpace          string
+	ResourceSpaceAncestors []string
+	ResourceGroup          string
+	ResourceGroupAncestors []string
+	ResourceOwner          string
+	Assignments            []Assignment
+	Owner                  *Request
+	ApprovalValid          bool
 	// SkipApproval is used only while evaluating an Agent's owner envelope.
 	// Approval belongs to the acting Agent request and must not make an
 	// otherwise valid owner permission disappear from the envelope.
@@ -53,6 +54,10 @@ func Check(in Request) Decision {
 		return Decision{Effect: Deny, Code: "invalid_subject", Trace: []string{"missing subject or permission"}}
 	}
 	matches := []Assignment{}
+	sawPermission := false
+	sawPrincipalKind := false
+	sawEnvelope := false
+	sawScope := false
 	for _, a := range in.Assignments {
 		if a.MemberID != in.MemberID {
 			continue
@@ -60,24 +65,32 @@ func Check(in Request) Decision {
 		if !contains(a.Permissions, in.Permission) {
 			continue
 		}
+		sawPermission = true
 		if in.PrincipalType != "" && len(a.PrincipalKinds) > 0 && !contains(a.PrincipalKinds, in.PrincipalType) {
+			sawPrincipalKind = true
 			continue
 		}
 		if len(a.Envelope) > 0 && !contains(a.Envelope, in.Permission) {
+			sawEnvelope = true
 			continue
 		}
 		if !scopeContains(a.Scope, in) {
+			sawScope = true
 			continue
 		}
 		matches = append(matches, a)
 	}
 	if len(matches) == 0 {
-		code := "missing_permission"
-		for _, a := range in.Assignments {
-			if a.MemberID == in.MemberID && contains(a.Permissions, in.Permission) && len(a.Envelope) > 0 && !contains(a.Envelope, in.Permission) {
-				code = "ENVELOPE_EXCLUDED"
-				break
-			}
+		code := "NO_MATCHING_PERMISSION"
+		switch {
+		case sawPrincipalKind:
+			code = "PRINCIPAL_KIND_NOT_ALLOWED"
+		case sawEnvelope:
+			code = "ENVELOPE_EXCLUDED"
+		case sawScope:
+			code = "SCOPE_OUT_OF_BOUNDS"
+		case !sawPermission:
+			code = "NO_MATCHING_PERMISSION"
 		}
 		return Decision{Effect: Deny, Code: code, Trace: []string{"no matching assignment"}}
 	}
@@ -106,7 +119,7 @@ func scopeContains(s Scope, in Request) bool {
 		if s.Anchor == "" {
 			return false
 		}
-		return s.Anchor == in.ResourceSpace || s.IncludeDescendants && descendant(s.Anchor, in.ResourceSpace)
+		return s.Anchor == in.ResourceSpace || s.IncludeDescendants && contains(in.ResourceSpaceAncestors, s.Anchor)
 	}
 	switch s.Kind {
 	case "global":
@@ -122,17 +135,16 @@ func scopeContains(s Scope, in Request) bool {
 	case "space":
 		return s.Anchor != "" && s.Anchor == in.ResourceSpace
 	case "space_tree":
-		return s.Anchor != "" && (s.Anchor == in.ResourceSpace || descendant(s.Anchor, in.ResourceSpace))
-	case "group", "group_tree":
+		return s.Anchor != "" && (s.Anchor == in.ResourceSpace || contains(in.ResourceSpaceAncestors, s.Anchor))
+	case "group":
 		return s.Anchor != "" && s.Anchor == in.ResourceGroup
+	case "group_tree":
+		return s.Anchor != "" && (s.Anchor == in.ResourceGroup || contains(in.ResourceGroupAncestors, s.Anchor))
 	default:
 		return false
 	}
 }
 
-func descendant(anchor, resource string) bool {
-	return len(resource) > len(anchor) && strings.HasPrefix(resource, anchor+"/")
-}
 func contains(ss []string, v string) bool {
 	for _, s := range ss {
 		if s == v {

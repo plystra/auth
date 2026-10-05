@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -21,6 +22,220 @@ import (
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 
 type Service struct{ Store *store.Store }
+
+// CheckRequest describes the persisted facts needed by the authorization
+// engine. Callers provide only the subject and resource identity; the service
+// resolves member type, grants, scope ancestry, and Agent ownership from the
+// database before invoking engine.Check.
+type CheckRequest struct {
+	MemberID      string
+	Permission    string
+	ResourceSpace string
+	ResourceGroup string
+	ResourceOwner string
+	ApprovalValid bool
+}
+
+// Check is the single authorization decision entry point shared by all
+// interaction planes and state-changing services.
+func (s *Service) Check(ctx context.Context, in CheckRequest) (engine.Decision, int64, error) {
+	return s.checkQueries(ctx, s.Store.Queries(), in, 0)
+}
+
+// CheckTx evaluates the same decision using an existing business transaction.
+// It keeps authorization and the mutation on the same database snapshot.
+func (s *Service) CheckTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
+	decision, _, err := s.checkQueries(ctx, q, in, 0)
+	return decision, err
+}
+
+func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckRequest, depth int) (engine.Decision, int64, error) {
+	if strings.TrimSpace(in.MemberID) == "" || strings.TrimSpace(in.Permission) == "" {
+		return engine.Decision{Effect: engine.Deny, Code: "INVALID_SUBJECT"}, 0, nil
+	}
+	permission, permissionErr := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: in.Permission})
+	if errors.Is(permissionErr, pgx.ErrNoRows) {
+		return engine.Decision{Effect: engine.Deny, Code: "UNKNOWN_PERMISSION"}, 0, nil
+	}
+	if permissionErr != nil {
+		return engine.Decision{}, 0, permissionErr
+	}
+	if permission.Status == "disabled" {
+		return engine.Decision{Effect: engine.Deny, Code: "PERMISSION_DISABLED"}, 0, nil
+	}
+	if depth > 8 {
+		return engine.Decision{Effect: engine.Deny, Code: "OWNER_INACTIVE"}, 0, nil
+	}
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: in.MemberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
+	}
+	if err != nil {
+		return engine.Decision{}, 0, err
+	}
+	if member.Status != "active" {
+		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
+	}
+	if in.ResourceSpace == "" {
+		in.ResourceSpace = member.SpaceID
+	}
+	space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: in.ResourceSpace})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, 0, nil
+	}
+	if err != nil {
+		return engine.Decision{}, 0, err
+	}
+	spaceAncestors, err := spaceAncestorsQueries(ctx, q, in.ResourceSpace)
+	if err != nil {
+		return engine.Decision{}, 0, err
+	}
+	var groupAncestors []string
+	if in.ResourceGroup != "" {
+		group, groupErr := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: in.ResourceGroup, SpaceID: in.ResourceSpace})
+		if errors.Is(groupErr, pgx.ErrNoRows) {
+			return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_NOT_FOUND"}, space.PolicyVersion, nil
+		}
+		if groupErr != nil {
+			return engine.Decision{}, 0, groupErr
+		}
+		if group.Status != "active" {
+			return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_INACTIVE"}, space.PolicyVersion, nil
+		}
+		groupAncestors, err = groupAncestorsQueries(ctx, q, in.ResourceGroup, in.ResourceSpace)
+		if err != nil {
+			return engine.Decision{}, 0, err
+		}
+	}
+	assignments, _, err := s.assignmentsQueries(ctx, q, in.MemberID)
+	if err != nil {
+		return engine.Decision{}, 0, err
+	}
+	request := engine.Request{
+		MemberID:               in.MemberID,
+		PrincipalType:          member.Type,
+		Permission:             in.Permission,
+		ResourceSpace:          in.ResourceSpace,
+		ResourceSpaceAncestors: spaceAncestors,
+		ResourceGroup:          in.ResourceGroup,
+		ResourceGroupAncestors: groupAncestors,
+		ResourceOwner:          in.ResourceOwner,
+		Assignments:            assignments,
+		ApprovalValid:          in.ApprovalValid,
+	}
+	if in.ResourceOwner != "" && in.ResourceOwner != in.MemberID {
+		if owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner}); ownerErr == nil && owned {
+			request.SelfOwners = []string{in.ResourceOwner}
+		}
+	}
+	if member.Type == "agent" {
+		owner, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: in.MemberID})
+		if ownerErr == nil && owner.OwnerMemberID.Valid && owner.OwnerMemberID.String != "" {
+			// Rebuild the owner request from the same persisted facts. The owner
+			// decision itself is intentionally recomputed by engine.Check so the
+			// Agent result preserves OWNER_ENVELOPE_EXCLUDED.
+			ownerRequest, buildErr := s.ownerRequestQueries(ctx, q, owner.OwnerMemberID.String, in, depth+1)
+			if buildErr != nil {
+				return engine.Decision{}, 0, buildErr
+			}
+			request.Owner = ownerRequest
+		}
+	}
+	return engine.Check(request), space.PolicyVersion, nil
+}
+
+func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, memberID string, in CheckRequest, depth int) (*engine.Request, error) {
+	if depth > 8 {
+		return nil, nil
+	}
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if err != nil || member.Status != "active" {
+		return nil, nil
+	}
+	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
+	if err != nil {
+		return nil, err
+	}
+	spaceAncestors, err := spaceAncestorsQueries(ctx, q, in.ResourceSpace)
+	if err != nil {
+		return nil, err
+	}
+	var groupAncestors []string
+	if in.ResourceGroup != "" {
+		groupAncestors, err = groupAncestorsQueries(ctx, q, in.ResourceGroup, in.ResourceSpace)
+		if err != nil {
+			return nil, err
+		}
+	}
+	request := &engine.Request{MemberID: memberID, PrincipalType: member.Type, Permission: in.Permission, ResourceSpace: in.ResourceSpace, ResourceSpaceAncestors: spaceAncestors, ResourceGroup: in.ResourceGroup, ResourceGroupAncestors: groupAncestors, ResourceOwner: in.ResourceOwner, Assignments: assignments, SkipApproval: true}
+	if in.ResourceOwner != "" && in.ResourceOwner != memberID {
+		if owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: memberID, TargetMemberID: in.ResourceOwner}); ownerErr == nil && owned {
+			request.SelfOwners = []string{in.ResourceOwner}
+		}
+	}
+	if member.Type == "agent" {
+		owner, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+		if ownerErr == nil && owner.OwnerMemberID.Valid && owner.OwnerMemberID.String != "" {
+			request.Owner, err = s.ownerRequestQueries(ctx, q, owner.OwnerMemberID.String, in, depth+1)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	return request, nil
+}
+
+func spaceAncestorsQueries(ctx context.Context, q *db.Queries, spaceID string) ([]string, error) {
+	ancestors := make([]string, 0, 4)
+	seen := map[string]struct{}{spaceID: {}}
+	current := spaceID
+	for len(ancestors) < 64 {
+		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: current})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ancestors, nil
+			}
+			return nil, err
+		}
+		if !space.ParentID.Valid || space.ParentID.String == "" {
+			return ancestors, nil
+		}
+		parent := space.ParentID.String
+		if _, ok := seen[parent]; ok {
+			return nil, apierr.New("INVALID_RESOURCE", "Space hierarchy contains a cycle")
+		}
+		seen[parent] = struct{}{}
+		ancestors = append(ancestors, parent)
+		current = parent
+	}
+	return nil, apierr.New("INVALID_RESOURCE", "Space hierarchy is too deep")
+}
+
+func groupAncestorsQueries(ctx context.Context, q *db.Queries, groupID, spaceID string) ([]string, error) {
+	ancestors := make([]string, 0, 4)
+	seen := map[string]struct{}{groupID: {}}
+	current := groupID
+	for len(ancestors) < 64 {
+		group, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: current, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return ancestors, nil
+			}
+			return nil, err
+		}
+		if !group.ParentID.Valid || group.ParentID.String == "" {
+			return ancestors, nil
+		}
+		parent := group.ParentID.String
+		if _, ok := seen[parent]; ok {
+			return nil, apierr.New("INVALID_RESOURCE", "group hierarchy contains a cycle")
+		}
+		seen[parent] = struct{}{}
+		ancestors = append(ancestors, parent)
+		current = parent
+	}
+	return nil, apierr.New("INVALID_RESOURCE", "group hierarchy is too deep")
+}
 
 type Space struct {
 	ID            string `json:"id"`
@@ -177,6 +392,34 @@ func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Memb
 	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
 }
 
+// GetMemberAnySpace resolves a live member without treating the requested
+// resource Space as the member's home Space. The authorization engine applies
+// the ancestor and scope rules after this lookup.
+func (s *Service) GetMemberAnySpace(ctx context.Context, memberID string) (Member, error) {
+	row, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Member{}, apierr.New("SUBJECT_NOT_FOUND", "The subject member was not found.")
+	}
+	if err != nil {
+		return Member{}, err
+	}
+	if row.Status != "active" {
+		return Member{}, apierr.New("ACTOR_MEMBER_INACTIVE", "The member is not active.")
+	}
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
+}
+
+func (s *Service) UserBoundToMember(ctx context.Context, userID, memberID string) (bool, error) {
+	row, err := s.Store.Queries().GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return row.Status == "active" && !row.RevokedAt.Valid && (!row.ExpiresAt.Valid || row.ExpiresAt.Time.After(time.Now().UTC())), nil
+}
+
 func (s *Service) PolicyVersion(ctx context.Context, spaceID string) (int64, error) {
 	row, err := s.Store.Queries().GetSpace(ctx, db.GetSpaceParams{ID: spaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -239,7 +482,7 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 	}
 	var out Member
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.members:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:manage", spaceID); err != nil {
 			return err
 		}
 		memberRow, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Type: kind, BindingPolicy: bindingPolicy})
@@ -284,7 +527,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		return apierr.New("VALIDATION_FAILED", "user_id is required")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
 			return err
 		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
@@ -310,7 +553,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if user.Status != "active" {
 			return apierr.New("CONFLICT", "user is not active")
 		}
-		if err := ensureAuthorityCoverageTx(ctx, q, actorMemberID, memberID); err != nil {
+		if err := s.authorityCoverageTx(ctx, q, actorMemberID, memberID); err != nil {
 			return err
 		}
 		count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
@@ -332,7 +575,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 
 func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
@@ -369,7 +612,7 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 		return apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
 			return err
 		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
@@ -403,7 +646,7 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 		return apierr.New("VALIDATION_FAILED", "member status is invalid")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.members:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:manage", spaceID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
@@ -464,10 +707,10 @@ func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, 
 	permissions = uniqueSorted(permissions)
 	var out Role
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.roles:manage"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.roles:manage", spaceID); err != nil {
 			return err
 		}
-		actorPermissions, err := permissionSetTx(ctx, q, actorMemberID)
+		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
 		if err != nil {
 			return err
 		}
@@ -504,7 +747,7 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.grants:assign"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID}); err != nil {
@@ -524,12 +767,12 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err != nil {
 			return err
 		}
-		actorPermissions, err := permissionSetTx(ctx, q, actorMemberID)
+		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
 		if err != nil {
 			return err
 		}
 		for _, permission := range rolePermissions {
-			if !permission.Enabled || !actorPermissions[permission.Key] {
+			if permission.Status != "active" || !actorPermissions[permission.Key] {
 				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The grant exceeds the actor's current authority.", Details: map[string]string{"permission": permission.Key}}
 			}
 		}
@@ -572,7 +815,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	}
 	var out Grant
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.grants:assign"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID}); err != nil {
@@ -581,7 +824,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 			}
 			return err
 		}
-		actorPermissions, err := permissionSetTx(ctx, q, actorMemberID)
+		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
 		if err != nil {
 			return err
 		}
@@ -612,7 +855,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 
 func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grantID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.grants:assign"); err != nil {
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
 			return err
 		}
 		row, err := q.GetGrantInSpace(ctx, db.GetGrantInSpaceParams{ID: grantID, SpaceID: spaceID})
@@ -633,7 +876,11 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 }
 
 func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.Assignment, int64, error) {
-	rows, err := s.Store.Queries().ListMemberAssignments(ctx, db.ListMemberAssignmentsParams{MemberID: pgtype.Text{String: memberID, Valid: true}})
+	return s.assignmentsQueries(ctx, s.Store.Queries(), memberID)
+}
+
+func (s *Service) assignmentsQueries(ctx context.Context, q *db.Queries, memberID string) ([]engine.Assignment, int64, error) {
+	rows, err := q.ListMemberAssignments(ctx, db.ListMemberAssignmentsParams{MemberID: pgtype.Text{String: memberID, Valid: true}})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -647,7 +894,10 @@ func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.As
 		if row.PolicyVersion > policyVersion {
 			policyVersion = row.PolicyVersion
 		}
-		item := aggs[row.GrantID]
+		// Keep each permission's directory facts with that permission. A role
+		// can contain entries with different principal kinds or approval rules.
+		aggregateKey := row.GrantID + "\x00" + row.PermissionKey
+		item := aggs[aggregateKey]
 		if item == nil {
 			anchor := ""
 			if row.AnchorSpaceID.Valid {
@@ -659,7 +909,7 @@ func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.As
 			var principalKinds []string
 			_ = json.Unmarshal(row.PrincipalKinds, &principalKinds)
 			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}, PrincipalKinds: principalKinds, AgentApprovalRequired: row.AgentApproval == "required"}, seen: map[string]struct{}{}}
-			aggs[row.GrantID] = item
+			aggs[aggregateKey] = item
 		}
 		if _, ok := item.seen[row.PermissionKey]; !ok {
 			item.assignment.Permissions = append(item.assignment.Permissions, row.PermissionKey)
@@ -673,30 +923,6 @@ func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.As
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Role < out[j].Role })
 	return out, policyVersion, nil
-}
-
-func (s *Service) HasPermission(ctx context.Context, memberID, permission string) (bool, error) {
-	assignments, _, err := s.Assignments(ctx, memberID)
-	if err != nil {
-		return false, err
-	}
-	for _, assignment := range assignments {
-		for _, key := range assignment.Permissions {
-			if key == permission {
-				return true, nil
-			}
-		}
-	}
-	legacy, err := s.Store.Queries().ListMemberPermissions(ctx, db.ListMemberPermissionsParams{MemberID: memberID})
-	if err != nil {
-		return false, err
-	}
-	for _, row := range legacy {
-		if row.PermissionKey == permission {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func addRolePermissions(ctx context.Context, q *db.Queries, roleID string, keys []string) error {
@@ -715,23 +941,26 @@ func addRolePermissions(ctx context.Context, q *db.Queries, roleID string, keys 
 	return nil
 }
 
-func requirePermissionTx(ctx context.Context, q *db.Queries, memberID, permission string) error {
-	permissions, err := permissionSetTx(ctx, q, memberID)
+func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, permission, spaceID string) error {
+	decision, err := s.CheckTx(ctx, q, CheckRequest{MemberID: memberID, Permission: permission, ResourceSpace: spaceID})
 	if err != nil {
 		return err
 	}
-	if !permissions[permission] {
-		return &apierr.Error{Code: "PERMISSION_DENIED", Message: "The current member does not have the required permission.", Details: map[string]string{"permission": permission}}
+	if decision.Effect == engine.Allow {
+		return nil
 	}
-	return nil
+	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 }
 
-func ensureAuthorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID, targetMemberID string) error {
-	actor, err := permissionSetTx(ctx, q, actorMemberID)
+// authorityCoverageTx is the temporary G8 compatibility check for binding
+// authority deltas. The authoritative incremental evaluator will replace this
+// key-only comparison; all ordinary permission decisions already use Check.
+func (s *Service) authorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID, targetMemberID string) error {
+	actor, err := authorityKeysTx(ctx, q, actorMemberID)
 	if err != nil {
 		return err
 	}
-	target, err := permissionSetTx(ctx, q, targetMemberID)
+	target, err := authorityKeysTx(ctx, q, targetMemberID)
 	if err != nil {
 		return err
 	}
@@ -743,20 +972,13 @@ func ensureAuthorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID
 	return nil
 }
 
-func permissionSetTx(ctx context.Context, q *db.Queries, memberID string) (map[string]bool, error) {
+func authorityKeysTx(ctx context.Context, q *db.Queries, memberID string) (map[string]bool, error) {
 	set := map[string]bool{}
 	rows, err := q.ListMemberAssignments(ctx, db.ListMemberAssignmentsParams{MemberID: pgtype.Text{String: memberID, Valid: true}})
 	if err != nil {
 		return nil, err
 	}
 	for _, row := range rows {
-		set[row.PermissionKey] = true
-	}
-	legacy, err := q.ListMemberPermissions(ctx, db.ListMemberPermissionsParams{MemberID: memberID})
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range legacy {
 		set[row.PermissionKey] = true
 	}
 	return set, nil
