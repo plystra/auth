@@ -7,17 +7,26 @@ import (
 )
 
 func main() {
-	data, err := os.ReadFile("migrations/0001_init.sql")
+	paths, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		panic(err)
 	}
-	lines := strings.Split(string(data), "\n")
 	var out []string
-	for _, line := range lines {
-		if strings.HasPrefix(strings.TrimSpace(line), "-- +goose") || strings.HasPrefix(strings.TrimSpace(line), "-- +goose") || strings.TrimSpace(line) == "-- +goose Down" {
-			continue
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			panic(err)
 		}
-		out = append(out, line)
+		lines := strings.Split(string(data), "\n")
+		for _, line := range lines {
+			if strings.TrimSpace(line) == "-- +goose Down" {
+				break
+			}
+			if strings.HasPrefix(strings.TrimSpace(line), "-- +goose") {
+				continue
+			}
+			out = append(out, line)
+		}
 	}
 	if err := os.MkdirAll("schema", 0755); err != nil {
 		panic(err)

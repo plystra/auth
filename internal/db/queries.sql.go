@@ -26,6 +26,23 @@ func (q *Queries) AssignRole(ctx context.Context, arg AssignRoleParams) error {
 	return err
 }
 
+const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
+UPDATE factors SET counter = $1::bigint, last_used_at = now()
+WHERE id = $2 AND counter < $1::bigint RETURNING id
+`
+
+type ConsumeTOTPStepParams struct {
+	Step int64  `json:"step"`
+	ID   string `json:"id"`
+}
+
+func (q *Queries) ConsumeTOTPStep(ctx context.Context, arg ConsumeTOTPStepParams) (string, error) {
+	row := q.db.QueryRow(ctx, consumeTOTPStep, arg.Step, arg.ID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
 const createFactor = `-- name: CreateFactor :one
 INSERT INTO factors (id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0)) RETURNING id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at
 `
@@ -284,6 +301,45 @@ func (q *Queries) ListMemberPermissions(ctx context.Context, arg ListMemberPermi
 	for rows.Next() {
 		var i ListMemberPermissionsRow
 		if err := rows.Scan(&i.MemberID, &i.RoleName, &i.PermissionKey); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockTOTPFactors = `-- name: LockTOTPFactors :many
+SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at FROM factors WHERE user_id = $1 AND kind = 'totp' ORDER BY id FOR UPDATE
+`
+
+type LockTOTPFactorsParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) LockTOTPFactors(ctx context.Context, arg LockTOTPFactorsParams) ([]Factor, error) {
+	rows, err := q.db.Query(ctx, lockTOTPFactors, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Factor{}
+	for rows.Next() {
+		var i Factor
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Kind,
+			&i.Name,
+			&i.SecretCiphertext,
+			&i.CredentialID,
+			&i.PublicKey,
+			&i.Counter,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

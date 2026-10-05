@@ -12,6 +12,7 @@ sql:
       - "internal/member"
       - "internal/grant"
       - "internal/store"
+      - "internal/operator/queries"
     gen:
       go:
         package: "db"

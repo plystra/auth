@@ -7,6 +7,8 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const countOperators = `-- name: CountOperators :one
@@ -51,6 +53,46 @@ func (q *Queries) GetOperator(ctx context.Context, arg GetOperatorParams) (Opera
 		&i.Active,
 		&i.CreatedAt,
 		&i.LastStepUpAt,
+	)
+	return i, err
+}
+
+const lockOperatorBootstrap = `-- name: LockOperatorBootstrap :exec
+SELECT pg_advisory_xact_lock(723615832001)
+`
+
+func (q *Queries) LockOperatorBootstrap(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockOperatorBootstrap)
+	return err
+}
+
+const lockOperatorIdentity = `-- name: LockOperatorIdentity :one
+SELECT o.user_id, o.capabilities, o.active, u.disabled_at, u.password_hash
+FROM operators o JOIN users u ON u.id = o.user_id WHERE o.user_id = $1
+FOR SHARE OF o, u
+`
+
+type LockOperatorIdentityParams struct {
+	UserID string `json:"user_id"`
+}
+
+type LockOperatorIdentityRow struct {
+	UserID       string             `json:"user_id"`
+	Capabilities []byte             `json:"capabilities"`
+	Active       bool               `json:"active"`
+	DisabledAt   pgtype.Timestamptz `json:"disabled_at"`
+	PasswordHash string             `json:"password_hash"`
+}
+
+func (q *Queries) LockOperatorIdentity(ctx context.Context, arg LockOperatorIdentityParams) (LockOperatorIdentityRow, error) {
+	row := q.db.QueryRow(ctx, lockOperatorIdentity, arg.UserID)
+	var i LockOperatorIdentityRow
+	err := row.Scan(
+		&i.UserID,
+		&i.Capabilities,
+		&i.Active,
+		&i.DisabledAt,
+		&i.PasswordHash,
 	)
 	return i, err
 }

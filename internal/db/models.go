@@ -135,6 +135,24 @@ type Operator struct {
 	LastStepUpAt pgtype.Timestamptz `json:"last_step_up_at"`
 }
 
+type OperatorSession struct {
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	TokenHash       []byte             `json:"token_hash"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt      pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	IdleExpiresAt   pgtype.Timestamptz `json:"idle_expires_at"`
+	AccessExpiresAt pgtype.Timestamptz `json:"access_expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	AssuranceLevel  int16              `json:"assurance_level"`
+	StepUpOperation pgtype.Text        `json:"step_up_operation"`
+	StepUpDigest    []byte             `json:"step_up_digest"`
+	StepUpExpiresAt pgtype.Timestamptz `json:"step_up_expires_at"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+}
+
 type OutboxEvent struct {
 	ID          string             `json:"id"`
 	Topic       string             `json:"topic"`

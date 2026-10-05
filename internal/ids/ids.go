@@ -24,6 +24,7 @@ type ApplicationID string
 type APIKeyID string
 type AgentID string
 type AuditID string
+type OperatorSessionID string
 
 type prefixer interface{ ~string }
 
@@ -33,17 +34,18 @@ func New[T prefixer](prefix string) T {
 func valid(v string, prefix string) bool {
 	return strings.HasPrefix(v, prefix+"_") && len(v) > len(prefix)+2
 }
-func (id UserID) Valid() bool          { return valid(string(id), "usr") }
-func (id SessionID) Valid() bool       { return valid(string(id), "ses") }
-func (id RefreshTokenID) Valid() bool  { return valid(string(id), "rft") }
-func (id RefreshFamilyID) Valid() bool { return valid(string(id), "rtf") }
-func (id FactorID) Valid() bool        { return valid(string(id), "fac") }
-func (id SpaceID) Valid() bool         { return valid(string(id), "spc") }
-func (id GroupID) Valid() bool         { return valid(string(id), "grp") }
-func (id MemberID) Valid() bool        { return valid(string(id), "mem") }
-func (id RoleID) Valid() bool          { return valid(string(id), "rol") }
-func (id PermissionID) Valid() bool    { return valid(string(id), "prm") }
-func (id ApplicationID) Valid() bool   { return valid(string(id), "app") }
-func (id APIKeyID) Valid() bool        { return valid(string(id), "key") }
-func (id AgentID) Valid() bool         { return valid(string(id), "agt") }
-func (id AuditID) Valid() bool         { return valid(string(id), "aud") }
+func (id UserID) Valid() bool            { return valid(string(id), "usr") }
+func (id SessionID) Valid() bool         { return valid(string(id), "ses") }
+func (id RefreshTokenID) Valid() bool    { return valid(string(id), "rft") }
+func (id RefreshFamilyID) Valid() bool   { return valid(string(id), "rtf") }
+func (id FactorID) Valid() bool          { return valid(string(id), "fac") }
+func (id SpaceID) Valid() bool           { return valid(string(id), "spc") }
+func (id GroupID) Valid() bool           { return valid(string(id), "grp") }
+func (id MemberID) Valid() bool          { return valid(string(id), "mem") }
+func (id RoleID) Valid() bool            { return valid(string(id), "rol") }
+func (id PermissionID) Valid() bool      { return valid(string(id), "prm") }
+func (id ApplicationID) Valid() bool     { return valid(string(id), "app") }
+func (id APIKeyID) Valid() bool          { return valid(string(id), "key") }
+func (id AgentID) Valid() bool           { return valid(string(id), "agt") }
+func (id AuditID) Valid() bool           { return valid(string(id), "aud") }
+func (id OperatorSessionID) Valid() bool { return valid(string(id), "ops") }

@@ -18,20 +18,25 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
+	"github.com/plystra/auth/internal/operator"
 	"github.com/plystra/auth/internal/plane/ops"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/plane/server"
 	"github.com/plystra/auth/internal/protocol"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/space"
@@ -86,11 +91,12 @@ func verifyCommand() *cobra.Command {
 	}}
 }
 func operatorCommand() *cobra.Command {
-	var email, password string
+	var userID string
 	cmd := &cobra.Command{Use: "operator", Short: "manage deployment operators"}
 	bootstrap := &cobra.Command{Use: "bootstrap", Short: "create the first operator through the local CLI", RunE: func(cmd *cobra.Command, args []string) error {
-		if strings.TrimSpace(email) == "" || password == "" {
-			return errors.New("--email and --password are required")
+		userID = strings.TrimSpace(userID)
+		if userID == "" {
+			return errors.New("--user-id is required")
 		}
 		c, e := loadConfig()
 		if e != nil {
@@ -101,8 +107,16 @@ func operatorCommand() *cobra.Command {
 			return e
 		}
 		defer st.Close()
-		var created, apiKey string
+		var created, apiKey, totpSecret string
+		dataKey, err := decodeDataKey(c.DataKey)
+		if err != nil {
+			return err
+		}
+		factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey)}
 		e = st.InTx(cmd.Context(), func(q *db.Queries) error {
+			if e := q.LockOperatorBootstrap(cmd.Context()); e != nil {
+				return e
+			}
 			count, e := q.CountOperators(cmd.Context())
 			if e != nil {
 				return e
@@ -110,21 +124,12 @@ func operatorCommand() *cobra.Command {
 			if count != 0 {
 				return errors.New("an operator already exists; use the operations plane")
 			}
-			normalized := strings.ToLower(strings.TrimSpace(email))
-			hash, e := security.DefaultPasswordHasher().Hash(password)
+			u, e := q.GetUserByID(cmd.Context(), db.GetUserByIDParams{ID: userID})
 			if e != nil {
-				return e
+				return fmt.Errorf("load bootstrap user: %w", e)
 			}
-			u, e := q.CreateUser(cmd.Context(), db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: normalized, EmailNormalized: normalized, PasswordHash: hash})
-			if e != nil {
-				return e
-			}
-			m, e := q.CreateMember(cmd.Context(), db.CreateMemberParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: account.DefaultSpaceID, Name: normalized, Kind: "user"})
-			if e != nil {
-				return e
-			}
-			if e = q.LinkUserMember(cmd.Context(), db.LinkUserMemberParams{UserID: u.ID, MemberID: m.ID}); e != nil {
-				return e
+			if u.DisabledAt.Valid {
+				return errors.New("bootstrap user is disabled")
 			}
 			caps, _ := json.Marshal([]string{"*"})
 			rawKey, prefix, keyHash, keyErr := application.GenerateSecret()
@@ -132,23 +137,27 @@ func operatorCommand() *cobra.Command {
 				return keyErr
 			}
 			apiKey = rawKey
-			if _, e = q.CreateAPIKey(cmd.Context(), db.CreateAPIKeyParams{ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash, Scopes: []byte(`["authz:check","tokens:introspect"]`)}); e != nil {
+			if _, e = q.CreateAPIKey(cmd.Context(), db.CreateAPIKeyParams{ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash, Scopes: []byte(`["auth.authz:check","auth.tokens:introspect"]`), ExpiresAt: pgtype.Timestamptz{Time: time.Now().UTC().Add(365 * 24 * time.Hour), Valid: true}}); e != nil {
 				return e
 			}
 			if e = q.CreateOperator(cmd.Context(), db.CreateOperatorParams{UserID: u.ID, Capabilities: caps}); e != nil {
 				return e
 			}
+			enrollment, e := factorSvc.BeginTOTPTx(cmd.Context(), q, u.ID, u.Email)
+			if e != nil {
+				return e
+			}
+			totpSecret = enrollment.Secret
 			created = u.ID
-			return nil
+			return audit.Write(cmd.Context(), q, "operator", u.ID, "ops.operator.bootstrap", u.ID, "success")
 		})
 		if e != nil {
 			return e
 		}
-		fmt.Printf("operator created: %s\\nbootstrap API key (shown once): %s\\n", created, apiKey)
+		fmt.Printf("operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", created, totpSecret, apiKey)
 		return nil
 	}}
-	bootstrap.Flags().StringVar(&email, "email", "", "operator email")
-	bootstrap.Flags().StringVar(&password, "password", "", "operator password")
+	bootstrap.Flags().StringVar(&userID, "user-id", "", "existing user ID to promote to the first operator")
 	cmd.AddCommand(bootstrap)
 	return cmd
 }
@@ -178,6 +187,11 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	settings := &space.Service{Store: st}
+	dataKey, e := decodeDataKey(c.DataKey)
+	if e != nil {
+		return e
+	}
+	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey)}
 	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	sessionSvc.Settings = func(ctx context.Context) (session.Settings, error) {
 		v, e := settings.Get(ctx)
@@ -191,7 +205,11 @@ func serve(ctx context.Context) error {
 	apps := &application.Service{Store: st}
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Sessions: sessionSvc}
-	opsAPI := &ops.API{Settings: settings, Signer: signer}
+	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
+	if e != nil {
+		return e
+	}
+	opsAPI := &ops.API{Settings: settings, Operators: opsSvc}
 	principalMux := http.NewServeMux()
 	serverMux := http.NewServeMux()
 	opsMux := http.NewServeMux()
@@ -248,6 +266,14 @@ func parseKeys(v string) [][]byte {
 		}
 	}
 	return out
+}
+
+func decodeDataKey(value string) (string, error) {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(value))
+	if err != nil || len(b) != 32 {
+		return "", errors.New("data key must be base64 encoded 32 bytes")
+	}
+	return string(b), nil
 }
 func randomID(prefix string) string {
 	b := make([]byte, 16)

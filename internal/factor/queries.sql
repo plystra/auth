@@ -6,3 +6,10 @@ SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, co
 
 -- name: TouchFactor :exec
 UPDATE factors SET last_used_at = now(), counter = COALESCE(sqlc.narg(counter), counter) WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+
+-- name: LockTOTPFactors :many
+SELECT * FROM factors WHERE user_id = sqlc.arg(user_id) AND kind = 'totp' ORDER BY id FOR UPDATE;
+
+-- name: ConsumeTOTPStep :one
+UPDATE factors SET counter = sqlc.arg(step)::bigint, last_used_at = now()
+WHERE id = sqlc.arg(id) AND counter < sqlc.arg(step)::bigint RETURNING id;

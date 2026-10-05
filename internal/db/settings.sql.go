@@ -33,6 +33,28 @@ func (q *Queries) GetInstanceSettings(ctx context.Context) (InstanceSetting, err
 	return i, err
 }
 
+const lockInstanceSettings = `-- name: LockInstanceSettings :one
+SELECT id, registration_mode, require_email_verification, allowed_origins, password_min_length, access_token_ttl_seconds, refresh_token_ttl_seconds, refresh_idle_ttl_seconds, updated_at, updated_by FROM instance_settings WHERE id = true FOR UPDATE
+`
+
+func (q *Queries) LockInstanceSettings(ctx context.Context) (InstanceSetting, error) {
+	row := q.db.QueryRow(ctx, lockInstanceSettings)
+	var i InstanceSetting
+	err := row.Scan(
+		&i.ID,
+		&i.RegistrationMode,
+		&i.RequireEmailVerification,
+		&i.AllowedOrigins,
+		&i.PasswordMinLength,
+		&i.AccessTokenTtlSeconds,
+		&i.RefreshTokenTtlSeconds,
+		&i.RefreshIdleTtlSeconds,
+		&i.UpdatedAt,
+		&i.UpdatedBy,
+	)
+	return i, err
+}
+
 const updateInstanceSettings = `-- name: UpdateInstanceSettings :one
 UPDATE instance_settings SET registration_mode = COALESCE($1, registration_mode), require_email_verification = COALESCE($2, require_email_verification), allowed_origins = COALESCE($3, allowed_origins), password_min_length = COALESCE($4, password_min_length), access_token_ttl_seconds = COALESCE($5, access_token_ttl_seconds), refresh_token_ttl_seconds = COALESCE($6, refresh_token_ttl_seconds), refresh_idle_ttl_seconds = COALESCE($7, refresh_idle_ttl_seconds), updated_at = now(), updated_by = $8 WHERE id = true RETURNING id, registration_mode, require_email_verification, allowed_origins, password_min_length, access_token_ttl_seconds, refresh_token_ttl_seconds, refresh_idle_ttl_seconds, updated_at, updated_by
 `

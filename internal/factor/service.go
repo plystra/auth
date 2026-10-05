@@ -11,12 +11,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/store"
+	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -29,6 +30,8 @@ type Enrollment struct {
 	Secret   string `json:"secret"`
 	URI      string `json:"otpauth_uri"`
 }
+
+var ErrInvalidCode = errors.New("invalid one-time code")
 
 func (s *Service) cipher() (cipher.AEAD, error) {
 	key := []byte(s.DataKey.Value())
@@ -54,38 +57,89 @@ func (s *Service) BeginTOTP(ctx context.Context, userID, email string) (Enrollme
 	if e != nil {
 		return Enrollment{}, e
 	}
-	id := ids.New[ids.FactorID]("fac")
-	_, e = s.Store.Queries().CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: "authenticator", SecretCiphertext: blob})
-	if e != nil {
-		return Enrollment{}, e
+	var enrollment Enrollment
+	e = s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		enrollment, err = s.beginTOTPWithQueries(ctx, q, userID, key.Secret(), key.URL(), blob)
+		return err
+	})
+	return enrollment, e
+}
+
+// BeginTOTPTx is used by bootstrap flows that must create the operator and
+// its mandatory MFA factor atomically.
+func (s *Service) BeginTOTPTx(ctx context.Context, q *db.Queries, userID, email string) (Enrollment, error) {
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "Plystra Auth", AccountName: email, Period: 30, SecretSize: 20})
+	if err != nil {
+		return Enrollment{}, err
 	}
-	return Enrollment{FactorID: string(id), Secret: key.Secret(), URI: key.URL()}, nil
+	a, err := s.cipher()
+	if err != nil {
+		return Enrollment{}, err
+	}
+	blob, err := seal(a, []byte(key.Secret()))
+	if err != nil {
+		return Enrollment{}, err
+	}
+	return s.beginTOTPWithQueries(ctx, q, userID, key.Secret(), key.URL(), blob)
+}
+
+func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userID, raw, uri string, blob []byte) (Enrollment, error) {
+	id := ids.New[ids.FactorID]("fac")
+	if _, err := q.CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: "authenticator", SecretCiphertext: blob}); err != nil {
+		return Enrollment{}, err
+	}
+	return Enrollment{FactorID: string(id), Secret: raw, URI: uri}, nil
 }
 func (s *Service) VerifyTOTP(ctx context.Context, userID, factorID, code string) error {
-	row, e := s.Store.Queries().ListFactors(ctx, db.ListFactorsParams{UserID: userID})
-	if e != nil {
-		return e
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		return s.VerifyTOTPTx(ctx, q, userID, factorID, code, time.Now().UTC())
+	})
+}
+
+// VerifyTOTPTx consumes the time step while holding factor locks so concurrent
+// requests cannot reuse a code, including across login and step-up.
+func (s *Service) VerifyTOTPTx(ctx context.Context, q *db.Queries, userID, factorID, code string, now time.Time) error {
+	if len(code) != 6 || strings.Trim(code, "0123456789") != "" {
+		return ErrInvalidCode
 	}
-	for _, f := range row {
-		if f.ID != factorID || f.Kind != "totp" {
+	rows, err := q.LockTOTPFactors(ctx, db.LockTOTPFactorsParams{UserID: userID})
+	if err != nil {
+		return err
+	}
+	a, err := s.cipher()
+	if err != nil {
+		return err
+	}
+	for _, f := range rows {
+		if factorID != "" && f.ID != factorID {
 			continue
 		}
-		a, e := s.cipher()
-		if e != nil {
-			return e
+		raw, err := open(a, f.SecretCiphertext)
+		if err != nil {
+			return err
 		}
-		raw, e := open(a, f.SecretCiphertext)
-		if e != nil {
-			return e
+		// Match the exact step, rather than resetting the counter after validation.
+		for _, offset := range []int64{0, -1, 1} {
+			step := now.Unix()/30 + offset
+			if step <= f.Counter {
+				continue
+			}
+			valid, err := totp.ValidateCustom(code, string(raw), time.Unix(step*30, 0),
+				totp.ValidateOpts{Period: 30, Skew: 0, Digits: otp.DigitsSix, Algorithm: otp.AlgorithmSHA1})
+			if err != nil {
+				clear(raw)
+				return err
+			}
+			if valid {
+				clear(raw)
+				_, err = q.ConsumeTOTPStep(ctx, db.ConsumeTOTPStepParams{ID: f.ID, Step: step})
+				return err
+			}
 		}
-		if !totp.Validate(strings.TrimSpace(code), string(raw)) {
-			return errors.New("invalid one-time code")
-		}
-		return s.Store.InTx(ctx, func(q *db.Queries) error {
-			return q.TouchFactor(ctx, db.TouchFactorParams{ID: f.ID, UserID: userID, Counter: pgtype.Int8{Int64: 0, Valid: true}})
-		})
+		clear(raw)
 	}
-	return errors.New("factor not found")
+	return ErrInvalidCode
 }
 func (s *Service) GenerateBackupCodes(count int) ([]string, error) {
 	if count < 5 || count > 20 {

@@ -2,6 +2,8 @@ package route
 
 import (
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -9,6 +11,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/requestinfo"
 )
 
 type Plane string
@@ -62,7 +65,17 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	registry.Lock()
 	registry.specs = append(registry.specs, spec)
 	registry.Unlock()
-	huma.Register(api, huma.Operation{OperationID: spec.Name, Method: spec.Method, Path: spec.Path, Summary: spec.Name}, handler)
+	huma.Register(api, huma.Operation{OperationID: spec.Name, Method: spec.Method, Path: spec.Path, Summary: spec.Name, MaxBodyBytes: 64 * 1024}, func(ctx context.Context, input *I) (*O, error) {
+		out, err := handler(ctx, input)
+		if err == nil {
+			return out, nil
+		}
+		var public *apierr.Error
+		if !errors.As(err, &public) {
+			public = apierr.New("UNAVAILABLE", "The service is temporarily unavailable.")
+		}
+		return nil, apierr.WithRequestID(public, requestinfo.Get(ctx).ID)
+	})
 }
 func RegisterNonJSON(mux *http.ServeMux, spec Spec, handler http.Handler) {
 	if !spec.NonJSON {
@@ -98,10 +111,14 @@ func Middleware(p Plane, next http.Handler) http.Handler {
 			id = string(ids.New[ids.ID]("req"))
 		}
 		w.Header().Set("X-Request-Id", id)
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		host, _, _ := net.SplitHostPort(r.RemoteAddr)
+		ctx := requestinfo.With(WithPlane(r.Context(), p), requestinfo.Info{ID: id, Plane: string(p), IP: net.ParseIP(host)})
 		if p == Server && r.Header.Get("Origin") != "" {
-			apierr.Write(w, apierr.New("browser_origin_rejected", "service endpoints do not accept browser origins"))
+			apierr.Write(w, apierr.WithRequestID(apierr.New("BROWSER_ORIGIN_REJECTED", "service endpoints do not accept browser origins"), id))
 			return
 		}
-		next.ServeHTTP(w, r.WithContext(WithPlane(r.Context(), p)))
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

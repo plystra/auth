@@ -51,15 +51,15 @@ type IntrospectOutput struct {
 }
 
 func (a *API) Register(api huma.API) {
-	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
-	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
+	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
+	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
 }
 func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	key, e := a.key(ctx, in.Authorization)
 	if e != nil {
 		return nil, e
 	}
-	if !contains(key.Scopes, "authz:check") {
+	if !contains(key.Scopes, "auth.authz:check") {
 		return nil, apierr.New("forbidden", "API key is not scoped for authz checks")
 	}
 	perms, e := a.Members.Permissions(ctx, in.Body.MemberID)
@@ -80,7 +80,7 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 	if e != nil {
 		return nil, e
 	}
-	if !contains(key.Scopes, "tokens:introspect") {
+	if !contains(key.Scopes, "auth.tokens:introspect") {
 		return nil, apierr.New("forbidden", "API key is not scoped for token introspection")
 	}
 	if strings.TrimSpace(in.Body.Token) == "" {
