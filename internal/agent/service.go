@@ -201,6 +201,12 @@ func (s *Service) Owner(ctx context.Context, memberID string) (string, error) {
 	return row.OwnerMemberID.String, nil
 }
 
+// CanManage reports whether actor is the Agent itself or an owner ancestor in
+// the immutable "my agents" group tree.
+func (s *Service) CanManage(ctx context.Context, actorMemberID, agentMemberID string) (bool, error) {
+	return s.Store.Queries().CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: actorMemberID, TargetMemberID: agentMemberID})
+}
+
 func (s *Service) Get(ctx context.Context, memberID string) (Agent, error) {
 	row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -230,7 +236,9 @@ func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (s
 		if err != nil {
 			return apierr.New("NOT_FOUND", "agent was not found")
 		}
-		if !row.OwnerMemberID.Valid || row.OwnerMemberID.String != ownerMemberID {
+		if canManage, err := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: ownerMemberID, TargetMemberID: memberID}); err != nil {
+			return err
+		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 		}
 		if row.Status != "active" || row.GroupStatus != "active" {
@@ -276,7 +284,9 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action st
 			}
 			return err
 		}
-		if !row.OwnerMemberID.Valid || row.OwnerMemberID.String != ownerMemberID {
+		if canManage, err := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: ownerMemberID, TargetMemberID: memberID}); err != nil {
+			return err
+		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 		}
 		if !row.HomeGroupID.Valid {

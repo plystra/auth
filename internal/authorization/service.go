@@ -57,13 +57,14 @@ type Role struct {
 }
 
 type Grant struct {
-	ID              string `json:"id"`
-	SpaceID         string `json:"space_id"`
-	RoleID          string `json:"role_id"`
-	GranteeMemberID string `json:"grantee_member_id"`
-	Scope           string `json:"scope"`
-	AnchorSpaceID   string `json:"anchor_space_id,omitempty"`
-	GrantedBy       string `json:"granted_by"`
+	ID              string   `json:"id"`
+	SpaceID         string   `json:"space_id"`
+	RoleID          string   `json:"role_id"`
+	Permissions     []string `json:"permissions,omitempty"`
+	GranteeMemberID string   `json:"grantee_member_id"`
+	Scope           string   `json:"scope"`
+	AnchorSpaceID   string   `json:"anchor_space_id,omitempty"`
+	GrantedBy       string   `json:"granted_by"`
 }
 
 var administratorPermissions = []string{
@@ -111,8 +112,9 @@ func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (S
 			return err
 		}
 		if _, err := q.CreateGrant(ctx, db.CreateGrantParams{
-			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceRow.ID, RoleID: role.ID,
+			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceRow.ID, RoleID: pgtype.Text{String: role.ID, Valid: true},
 			GranteeMemberID: pgtype.Text{String: memberRow.ID, Valid: true}, Scope: "space",
+			AnchorGroupID: pgtype.Text{},
 			AnchorSpaceID: pgtype.Text{String: spaceRow.ID, Valid: true}, GrantedBy: userID,
 		}); err != nil {
 			return err
@@ -205,7 +207,7 @@ func (s *Service) EnsureDefaultMembership(ctx context.Context, userID, displayNa
 		if err != nil {
 			return err
 		}
-		if _, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: role.ID, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"}); err != nil {
+		if _, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"}); err != nil {
 			return err
 		}
 		return audit.Write(ctx, q, "system", "system", "member.default_bind", member.ID, "success")
@@ -528,7 +530,7 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The grant exceeds the actor's current authority.", Details: map[string]string{"permission": permission.Key}}
 			}
 		}
-		row, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID, RoleID: roleID, GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true}, Scope: scope, AnchorSpaceID: pgtype.Text{String: anchorSpaceID, Valid: true}, GrantedBy: actorMemberID})
+		row, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID, RoleID: pgtype.Text{String: roleID, Valid: true}, GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true}, Scope: scope, AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: anchorSpaceID, Valid: true}, GrantedBy: actorMemberID})
 		if err != nil {
 			return normalizeDBError(err)
 		}
@@ -538,7 +540,68 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.create", row.ID, "success"); err != nil {
 			return err
 		}
-		out = Grant{ID: row.ID, SpaceID: row.SpaceID, RoleID: row.RoleID, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
+		out = Grant{ID: row.ID, SpaceID: row.SpaceID, RoleID: row.RoleID.String, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
+		return nil
+	})
+	return out, err
+}
+
+// CreateInlineGrant records a permission set directly on one grant. It is
+// intentionally separate from named roles so short-lived consent (such as an
+// OAuth Agent authorization) does not create or mutate the Space role catalog.
+func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	permissions = uniqueSorted(permissions)
+	if len(permissions) == 0 || len(permissions) > 256 {
+		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
+	}
+	if scope == "" {
+		scope = "space"
+	}
+	if scope != "self" && scope != "space" && scope != "space_tree" {
+		return Grant{}, apierr.New("VALIDATION_FAILED", "only self, space, and space_tree scopes are available for member grants")
+	}
+	if anchorSpaceID == "" {
+		anchorSpaceID = spaceID
+	}
+	encoded, err := json.Marshal(permissions)
+	if err != nil {
+		return Grant{}, err
+	}
+	var out Grant
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.grants:assign"); err != nil {
+			return err
+		}
+		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
+			}
+			return err
+		}
+		actorPermissions, err := permissionSetTx(ctx, q, actorMemberID)
+		if err != nil {
+			return err
+		}
+		for _, permission := range permissions {
+			if !actorPermissions[permission] {
+				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The grant exceeds the actor's current authority.", Details: map[string]string{"permission": permission}}
+			}
+		}
+		row, err := q.CreateGrant(ctx, db.CreateGrantParams{
+			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID,
+			PermissionKeys: encoded, GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true},
+			Scope: scope, AnchorSpaceID: pgtype.Text{String: anchorSpaceID, Valid: true}, AnchorGroupID: pgtype.Text{}, GrantedBy: actorMemberID,
+		})
+		if err != nil {
+			return normalizeDBError(err)
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.inline.create", row.ID, "success"); err != nil {
+			return err
+		}
+		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
 		return nil
 	})
 	return out, err

@@ -59,6 +59,41 @@ func (q *Queries) BindUserMember(ctx context.Context, arg BindUserMemberParams) 
 	return err
 }
 
+const canManageAgent = `-- name: CanManageAgent :one
+WITH RECURSIVE agent_groups AS (
+    SELECT g.id
+    FROM groups g
+    WHERE g.owner_member_id = $2
+      AND g.kind = 'agents'
+      AND g.status <> 'removed'
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN agent_groups parent ON child.parent_id = parent.id
+    WHERE child.kind = 'agents'
+      AND child.status <> 'removed'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM members target
+    WHERE target.id = $1
+      AND target.type = 'agent'
+      AND (target.id = $2 OR target.home_group_id IN (SELECT id FROM agent_groups))
+) AS can_manage
+`
+
+type CanManageAgentParams struct {
+	TargetMemberID string `json:"target_member_id"`
+	OwnerMemberID  string `json:"owner_member_id"`
+}
+
+func (q *Queries) CanManageAgent(ctx context.Context, arg CanManageAgentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, canManageAgent, arg.TargetMemberID, arg.OwnerMemberID)
+	var can_manage bool
+	err := row.Scan(&can_manage)
+	return can_manage, err
+}
+
 const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = $1::bigint, last_used_at = now()
 WHERE id = $2 AND counter < $1::bigint RETURNING id
@@ -295,36 +330,56 @@ func (q *Queries) CreateFactor(ctx context.Context, arg CreateFactorParams) (Fac
 }
 
 const createGrant = `-- name: CreateGrant :one
-INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+INSERT INTO authorization_grants (id, space_id, role_id, permission_keys, grantee_member_id, scope, anchor_space_id, anchor_group_id, granted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, space_id, role_id, permission_keys, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
 `
 
 type CreateGrantParams struct {
 	ID              string      `json:"id"`
 	SpaceID         string      `json:"space_id"`
-	RoleID          string      `json:"role_id"`
+	RoleID          pgtype.Text `json:"role_id"`
+	PermissionKeys  []byte      `json:"permission_keys"`
 	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
 	Scope           string      `json:"scope"`
 	AnchorSpaceID   pgtype.Text `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text `json:"anchor_group_id"`
 	GrantedBy       string      `json:"granted_by"`
 }
 
-func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (AuthorizationGrant, error) {
+type CreateGrantRow struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	RoleID          pgtype.Text        `json:"role_id"`
+	PermissionKeys  []byte             `json:"permission_keys"`
+	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
+	Scope           string             `json:"scope"`
+	AnchorSpaceID   pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text        `json:"anchor_group_id"`
+	GrantedBy       string             `json:"granted_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (CreateGrantRow, error) {
 	row := q.db.QueryRow(ctx, createGrant,
 		arg.ID,
 		arg.SpaceID,
 		arg.RoleID,
+		arg.PermissionKeys,
 		arg.GranteeMemberID,
 		arg.Scope,
 		arg.AnchorSpaceID,
+		arg.AnchorGroupID,
 		arg.GrantedBy,
 	)
-	var i AuthorizationGrant
+	var i CreateGrantRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
 		&i.RoleID,
+		&i.PermissionKeys,
 		&i.GranteeMemberID,
 		&i.GranteeGroupID,
 		&i.Scope,
@@ -674,7 +729,7 @@ func (q *Queries) GetAgentsGroupByOwner(ctx context.Context, arg GetAgentsGroupB
 }
 
 const getGrantInSpace = `-- name: GetGrantInSpace :one
-SELECT id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+SELECT id, space_id, role_id, permission_keys, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
 FROM authorization_grants
 WHERE id = $1 AND space_id = $2
 `
@@ -684,13 +739,29 @@ type GetGrantInSpaceParams struct {
 	SpaceID string `json:"space_id"`
 }
 
-func (q *Queries) GetGrantInSpace(ctx context.Context, arg GetGrantInSpaceParams) (AuthorizationGrant, error) {
+type GetGrantInSpaceRow struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	RoleID          pgtype.Text        `json:"role_id"`
+	PermissionKeys  []byte             `json:"permission_keys"`
+	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
+	Scope           string             `json:"scope"`
+	AnchorSpaceID   pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text        `json:"anchor_group_id"`
+	GrantedBy       string             `json:"granted_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) GetGrantInSpace(ctx context.Context, arg GetGrantInSpaceParams) (GetGrantInSpaceRow, error) {
 	row := q.db.QueryRow(ctx, getGrantInSpace, arg.ID, arg.SpaceID)
-	var i AuthorizationGrant
+	var i GetGrantInSpaceRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
 		&i.RoleID,
+		&i.PermissionKeys,
 		&i.GranteeMemberID,
 		&i.GranteeGroupID,
 		&i.Scope,
@@ -1103,13 +1174,18 @@ WITH RECURSIVE member_groups AS (
     JOIN member_groups mg ON mg.group_id = g.id
     WHERE g.parent_id IS NOT NULL
 )
-SELECT ag.id AS grant_id, ag.space_id, ag.role_id, r.name AS role_name,
+SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
        ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
        p.key AS permission_key, p.enabled, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
-JOIN roles r ON r.id = ag.role_id
-JOIN role_permissions rp ON rp.role_id = r.id
-JOIN permissions p ON p.id = rp.permission_id
+LEFT JOIN roles r ON r.id = ag.role_id
+JOIN permissions p ON p.enabled = true AND (
+    (ag.role_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM role_permissions rp
+        WHERE rp.role_id = ag.role_id AND rp.permission_id = p.id
+    ))
+    OR (ag.permission_keys IS NOT NULL AND ag.permission_keys ? p.key)
+)
 JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = $1 OR mg.group_id IS NOT NULL)
@@ -1125,7 +1201,7 @@ type ListMemberAssignmentsParams struct {
 type ListMemberAssignmentsRow struct {
 	GrantID         string      `json:"grant_id"`
 	SpaceID         string      `json:"space_id"`
-	RoleID          string      `json:"role_id"`
+	RoleID          pgtype.Text `json:"role_id"`
 	RoleName        string      `json:"role_name"`
 	Scope           string      `json:"scope"`
 	AnchorSpaceID   pgtype.Text `json:"anchor_space_id"`

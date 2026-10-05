@@ -82,7 +82,7 @@ type AuthorizationCode struct {
 type AuthorizationGrant struct {
 	ID              string             `json:"id"`
 	SpaceID         string             `json:"space_id"`
-	RoleID          string             `json:"role_id"`
+	RoleID          pgtype.Text        `json:"role_id"`
 	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
 	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
 	Scope           string             `json:"scope"`
@@ -91,6 +91,7 @@ type AuthorizationGrant struct {
 	GrantedBy       string             `json:"granted_by"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	PermissionKeys  []byte             `json:"permission_keys"`
 }
 
 type EmailVerificationToken struct {

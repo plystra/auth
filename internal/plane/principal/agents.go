@@ -9,6 +9,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
@@ -25,6 +26,16 @@ type agentsInput struct {
 type agentPathInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
+}
+
+type agentGrantInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		Permissions   []string `json:"permissions"`
+		Scope         string   `json:"scope,omitempty"`
+		AnchorSpaceID string   `json:"anchor_space_id,omitempty"`
+	}
 }
 
 type agentsListInput struct {
@@ -75,6 +86,7 @@ func (a *API) registerAgentRoutes(api huma.API) {
 	route.Register(api, route.Spec{Name: "me.agents.list", Method: "GET", Path: "/v1/me/agents", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.listAgents)
 	route.Register(api, route.Spec{Name: "me.agents.create", Method: "POST", Path: "/v1/me/agents", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}, StepUp: true, AuthoritativeCheck: true}, a.createAgent)
 	route.Register(api, route.Spec{Name: "me.agents.rotate", Method: "POST", Path: "/v1/me/agents/{id}/rotate", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.rotateAgent)
+	route.Register(api, route.Spec{Name: "me.agents.grants.replace", Method: "PUT", Path: "/v1/me/agents/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.replaceAgentGrants)
 	route.Register(api, route.Spec{Name: "me.agents.stop", Method: "POST", Path: "/v1/me/agents/{id}/stop", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}}, a.stopAgent)
 	route.Register(api, route.Spec{Name: "me.agents.delete", Method: "DELETE", Path: "/v1/me/agents/{id}", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}}, a.deleteAgent)
 }
@@ -140,6 +152,34 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 	}
 	out := &agentSecretOutput{}
 	out.Body.Data.AgentKey = key
+	return out, nil
+}
+
+func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
+	actorID, _, err := a.currentMember(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if a.Agents == nil || a.Authorization == nil {
+		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
+	}
+	target, err := a.Agents.Get(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	canManage, err := a.Agents.CanManage(ctx, actorID, target.ID)
+	if err != nil {
+		return nil, err
+	}
+	if !canManage {
+		return nil, apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
+	}
+	grant, err := a.Authorization.CreateInlineGrant(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[authorization.Grant]{}
+	out.Body.Data = grant
 	return out, nil
 }
 

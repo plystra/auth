@@ -11,9 +11,9 @@ INSERT INTO role_permissions (role_id, permission_id) VALUES (sqlc.arg(role_id),
 INSERT INTO member_roles (member_id, role_id, granted_by) VALUES (sqlc.arg(member_id), sqlc.arg(role_id), sqlc.narg(granted_by)) ON CONFLICT DO NOTHING;
 
 -- name: CreateGrant :one
-INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
-VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(role_id), sqlc.arg(grantee_member_id), sqlc.arg(scope), sqlc.narg(anchor_space_id), sqlc.arg(granted_by))
-RETURNING id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at;
+INSERT INTO authorization_grants (id, space_id, role_id, permission_keys, grantee_member_id, scope, anchor_space_id, anchor_group_id, granted_by)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.narg(role_id), sqlc.narg(permission_keys), sqlc.narg(grantee_member_id), sqlc.arg(scope), sqlc.narg(anchor_space_id), sqlc.narg(anchor_group_id), sqlc.arg(granted_by))
+RETURNING id, space_id, role_id, permission_keys, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at;
 
 -- name: RevokeGrant :exec
 UPDATE authorization_grants SET revoked_at = now()
@@ -45,13 +45,18 @@ WITH RECURSIVE member_groups AS (
     JOIN member_groups mg ON mg.group_id = g.id
     WHERE g.parent_id IS NOT NULL
 )
-SELECT ag.id AS grant_id, ag.space_id, ag.role_id, r.name AS role_name,
+SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
        ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
        p.key AS permission_key, p.enabled, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
-JOIN roles r ON r.id = ag.role_id
-JOIN role_permissions rp ON rp.role_id = r.id
-JOIN permissions p ON p.id = rp.permission_id
+LEFT JOIN roles r ON r.id = ag.role_id
+JOIN permissions p ON p.enabled = true AND (
+    (ag.role_id IS NOT NULL AND EXISTS (
+        SELECT 1 FROM role_permissions rp
+        WHERE rp.role_id = ag.role_id AND rp.permission_id = p.id
+    ))
+    OR (ag.permission_keys IS NOT NULL AND ag.permission_keys ? p.key)
+)
 JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = sqlc.arg(member_id) OR mg.group_id IS NOT NULL)
@@ -60,7 +65,7 @@ WHERE (ag.grantee_member_id = sqlc.arg(member_id) OR mg.group_id IS NOT NULL)
 ORDER BY ag.id, p.key;
 
 -- name: GetGrantInSpace :one
-SELECT id, space_id, role_id, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+SELECT id, space_id, role_id, permission_keys, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
 FROM authorization_grants
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 

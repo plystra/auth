@@ -49,10 +49,11 @@ type createGrantInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
 	Body          struct {
-		GranteeMemberID string `json:"grantee_member_id"`
-		RoleID          string `json:"role_id"`
-		Scope           string `json:"scope,omitempty"`
-		AnchorSpaceID   string `json:"anchor_space_id,omitempty"`
+		GranteeMemberID string   `json:"grantee_member_id"`
+		RoleID          string   `json:"role_id"`
+		Permissions     []string `json:"permissions,omitempty"`
+		Scope           string   `json:"scope,omitempty"`
+		AnchorSpaceID   string   `json:"anchor_space_id,omitempty"`
 	}
 }
 
@@ -328,7 +329,15 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 	if err != nil {
 		return nil, err
 	}
-	grant, err := a.Authorization.CreateGrant(ctx, actor.ID, in.ID, in.Body.GranteeMemberID, in.Body.RoleID, in.Body.Scope, in.Body.AnchorSpaceID)
+	var grant authorization.Grant
+	if len(in.Body.Permissions) > 0 {
+		grant, err = a.Authorization.CreateInlineGrant(ctx, actor.ID, in.ID, in.Body.GranteeMemberID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	} else {
+		if strings.TrimSpace(in.Body.RoleID) == "" {
+			return nil, apierr.New("VALIDATION_FAILED", "role_id or permissions is required")
+		}
+		grant, err = a.Authorization.CreateGrant(ctx, actor.ID, in.ID, in.Body.GranteeMemberID, in.Body.RoleID, in.Body.Scope, in.Body.AnchorSpaceID)
+	}
 	if err != nil {
 		return nil, err
 	}

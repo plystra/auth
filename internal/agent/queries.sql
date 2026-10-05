@@ -129,3 +129,25 @@ ORDER BY created_at, id;
 
 -- name: GetMemberVersion :one
 SELECT version FROM members WHERE id = sqlc.arg(member_id);
+
+-- name: CanManageAgent :one
+WITH RECURSIVE agent_groups AS (
+    SELECT g.id
+    FROM groups g
+    WHERE g.owner_member_id = sqlc.arg(owner_member_id)
+      AND g.kind = 'agents'
+      AND g.status <> 'removed'
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN agent_groups parent ON child.parent_id = parent.id
+    WHERE child.kind = 'agents'
+      AND child.status <> 'removed'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM members target
+    WHERE target.id = sqlc.arg(target_member_id)
+      AND target.type = 'agent'
+      AND (target.id = sqlc.arg(owner_member_id) OR target.home_group_id IN (SELECT id FROM agent_groups))
+) AS can_manage;
