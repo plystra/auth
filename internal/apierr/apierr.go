@@ -35,6 +35,8 @@ func Status(code string) int {
 		return http.StatusUnauthorized
 	case "forbidden", "permission_denied", "browser_origin_rejected", "step_up_required", "human_principal_required":
 		return http.StatusForbidden
+	case "email_verification_required":
+		return http.StatusForbidden
 	case "not_found":
 		return http.StatusNotFound
 	case "conflict":

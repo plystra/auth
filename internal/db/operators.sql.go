@@ -221,9 +221,20 @@ type LockUserForOperatorParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) LockUserForOperator(ctx context.Context, arg LockUserForOperatorParams) (User, error) {
+type LockUserForOperatorRow struct {
+	ID              string             `json:"id"`
+	Email           string             `json:"email"`
+	EmailNormalized string             `json:"email_normalized"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) LockUserForOperator(ctx context.Context, arg LockUserForOperatorParams) (LockUserForOperatorRow, error) {
 	row := q.db.QueryRow(ctx, lockUserForOperator, arg.ID)
-	var i User
+	var i LockUserForOperatorRow
 	err := row.Scan(
 		&i.ID,
 		&i.Email,

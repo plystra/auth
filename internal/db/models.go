@@ -258,6 +258,7 @@ type User struct {
 	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	Status          string             `json:"status"`
 }
 
 type UserMember struct {

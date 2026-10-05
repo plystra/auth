@@ -311,6 +311,20 @@ func (q *Queries) RevokeSessionRefreshTokens(ctx context.Context, arg RevokeSess
 	return err
 }
 
+const revokeUserRefreshTokens = `-- name: RevokeUserRefreshTokens :exec
+UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
+WHERE session_id IN (SELECT id FROM sessions WHERE user_id = $1)
+`
+
+type RevokeUserRefreshTokensParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRefreshTokensParams) error {
+	_, err := q.db.Exec(ctx, revokeUserRefreshTokens, arg.UserID)
+	return err
+}
+
 const revokeUserSessions = `-- name: RevokeUserSessions :exec
 UPDATE sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE user_id = $1 AND revoked_at IS NULL
 `

@@ -12,6 +12,10 @@ UPDATE sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE id = sqlc.arg
 -- name: RevokeUserSessions :exec
 UPDATE sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE user_id = sqlc.arg(user_id) AND revoked_at IS NULL;
 
+-- name: RevokeUserRefreshTokens :exec
+UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
+WHERE session_id IN (SELECT id FROM sessions WHERE user_id = sqlc.arg(user_id));
+
 -- name: CreateRefreshToken :one
 INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
 VALUES (sqlc.arg(id), sqlc.arg(session_id), sqlc.arg(family_id), sqlc.arg(token_hash), sqlc.arg(expires_at))

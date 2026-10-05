@@ -62,6 +62,37 @@ type revokeGrantInput struct {
 	GrantID       string `path:"grant_id"`
 }
 
+type memberPathInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	MemberID      string `path:"mid"`
+}
+
+type bindUserInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	MemberID      string `path:"mid"`
+	Body          struct {
+		UserID string `json:"user_id"`
+	}
+}
+
+type unbindUserInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	MemberID      string `path:"mid"`
+	UserID        string `path:"user_id"`
+}
+
+type memberPatchInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	MemberID      string `path:"mid"`
+	Body          struct {
+		BindingPolicy string `json:"binding_policy"`
+	}
+}
+
 type authorizationDataOutput[T any] struct {
 	Body struct {
 		Data T `json:"data"`
@@ -83,6 +114,13 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.Spec{Name: "spaces.children", Method: "GET", Path: "/v1/spaces/{id}/children", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listChildren)
 	route.Register(api, route.Spec{Name: "members.list", Method: "GET", Path: "/v1/spaces/{id}/members", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.HumanAgent}}, a.listMembers)
 	route.Register(api, route.Spec{Name: "members.create", Method: "POST", Path: "/v1/spaces/{id}/members", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createMember)
+	route.Register(api, route.Spec{Name: "members.update", Method: "PATCH", Path: "/v1/spaces/{id}/members/{mid}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.updateMember)
+	route.Register(api, route.Spec{Name: "members.suspend", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/suspend", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.suspendMember)
+	route.Register(api, route.Spec{Name: "members.resume", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/resume", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.resumeMember)
+	route.Register(api, route.Spec{Name: "members.remove", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/remove", Plane: route.Principal, Permission: "auth.members:manage", Subjects: []route.Subject{route.Human}}, a.removeMember)
+	route.Register(api, route.Spec{Name: "members.bindings.list", Method: "GET", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.members:read", Subjects: []route.Subject{route.Human}}, a.listBindings)
+	route.Register(api, route.Spec{Name: "members.bindings.create", Method: "POST", Path: "/v1/spaces/{id}/members/{mid}/users", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, StepUp: true, AuthoritativeCheck: true}, a.bindUser)
+	route.Register(api, route.Spec{Name: "members.bindings.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/members/{mid}/users/{user_id}", Plane: route.Principal, Permission: "auth.bindings:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.unbindUser)
 	route.Register(api, route.Spec{Name: "roles.list", Method: "GET", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}}, a.listRoles)
 	route.Register(api, route.Spec{Name: "roles.create", Method: "POST", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createRole)
 	route.Register(api, route.Spec{Name: "grants.create", Method: "POST", Path: "/v1/spaces/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.Human}, AuthoritativeCheck: true}, a.createGrant)
@@ -159,13 +197,99 @@ func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authori
 	if err != nil {
 		return nil, err
 	}
-	member, err := a.Authorization.CreateMember(ctx, actor.ID, in.Body.UserID, in.ID, in.Body.Name, in.Body.Kind, in.Body.BindingPolicy)
+	policy := in.Body.BindingPolicy
+	if policy == "" {
+		policy = "individual"
+	}
+	kind := in.Body.Kind
+	if kind == "" {
+		kind = "user"
+	}
+	member, err := a.Authorization.CreateMember(ctx, actor.ID, in.Body.UserID, in.ID, in.Body.Name, kind, policy)
 	if err != nil {
 		return nil, err
 	}
 	out := &authorizationDataOutput[authorization.Member]{}
 	out.Body.Data = member
 	return out, nil
+}
+
+func (a *API) updateMember(ctx context.Context, in *memberPatchInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.SetBindingPolicy(ctx, actor.ID, in.ID, in.MemberID, in.Body.BindingPolicy); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func (a *API) suspendMember(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[acceptedData], error) {
+	return a.setMemberStatus(ctx, in, "suspended")
+}
+
+func (a *API) resumeMember(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[acceptedData], error) {
+	return a.setMemberStatus(ctx, in, "active")
+}
+
+func (a *API) removeMember(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[acceptedData], error) {
+	return a.setMemberStatus(ctx, in, "removed")
+}
+
+func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status string) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.SetMemberStatus(ctx, actor.ID, in.ID, in.MemberID, status); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[[]authorization.Binding], error) {
+	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
+		return nil, err
+	}
+	if _, err := a.Authorization.GetMember(ctx, in.MemberID, in.ID); err != nil {
+		return nil, err
+	}
+	bindings, err := a.Authorization.ListBindings(ctx, in.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[[]authorization.Binding]{}
+	out.Body.Data = bindings
+	return out, nil
+}
+
+func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.BindUser(ctx, actor.ID, in.ID, in.MemberID, in.Body.UserID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func (a *API) unbindUser(ctx context.Context, in *unbindUserInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.UnbindUser(ctx, actor.ID, in.ID, in.MemberID, in.UserID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func acceptedResponse() *authorizationDataOutput[acceptedData] {
+	out := &authorizationDataOutput[acceptedData]{}
+	out.Body.Data.Accepted = true
+	return out
 }
 
 func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Role], error) {

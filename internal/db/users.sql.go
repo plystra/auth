@@ -7,12 +7,14 @@ package db
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 const createUser = `-- name: CreateUser :one
-INSERT INTO users (id, email, email_normalized, password_hash)
-VALUES ($1, $2, $3, $4)
-RETURNING id, email, email_normalized, password_hash, email_verified_at, disabled_at, created_at, updated_at
+INSERT INTO users (id, email, email_normalized, password_hash, status)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
 `
 
 type CreateUserParams struct {
@@ -20,16 +22,30 @@ type CreateUserParams struct {
 	Email           string `json:"email"`
 	EmailNormalized string `json:"email_normalized"`
 	PasswordHash    string `json:"password_hash"`
+	Status          string `json:"status"`
 }
 
-func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, error) {
+type CreateUserRow struct {
+	ID              string             `json:"id"`
+	Email           string             `json:"email"`
+	EmailNormalized string             `json:"email_normalized"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error) {
 	row := q.db.QueryRow(ctx, createUser,
 		arg.ID,
 		arg.Email,
 		arg.EmailNormalized,
 		arg.PasswordHash,
+		arg.Status,
 	)
-	var i User
+	var i CreateUserRow
 	err := row.Scan(
 		&i.ID,
 		&i.Email,
@@ -37,6 +53,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.PasswordHash,
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
+		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -44,7 +61,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, created_at, updated_at
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
 FROM users WHERE email_normalized = $1 LIMIT 1
 `
 
@@ -52,9 +69,21 @@ type GetUserByEmailParams struct {
 	EmailNormalized string `json:"email_normalized"`
 }
 
-func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) (User, error) {
+type GetUserByEmailRow struct {
+	ID              string             `json:"id"`
+	Email           string             `json:"email"`
+	EmailNormalized string             `json:"email_normalized"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) (GetUserByEmailRow, error) {
 	row := q.db.QueryRow(ctx, getUserByEmail, arg.EmailNormalized)
-	var i User
+	var i GetUserByEmailRow
 	err := row.Scan(
 		&i.ID,
 		&i.Email,
@@ -62,6 +91,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) 
 		&i.PasswordHash,
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
+		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -69,7 +99,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) 
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, created_at, updated_at
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
 FROM users WHERE id = $1 LIMIT 1
 `
 
@@ -77,9 +107,21 @@ type GetUserByIDParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (User, error) {
+type GetUserByIDRow struct {
+	ID              string             `json:"id"`
+	Email           string             `json:"email"`
+	EmailNormalized string             `json:"email_normalized"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUserByIDRow, error) {
 	row := q.db.QueryRow(ctx, getUserByID, arg.ID)
-	var i User
+	var i GetUserByIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.Email,
@@ -87,22 +129,42 @@ func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (User,
 		&i.PasswordHash,
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
+		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
 	return i, err
 }
 
-const markEmailVerified = `-- name: MarkEmailVerified :exec
-UPDATE users SET email_verified_at = now(), updated_at = now() WHERE id = $1
+const markEmailVerified = `-- name: MarkEmailVerified :one
+UPDATE users SET email_verified_at = now(), status = 'active', updated_at = now()
+WHERE id = $1 AND status = 'pending'
+RETURNING id
 `
 
 type MarkEmailVerifiedParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) error {
-	_, err := q.db.Exec(ctx, markEmailVerified, arg.ID)
+func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedParams) (string, error) {
+	row := q.db.QueryRow(ctx, markEmailVerified, arg.ID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
+const setUserStatus = `-- name: SetUserStatus :exec
+UPDATE users SET status = $1, disabled_at = CASE WHEN $1 = 'disabled' THEN now() ELSE NULL END, updated_at = now()
+WHERE id = $2
+`
+
+type SetUserStatusParams struct {
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
+func (q *Queries) SetUserStatus(ctx context.Context, arg SetUserStatusParams) error {
+	_, err := q.db.Exec(ctx, setUserStatus, arg.Status, arg.ID)
 	return err
 }
 

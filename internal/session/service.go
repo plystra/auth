@@ -193,7 +193,7 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 		}
 		return security.Claims{}, false, err
 	}
-	if user.DisabledAt.Valid {
+	if user.DisabledAt.Valid || user.Status != "active" {
 		return security.Claims{}, false, nil
 	}
 	return claims, true, nil

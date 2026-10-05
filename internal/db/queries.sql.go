@@ -26,6 +26,23 @@ func (q *Queries) AssignRole(ctx context.Context, arg AssignRoleParams) error {
 	return err
 }
 
+const bindUserMember = `-- name: BindUserMember :exec
+INSERT INTO user_members (user_id, member_id, status, expires_at, revoked_at)
+VALUES ($1, $2, 'active', $3, NULL)
+ON CONFLICT (user_id, member_id) DO UPDATE SET status = 'active', expires_at = EXCLUDED.expires_at, revoked_at = NULL
+`
+
+type BindUserMemberParams struct {
+	UserID    string             `json:"user_id"`
+	MemberID  string             `json:"member_id"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) BindUserMember(ctx context.Context, arg BindUserMemberParams) error {
+	_, err := q.db.Exec(ctx, bindUserMember, arg.UserID, arg.MemberID, arg.ExpiresAt)
+	return err
+}
+
 const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = $1::bigint, last_used_at = now()
 WHERE id = $2 AND counter < $1::bigint RETURNING id
@@ -41,6 +58,23 @@ func (q *Queries) ConsumeTOTPStep(ctx context.Context, arg ConsumeTOTPStepParams
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const countActiveMemberBindings = `-- name: CountActiveMemberBindings :one
+SELECT count(*)::bigint FROM user_members
+WHERE member_id = $1 AND status = 'active' AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now())
+`
+
+type CountActiveMemberBindingsParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) CountActiveMemberBindings(ctx context.Context, arg CountActiveMemberBindingsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveMemberBindings, arg.MemberID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
 }
 
 const createFactor = `-- name: CreateFactor :one
@@ -421,6 +455,37 @@ func (q *Queries) GetRoleInSpace(ctx context.Context, arg GetRoleInSpaceParams) 
 	return i, err
 }
 
+const getUserMemberBinding = `-- name: GetUserMemberBinding :one
+SELECT user_id, member_id, status, expires_at, revoked_at
+FROM user_members WHERE user_id = $1 AND member_id = $2
+`
+
+type GetUserMemberBindingParams struct {
+	UserID   string `json:"user_id"`
+	MemberID string `json:"member_id"`
+}
+
+type GetUserMemberBindingRow struct {
+	UserID    string             `json:"user_id"`
+	MemberID  string             `json:"member_id"`
+	Status    string             `json:"status"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) GetUserMemberBinding(ctx context.Context, arg GetUserMemberBindingParams) (GetUserMemberBindingRow, error) {
+	row := q.db.QueryRow(ctx, getUserMemberBinding, arg.UserID, arg.MemberID)
+	var i GetUserMemberBindingRow
+	err := row.Scan(
+		&i.UserID,
+		&i.MemberID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const grantRolePermission = `-- name: GrantRolePermission :exec
 INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
 `
@@ -542,6 +607,53 @@ func (q *Queries) ListMemberAssignments(ctx context.Context, arg ListMemberAssig
 			&i.Enabled,
 			&i.Delegable,
 			&i.PolicyVersion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMemberBindings = `-- name: ListMemberBindings :many
+SELECT um.user_id, um.member_id, um.status, um.expires_at, um.revoked_at, u.email
+FROM user_members um JOIN users u ON u.id = um.user_id
+WHERE um.member_id = $1
+ORDER BY um.created_at, um.user_id
+`
+
+type ListMemberBindingsParams struct {
+	MemberID string `json:"member_id"`
+}
+
+type ListMemberBindingsRow struct {
+	UserID    string             `json:"user_id"`
+	MemberID  string             `json:"member_id"`
+	Status    string             `json:"status"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+	Email     string             `json:"email"`
+}
+
+func (q *Queries) ListMemberBindings(ctx context.Context, arg ListMemberBindingsParams) ([]ListMemberBindingsRow, error) {
+	rows, err := q.db.Query(ctx, listMemberBindings, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberBindingsRow{}
+	for rows.Next() {
+		var i ListMemberBindingsRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.MemberID,
+			&i.Status,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.Email,
 		); err != nil {
 			return nil, err
 		}
@@ -759,6 +871,51 @@ type RevokeGrantParams struct {
 
 func (q *Queries) RevokeGrant(ctx context.Context, arg RevokeGrantParams) error {
 	_, err := q.db.Exec(ctx, revokeGrant, arg.ID)
+	return err
+}
+
+const revokeUserMember = `-- name: RevokeUserMember :exec
+UPDATE user_members SET status = 'revoked', revoked_at = now()
+WHERE user_id = $1 AND member_id = $2 AND status = 'active'
+`
+
+type RevokeUserMemberParams struct {
+	UserID   string `json:"user_id"`
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) RevokeUserMember(ctx context.Context, arg RevokeUserMemberParams) error {
+	_, err := q.db.Exec(ctx, revokeUserMember, arg.UserID, arg.MemberID)
+	return err
+}
+
+const setMemberBindingPolicy = `-- name: SetMemberBindingPolicy :exec
+UPDATE members SET binding_policy = $1 WHERE id = $2 AND space_id = $3
+`
+
+type SetMemberBindingPolicyParams struct {
+	BindingPolicy string `json:"binding_policy"`
+	ID            string `json:"id"`
+	SpaceID       string `json:"space_id"`
+}
+
+func (q *Queries) SetMemberBindingPolicy(ctx context.Context, arg SetMemberBindingPolicyParams) error {
+	_, err := q.db.Exec(ctx, setMemberBindingPolicy, arg.BindingPolicy, arg.ID, arg.SpaceID)
+	return err
+}
+
+const setMemberStatus = `-- name: SetMemberStatus :exec
+UPDATE members SET status = $1 WHERE id = $2 AND space_id = $3
+`
+
+type SetMemberStatusParams struct {
+	Status  string `json:"status"`
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) SetMemberStatus(ctx context.Context, arg SetMemberStatusParams) error {
+	_, err := q.db.Exec(ctx, setMemberStatus, arg.Status, arg.ID, arg.SpaceID)
 	return err
 }
 

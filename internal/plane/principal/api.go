@@ -132,9 +132,16 @@ func (a *API) refresh(ctx context.Context, in *RefreshInput) (*RefreshOutput, er
 	return out, nil
 }
 func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
-	claims, e := bearer(a.Signer, in.Authorization)
+	parts := strings.Fields(in.Authorization)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+	}
+	claims, active, e := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
 	if e != nil {
 		return nil, e
+	}
+	if !active {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
 	}
 	u, e := a.Accounts.Me(ctx, claims)
 	if e != nil {

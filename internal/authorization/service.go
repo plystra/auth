@@ -38,6 +38,14 @@ type Member struct {
 	Status        string `json:"status"`
 }
 
+type Binding struct {
+	UserID    string `json:"user_id"`
+	MemberID  string `json:"member_id"`
+	Email     string `json:"email"`
+	Status    string `json:"status"`
+	ExpiresAt string `json:"expires_at,omitempty"`
+}
+
 type Role struct {
 	ID          string   `json:"id"`
 	SpaceID     string   `json:"space_id"`
@@ -62,6 +70,7 @@ var administratorPermissions = []string{
 	"auth.spaces:manage",
 	"auth.members:read",
 	"auth.members:manage",
+	"auth.bindings:manage",
 	"auth.roles:manage",
 	"auth.grants:assign",
 	"auth.assign_rights:manage",
@@ -148,7 +157,7 @@ func (s *Service) GetMemberForUser(ctx context.Context, userID, spaceID string) 
 	if err != nil {
 		return Member{}, err
 	}
-	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind}, nil
+	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
 }
 
 func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Member, error) {
@@ -243,6 +252,176 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 		return nil
 	})
 	return out, err
+}
+
+func (s *Service) ListBindings(ctx context.Context, memberID string) ([]Binding, error) {
+	rows, err := s.Store.Queries().ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: memberID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Binding, 0, len(rows))
+	for _, row := range rows {
+		binding := Binding{UserID: row.UserID, MemberID: row.MemberID, Email: row.Email, Status: row.Status}
+		if row.ExpiresAt.Valid {
+			binding.ExpiresAt = row.ExpiresAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+		out = append(out, binding)
+	}
+	return out, nil
+}
+
+func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
+	if userID == "" {
+		return apierr.New("VALIDATION_FAILED", "user_id is required")
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+			return err
+		}
+		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "member was not found in this Space")
+			}
+			return err
+		}
+		if member.Status != "active" {
+			return apierr.New("CONFLICT", "member is not active")
+		}
+		user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "user was not found")
+			}
+			return err
+		}
+		if user.Status != "active" {
+			return apierr.New("CONFLICT", "user is not active")
+		}
+		if err := ensureAuthorityCoverageTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
+		}
+		count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
+		if err != nil {
+			return err
+		}
+		if member.BindingPolicy == "individual" && count > 0 {
+			return apierr.New("CONFLICT", "an individual member can have only one active user binding")
+		}
+		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", actorMemberID, "member.binding.create", memberID, "success")
+	})
+}
+
+func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+			return err
+		}
+		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "member was not found in this Space")
+			}
+			return err
+		}
+		binding, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
+		if err != nil || binding.Status != "active" {
+			if errors.Is(err, pgx.ErrNoRows) || err == nil {
+				return apierr.New("NOT_FOUND", "active user binding was not found")
+			}
+			return err
+		}
+		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
+			return err
+		}
+		if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID}); err != nil {
+			return err
+		}
+		if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: userID}); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", actorMemberID, "member.binding.revoke", memberID, "success")
+	})
+}
+
+func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, memberID, policy string) error {
+	if policy != "individual" && policy != "shared" {
+		return apierr.New("VALIDATION_FAILED", "binding_policy must be individual or shared")
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
+			return err
+		}
+		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "member was not found in this Space")
+			}
+			return err
+		}
+		if policy == "individual" {
+			count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
+			if err != nil {
+				return err
+			}
+			if count > 1 {
+				return apierr.New("CONFLICT", "cannot make a member individual while it has multiple active bindings")
+			}
+		}
+		if err := q.SetMemberBindingPolicy(ctx, db.SetMemberBindingPolicyParams{ID: memberID, SpaceID: spaceID, BindingPolicy: policy}); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", actorMemberID, "member.binding_policy.update", member.ID, "success")
+	})
+}
+
+func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, memberID, status string) error {
+	if status != "active" && status != "suspended" && status != "removed" {
+		return apierr.New("VALIDATION_FAILED", "member status is invalid")
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.members:manage"); err != nil {
+			return err
+		}
+		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "member was not found in this Space")
+			}
+			return err
+		}
+		if err := q.SetMemberStatus(ctx, db.SetMemberStatusParams{ID: memberID, SpaceID: spaceID, Status: status}); err != nil {
+			return err
+		}
+		bindings, err := q.ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: memberID})
+		if err != nil {
+			return err
+		}
+		for _, binding := range bindings {
+			if binding.Status == "active" {
+				if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: binding.UserID}); err != nil {
+					return err
+				}
+				if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: binding.UserID}); err != nil {
+					return err
+				}
+			}
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", actorMemberID, "member.status.update", memberID, "success")
+	})
 }
 
 func (s *Service) ListRoles(ctx context.Context, spaceID string) ([]Role, error) {
@@ -456,6 +635,23 @@ func requirePermissionTx(ctx context.Context, q *db.Queries, memberID, permissio
 	}
 	if !permissions[permission] {
 		return &apierr.Error{Code: "PERMISSION_DENIED", Message: "The current member does not have the required permission.", Details: map[string]string{"permission": permission}}
+	}
+	return nil
+}
+
+func ensureAuthorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID, targetMemberID string) error {
+	actor, err := permissionSetTx(ctx, q, actorMemberID)
+	if err != nil {
+		return err
+	}
+	target, err := permissionSetTx(ctx, q, targetMemberID)
+	if err != nil {
+		return err
+	}
+	for permission := range target {
+		if !actor[permission] {
+			return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The binding would transfer authority the actor does not hold.", Details: map[string]string{"permission": permission}}
+		}
 	}
 	return nil
 }

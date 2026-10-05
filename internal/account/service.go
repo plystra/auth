@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
@@ -22,6 +23,7 @@ type User struct {
 	ID            string    `json:"id"`
 	Email         string    `json:"email"`
 	EmailVerified bool      `json:"email_verified"`
+	Status        string    `json:"status"`
 	CreatedAt     time.Time `json:"created_at"`
 }
 type Service struct {
@@ -43,8 +45,8 @@ type LoginInput struct {
 	UserAgent string
 }
 type AuthResult struct {
-	User   User           `json:"user"`
-	Tokens session.Tokens `json:"tokens"`
+	User   User            `json:"user"`
+	Tokens *session.Tokens `json:"tokens,omitempty"`
 }
 
 const DefaultSpaceID = "spc_01h00000000000000000000000"
@@ -77,10 +79,27 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 	if e != nil {
 		return AuthResult{}, e
 	}
-	var u db.User
+	var u db.CreateUserRow
+	status := "active"
+	var verificationHash []byte
+	if settings.RequireEmailVerification {
+		status = "pending"
+		_, verificationHash, e = opaqueToken("ev_")
+		if e != nil {
+			return AuthResult{}, e
+		}
+	}
 	e = s.Store.InTx(ctx, func(q *db.Queries) error {
-		u, e = q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: hash})
-		return e
+		u, e = q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: hash, Status: status})
+		if e != nil {
+			return e
+		}
+		if settings.RequireEmailVerification {
+			if e = q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: string(ids.New[ids.ID]("evt")), UserID: u.ID, TokenHash: verificationHash, ExpiresAt: pgTime(time.Now().UTC().Add(24 * time.Hour))}); e != nil {
+				return e
+			}
+		}
+		return audit.Write(ctx, q, "public", u.ID, "auth.register", u.ID, "success")
 	})
 	if e != nil {
 		if strings.Contains(e.Error(), "duplicate") || strings.Contains(e.Error(), "unique") {
@@ -93,11 +112,14 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 			return AuthResult{}, e
 		}
 	}
+	if settings.RequireEmailVerification {
+		return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time)}, nil
+	}
 	tokens, e := s.Sessions.Create(ctx, u.ID, ip, ua, 1)
 	if e != nil {
 		return AuthResult{}, e
 	}
-	return AuthResult{User: toUser(u), Tokens: tokens}, nil
+	return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), Tokens: &tokens}, nil
 }
 func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) {
 	if s.Limiter != nil {
@@ -110,8 +132,12 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 		}
 	}
 	email := strings.TrimSpace(strings.ToLower(in.Email))
-	var u db.User
-	e := func() error {
+	settings, e := s.Settings.Get(ctx)
+	if e != nil {
+		return AuthResult{}, e
+	}
+	var u db.GetUserByEmailRow
+	e = func() error {
 		row, e := s.Store.Queries().GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email})
 		u = row
 		return e
@@ -125,11 +151,17 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 	if u.DisabledAt.Valid || !s.Passwords.Verify(in.Password, u.PasswordHash) {
 		return AuthResult{}, apierr.New("invalid_credentials", "email or password is incorrect")
 	}
+	if u.Status == "pending" && settings.RequireEmailVerification {
+		return AuthResult{}, apierr.New("EMAIL_VERIFICATION_REQUIRED", "verify your email before signing in")
+	}
+	if u.Status != "active" {
+		return AuthResult{}, apierr.New("UNAUTHENTICATED", "this account is not active")
+	}
 	tokens, e := s.Sessions.Create(ctx, u.ID, in.IP, in.UserAgent, 1)
 	if e != nil {
 		return AuthResult{}, e
 	}
-	return AuthResult{User: toUser(u), Tokens: tokens}, nil
+	return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), Tokens: &tokens}, nil
 }
 func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) {
 	u, e := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
@@ -139,13 +171,13 @@ func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) 
 		}
 		return User{}, e
 	}
-	if u.DisabledAt.Valid {
+	if u.DisabledAt.Valid || u.Status != "active" {
 		return User{}, apierr.New("unauthorized", "account is disabled")
 	}
-	return toUser(u), nil
+	return toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), nil
 }
-func toUser(u db.User) User {
-	return User{ID: u.ID, Email: u.Email, EmailVerified: u.EmailVerifiedAt.Valid, CreatedAt: u.CreatedAt.Time}
+func toPublicUser(id, email string, verified bool, status string, createdAt time.Time) User {
+	return User{ID: id, Email: email, EmailVerified: verified, Status: status, CreatedAt: createdAt}
 }
 func validEmail(v string) bool {
 	at := strings.LastIndexByte(v, '@')

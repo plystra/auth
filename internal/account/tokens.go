@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 )
@@ -44,7 +45,10 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) error {
 			return e
 		}
 		userID = v
-		return q.MarkEmailVerified(ctx, db.MarkEmailVerifiedParams{ID: userID})
+		if _, e = q.MarkEmailVerified(ctx, db.MarkEmailVerifiedParams{ID: userID}); e != nil {
+			return e
+		}
+		return audit.Write(ctx, q, "public", userID, "auth.email.verify", userID, "success")
 	})
 	if errors.Is(e, pgx.ErrNoRows) {
 		return apierr.New("invalid_grant", "verification token is invalid or expired")
@@ -84,7 +88,10 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 		if e = q.UpdatePassword(ctx, db.UpdatePasswordParams{ID: v, PasswordHash: hash}); e != nil {
 			return e
 		}
-		return q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: v})
+		if e = q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: v}); e != nil {
+			return e
+		}
+		return q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: v})
 	})
 }
 func sha256Bytes(v string) []byte { sum := sha256.Sum256([]byte(strings.TrimSpace(v))); return sum[:] }
