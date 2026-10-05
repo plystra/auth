@@ -47,6 +47,12 @@ ORDER BY created_at, id;
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: LockMemberInSpace :one
+SELECT id, space_id, name, type, binding_policy, status, created_at
+FROM members
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+FOR UPDATE;
+
 -- name: SetMemberStatus :exec
 UPDATE members SET status = sqlc.arg(status) WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 

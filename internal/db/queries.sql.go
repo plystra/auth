@@ -1453,6 +1453,43 @@ func (q *Queries) ListRolesInSpace(ctx context.Context, arg ListRolesInSpacePara
 	return items, nil
 }
 
+const lockMemberInSpace = `-- name: LockMemberInSpace :one
+SELECT id, space_id, name, type, binding_policy, status, created_at
+FROM members
+WHERE id = $1 AND space_id = $2
+FOR UPDATE
+`
+
+type LockMemberInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+type LockMemberInSpaceRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) LockMemberInSpace(ctx context.Context, arg LockMemberInSpaceParams) (LockMemberInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, lockMemberInSpace, arg.ID, arg.SpaceID)
+	var i LockMemberInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Type,
+		&i.BindingPolicy,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const lockTOTPFactors = `-- name: LockTOTPFactors :many
 SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at FROM factors WHERE user_id = $1 AND kind = 'totp' ORDER BY id FOR UPDATE
 `

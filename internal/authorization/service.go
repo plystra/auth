@@ -287,7 +287,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
 			return err
 		}
-		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "member was not found in this Space")
@@ -296,6 +296,9 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		}
 		if member.Status != "active" {
 			return apierr.New("CONFLICT", "member is not active")
+		}
+		if member.Type != "human" {
+			return apierr.New("VALIDATION_FAILED", "only human members can bind a user")
 		}
 		user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
 		if err != nil {
@@ -369,7 +372,7 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 		if err := requirePermissionTx(ctx, q, actorMemberID, "auth.bindings:manage"); err != nil {
 			return err
 		}
-		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "member was not found in this Space")
