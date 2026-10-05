@@ -2,11 +2,13 @@ package route
 
 import (
 	"context"
-	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/ids"
 )
 
 type Plane string
@@ -82,17 +84,24 @@ func contains(ss []Subject, want Subject) bool {
 	}
 	return false
 }
-func ContextPlane(ctx context.Context) Plane { p, _ := ctx.Value(planeKey{}).(Plane); return p }
 
 type planeKey struct{}
 
+func ContextPlane(ctx context.Context) Plane { p, _ := ctx.Value(planeKey{}).(Plane); return p }
 func WithPlane(ctx context.Context, p Plane) context.Context {
 	return context.WithValue(ctx, planeKey{}, p)
 }
 func Middleware(p Plane, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if id == "" || len(id) > 128 {
+			id = string(ids.New[ids.ID]("req"))
+		}
+		w.Header().Set("X-Request-Id", id)
+		if p == Server && r.Header.Get("Origin") != "" {
+			apierr.Write(w, apierr.New("browser_origin_rejected", "service endpoints do not accept browser origins"))
+			return
+		}
 		next.ServeHTTP(w, r.WithContext(WithPlane(r.Context(), p)))
 	})
 }
-
-var _ = fmt.Sprintf

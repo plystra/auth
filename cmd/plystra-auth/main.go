@@ -24,10 +24,13 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/config"
+	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/plane/ops"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/plane/server"
+	"github.com/plystra/auth/internal/protocol"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -83,10 +86,70 @@ func verifyCommand() *cobra.Command {
 	}}
 }
 func operatorCommand() *cobra.Command {
-	cmd := &cobra.Command{Use: "operator"}
-	cmd.AddCommand(&cobra.Command{Use: "bootstrap", Short: "bootstrap the first operator through the configured deployment workflow", RunE: func(cmd *cobra.Command, args []string) error {
-		return errors.New("operator bootstrap requires the operations plane and an authenticated deployment; no implicit credentials are generated")
-	}})
+	var email, password string
+	cmd := &cobra.Command{Use: "operator", Short: "manage deployment operators"}
+	bootstrap := &cobra.Command{Use: "bootstrap", Short: "create the first operator through the local CLI", RunE: func(cmd *cobra.Command, args []string) error {
+		if strings.TrimSpace(email) == "" || password == "" {
+			return errors.New("--email and --password are required")
+		}
+		c, e := loadConfig()
+		if e != nil {
+			return e
+		}
+		st, e := store.Open(cmd.Context(), c.DatabaseURL)
+		if e != nil {
+			return e
+		}
+		defer st.Close()
+		var created, apiKey string
+		e = st.InTx(cmd.Context(), func(q *db.Queries) error {
+			count, e := q.CountOperators(cmd.Context())
+			if e != nil {
+				return e
+			}
+			if count != 0 {
+				return errors.New("an operator already exists; use the operations plane")
+			}
+			normalized := strings.ToLower(strings.TrimSpace(email))
+			hash, e := security.DefaultPasswordHasher().Hash(password)
+			if e != nil {
+				return e
+			}
+			u, e := q.CreateUser(cmd.Context(), db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: normalized, EmailNormalized: normalized, PasswordHash: hash})
+			if e != nil {
+				return e
+			}
+			m, e := q.CreateMember(cmd.Context(), db.CreateMemberParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: account.DefaultSpaceID, Name: normalized, Kind: "user"})
+			if e != nil {
+				return e
+			}
+			if e = q.LinkUserMember(cmd.Context(), db.LinkUserMemberParams{UserID: u.ID, MemberID: m.ID}); e != nil {
+				return e
+			}
+			caps, _ := json.Marshal([]string{"*"})
+			rawKey, prefix, keyHash, keyErr := application.GenerateSecret()
+			if keyErr != nil {
+				return keyErr
+			}
+			apiKey = rawKey
+			if _, e = q.CreateAPIKey(cmd.Context(), db.CreateAPIKeyParams{ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash, Scopes: []byte(`["authz:check","tokens:introspect"]`)}); e != nil {
+				return e
+			}
+			if e = q.CreateOperator(cmd.Context(), db.CreateOperatorParams{UserID: u.ID, Capabilities: caps}); e != nil {
+				return e
+			}
+			created = u.ID
+			return nil
+		})
+		if e != nil {
+			return e
+		}
+		fmt.Printf("operator created: %s\\nbootstrap API key (shown once): %s\\n", created, apiKey)
+		return nil
+	}}
+	bootstrap.Flags().StringVar(&email, "email", "", "operator email")
+	bootstrap.Flags().StringVar(&password, "password", "", "operator password")
+	cmd.AddCommand(bootstrap)
 	return cmd
 }
 func permissionsCommand() *cobra.Command {
@@ -137,6 +200,7 @@ func serve(ctx context.Context) error {
 	scfg := huma.DefaultConfig("Plystra Auth server", "1.0.0")
 	ocfg := huma.DefaultConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
+	protocol.HTTP{Issuer: c.Issuer}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	route.RegisterNonJSON(principalMux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

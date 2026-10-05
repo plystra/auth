@@ -14,6 +14,7 @@ type Error struct {
 }
 
 func (e *Error) Error() string                        { return e.Code + ": " + e.Message }
+func (e *Error) GetStatus() int                       { return Status(e.Code) }
 func New(code, message string) *Error                 { return &Error{Code: code, Message: message} }
 func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = requestID; return &c }
 func Status(code string) int {

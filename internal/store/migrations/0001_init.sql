@@ -235,13 +235,18 @@ CREATE TABLE outbox_events (
 );
 CREATE INDEX outbox_pending_idx ON outbox_events(created_at) WHERE delivered_at IS NULL;
 
+-- +goose StatementBegin
 CREATE FUNCTION reject_audit_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'audit_logs is append-only'; END;
 $$;
+-- +goose StatementEnd
 CREATE TRIGGER audit_logs_no_update BEFORE UPDATE OR DELETE ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_audit_mutation();
 
 -- +goose Down
 -- Forward-only migrations: restore from a PostgreSQL backup or add a compensating migration.
+
+
+
 
 
 

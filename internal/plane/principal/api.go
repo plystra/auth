@@ -85,13 +85,13 @@ type LogoutOutput struct {
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_up", Method: "POST", Path: "/v1/auth/sign-up", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.register)
-	route.Register(api, route.Spec{Name: "auth.login", Method: "POST", Path: "/v1/auth/login", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
+	route.Register(api, route.Spec{Name: "auth.sign_in", Method: "POST", Path: "/v1/auth/sign-in", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
 	route.Register(api, route.Spec{Name: "auth.refresh", Method: "POST", Path: "/v1/auth/refresh", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.refresh)
 	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.Human}}, a.me)
-	route.Register(api, route.Spec{Name: "auth.logout", Method: "POST", Path: "/v1/auth/logout", Plane: route.Principal, Permission: "session:revoke", Subjects: []route.Subject{route.Human}}, a.logout)
-	route.Register(api, route.Spec{Name: "auth.verify_email", Method: "POST", Path: "/v1/auth/verify-email", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
-	route.Register(api, route.Spec{Name: "auth.password_reset_request", Method: "POST", Path: "/v1/auth/password-reset/request", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
-	route.Register(api, route.Spec{Name: "auth.password_reset_confirm", Method: "POST", Path: "/v1/auth/password-reset/confirm", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetConfirm)
+	route.Register(api, route.Spec{Name: "auth.sign_out", Method: "POST", Path: "/v1/auth/sign-out", Plane: route.Principal, Permission: "session:revoke", Subjects: []route.Subject{route.Human}}, a.logout)
+	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
+	route.Register(api, route.Spec{Name: "auth.password_forgot", Method: "POST", Path: "/v1/auth/password/forgot", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
+	route.Register(api, route.Spec{Name: "auth.password_reset", Method: "POST", Path: "/v1/auth/password/reset", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetConfirm)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
 	r := in.Body
