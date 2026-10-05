@@ -92,8 +92,9 @@ type IntrospectOutput struct {
 }
 
 type resolvedSubject struct {
-	ID   string
-	Type string
+	ID     string
+	Type   string
+	Scopes []string
 }
 
 func (a *API) Register(api huma.API) {
@@ -161,6 +162,18 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	}
 	request := engine.Request{MemberID: memberID, PrincipalType: resolved.Type, Permission: strings.TrimSpace(in.Body.Action), ResourceSpace: spaceID,
 		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID, Assignments: assignments}
+	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, request.Permission) {
+		return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion)
+	}
+	if in.Body.Resource.OwnerMemberID != "" && in.Body.Resource.OwnerMemberID != memberID && a.Agents != nil {
+		owned, ownerErr := a.Agents.CanManage(ctx, memberID, in.Body.Resource.OwnerMemberID)
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+		if owned {
+			request.SelfOwners = []string{in.Body.Resource.OwnerMemberID}
+		}
+	}
 	if resolved.Type == "agent" {
 		request.Owner, err = a.ownerRequest(ctx, memberID, request.Permission, request.ResourceSpace, request.ResourceGroup, request.ResourceOwner, 0)
 		if err != nil {
@@ -200,7 +213,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			return resolvedSubject{}, apierr.New("UNAUTHENTICATED", "the subject token is invalid")
 		}
 		if claims.Type == "agent" {
-			return resolvedSubject{ID: claims.Subject, Type: "agent"}, nil
+			return resolvedSubject{ID: claims.Subject, Type: "agent", Scopes: claims.Scopes}, nil
 		}
 		if a.Authorization == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")

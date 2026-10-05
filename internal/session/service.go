@@ -165,6 +165,17 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 // short-lived access token. Agent sessions are intentionally stateless: live
 // member and owner-chain status is checked during introspection/authz checks.
 func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audience string) (Tokens, error) {
+	return s.createAgentAccess(ctx, memberID, spaceID, audience, "", nil, 0)
+}
+
+// CreateAgentDelegatedAccess issues a token for an existing child Agent. The
+// optional actor and upper expiry bound are carried from the parent token so a
+// delegated token cannot outlive the delegation step that produced it.
+func (s *Service) CreateAgentDelegatedAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
+	return s.createAgentAccess(ctx, memberID, spaceID, audience, actor, scopes, notAfter)
+}
+
+func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
@@ -173,6 +184,16 @@ func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audi
 		return Tokens{}, errors.New("invalid session settings")
 	}
 	now := time.Now().UTC()
+	expiresAt := now.Add(st.AccessTTL)
+	if notAfter > 0 {
+		parentExpiry := time.Unix(notAfter, 0)
+		if parentExpiry.Before(expiresAt) {
+			expiresAt = parentExpiry
+		}
+	}
+	if !expiresAt.After(now) {
+		return Tokens{}, apierr.New("invalid_grant", "delegated token would already be expired")
+	}
 	jti, err := randomToken("jti_")
 	if err != nil {
 		return Tokens{}, err
@@ -180,11 +201,11 @@ func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if strings.TrimSpace(audience) == "" {
 		audience = security.DefaultApplicationAudience
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, Type: "agent"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, Actor: actor, Scopes: scopes, Type: "agent"})
 	if err != nil {
 		return Tokens{}, err
 	}
-	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second)}, nil
+	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(expiresAt.Sub(now) / time.Second)}, nil
 }
 func (s *Service) Revoke(ctx context.Context, sid string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {

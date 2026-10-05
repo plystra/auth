@@ -222,7 +222,7 @@ func serve(ctx context.Context) error {
 	scfg := huma.DefaultConfig("Plystra Auth server", "1.0.0")
 	ocfg := huma.DefaultConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
-	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc}.Register(principalMux)
+	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	route.RegisterNonJSON(principalMux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

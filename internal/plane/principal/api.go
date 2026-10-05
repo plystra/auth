@@ -173,6 +173,9 @@ func (a *API) logout(ctx context.Context, in *BearerInput) (*LogoutOutput, error
 	if e != nil {
 		return nil, e
 	}
+	if claims.Type == "agent" {
+		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+	}
 	if claims.SessionID == "" {
 		return nil, apierr.New("unauthorized", "session claim is required")
 	}
