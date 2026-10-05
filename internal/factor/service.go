@@ -26,9 +26,9 @@ type Service struct {
 	DataKey secret.Secret
 }
 type Enrollment struct {
-	FactorID string `json:"factor_id"`
-	Secret   string `json:"secret"`
-	URI      string `json:"otpauth_uri"`
+	FactorID string        `json:"factor_id"`
+	Secret   secret.Secret `json:"secret"`
+	URI      string        `json:"otpauth_uri"`
 }
 
 var ErrInvalidCode = errors.New("invalid one-time code")
@@ -89,7 +89,7 @@ func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userI
 	if _, err := q.CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: "authenticator", SecretCiphertext: blob}); err != nil {
 		return Enrollment{}, err
 	}
-	return Enrollment{FactorID: string(id), Secret: raw, URI: uri}, nil
+	return Enrollment{FactorID: string(id), Secret: secret.New(raw), URI: uri}, nil
 }
 func (s *Service) VerifyTOTP(ctx context.Context, userID, factorID, code string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {

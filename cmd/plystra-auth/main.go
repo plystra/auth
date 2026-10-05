@@ -147,7 +147,7 @@ func operatorCommand() *cobra.Command {
 			if e != nil {
 				return e
 			}
-			totpSecret = enrollment.Secret
+			totpSecret = enrollment.Secret.Value()
 			created = u.ID
 			return audit.Write(cmd.Context(), q, "operator", u.ID, "ops.operator.bootstrap", u.ID, "success")
 		})

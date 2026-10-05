@@ -11,12 +11,38 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countFullCapabilityOperators = `-- name: CountFullCapabilityOperators :one
+SELECT count(*)::int FROM operators WHERE active AND capabilities @> '["*"]'::jsonb
+`
+
+func (q *Queries) CountFullCapabilityOperators(ctx context.Context) (int32, error) {
+	row := q.db.QueryRow(ctx, countFullCapabilityOperators)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countOperators = `-- name: CountOperators :one
 SELECT count(*)::int FROM operators WHERE active
 `
 
 func (q *Queries) CountOperators(ctx context.Context) (int32, error) {
 	row := q.db.QueryRow(ctx, countOperators)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const countTOTPFactors = `-- name: CountTOTPFactors :one
+SELECT count(*)::int FROM factors WHERE user_id = $1 AND kind = 'totp'
+`
+
+type CountTOTPFactorsParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) CountTOTPFactors(ctx context.Context, arg CountTOTPFactorsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countTOTPFactors, arg.UserID)
 	var column_1 int32
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -36,6 +62,29 @@ func (q *Queries) CreateOperator(ctx context.Context, arg CreateOperatorParams) 
 	return err
 }
 
+const disableOperator = `-- name: DisableOperator :one
+UPDATE operators SET active = false
+WHERE user_id = $1 AND active
+RETURNING user_id, capabilities, active, created_at, last_step_up_at
+`
+
+type DisableOperatorParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) DisableOperator(ctx context.Context, arg DisableOperatorParams) (Operator, error) {
+	row := q.db.QueryRow(ctx, disableOperator, arg.UserID)
+	var i Operator
+	err := row.Scan(
+		&i.UserID,
+		&i.Capabilities,
+		&i.Active,
+		&i.CreatedAt,
+		&i.LastStepUpAt,
+	)
+	return i, err
+}
+
 const getOperator = `-- name: GetOperator :one
 SELECT user_id, capabilities, active, created_at, last_step_up_at FROM operators WHERE user_id=$1
 `
@@ -46,6 +95,72 @@ type GetOperatorParams struct {
 
 func (q *Queries) GetOperator(ctx context.Context, arg GetOperatorParams) (Operator, error) {
 	row := q.db.QueryRow(ctx, getOperator, arg.UserID)
+	var i Operator
+	err := row.Scan(
+		&i.UserID,
+		&i.Capabilities,
+		&i.Active,
+		&i.CreatedAt,
+		&i.LastStepUpAt,
+	)
+	return i, err
+}
+
+const listOperators = `-- name: ListOperators :many
+SELECT o.user_id, u.email, o.capabilities, o.active, o.created_at, o.last_step_up_at, u.disabled_at
+FROM operators o JOIN users u ON u.id = o.user_id
+ORDER BY o.user_id
+`
+
+type ListOperatorsRow struct {
+	UserID       string             `json:"user_id"`
+	Email        string             `json:"email"`
+	Capabilities []byte             `json:"capabilities"`
+	Active       bool               `json:"active"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	LastStepUpAt pgtype.Timestamptz `json:"last_step_up_at"`
+	DisabledAt   pgtype.Timestamptz `json:"disabled_at"`
+}
+
+func (q *Queries) ListOperators(ctx context.Context) ([]ListOperatorsRow, error) {
+	rows, err := q.db.Query(ctx, listOperators)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOperatorsRow{}
+	for rows.Next() {
+		var i ListOperatorsRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Email,
+			&i.Capabilities,
+			&i.Active,
+			&i.CreatedAt,
+			&i.LastStepUpAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockOperator = `-- name: LockOperator :one
+SELECT user_id, capabilities, active, created_at, last_step_up_at
+FROM operators WHERE user_id = $1 FOR UPDATE
+`
+
+type LockOperatorParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) LockOperator(ctx context.Context, arg LockOperatorParams) (Operator, error) {
+	row := q.db.QueryRow(ctx, lockOperator, arg.UserID)
 	var i Operator
 	err := row.Scan(
 		&i.UserID,
@@ -93,6 +208,55 @@ func (q *Queries) LockOperatorIdentity(ctx context.Context, arg LockOperatorIden
 		&i.Active,
 		&i.DisabledAt,
 		&i.PasswordHash,
+	)
+	return i, err
+}
+
+const lockUserForOperator = `-- name: LockUserForOperator :one
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, created_at, updated_at
+FROM users WHERE id = $1 FOR UPDATE
+`
+
+type LockUserForOperatorParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) LockUserForOperator(ctx context.Context, arg LockUserForOperatorParams) (User, error) {
+	row := q.db.QueryRow(ctx, lockUserForOperator, arg.ID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.DisabledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateOperatorCapabilities = `-- name: UpdateOperatorCapabilities :one
+UPDATE operators SET capabilities = $1
+WHERE user_id = $2 AND active
+RETURNING user_id, capabilities, active, created_at, last_step_up_at
+`
+
+type UpdateOperatorCapabilitiesParams struct {
+	Capabilities []byte `json:"capabilities"`
+	UserID       string `json:"user_id"`
+}
+
+func (q *Queries) UpdateOperatorCapabilities(ctx context.Context, arg UpdateOperatorCapabilitiesParams) (Operator, error) {
+	row := q.db.QueryRow(ctx, updateOperatorCapabilities, arg.Capabilities, arg.UserID)
+	var i Operator
+	err := row.Scan(
+		&i.UserID,
+		&i.Capabilities,
+		&i.Active,
+		&i.CreatedAt,
+		&i.LastStepUpAt,
 	)
 	return i, err
 }

@@ -44,9 +44,9 @@ type AuthInput struct {
 type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Code      secret.Secret       `json:"mfa_code" minLength:"6" maxLength:"6"`
-		Operation string              `json:"operation" enum:"ops.settings.update"`
-		Request   space.SettingsPatch `json:"request"`
+		Code      secret.Secret   `json:"mfa_code" minLength:"6" maxLength:"6"`
+		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable"`
+		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
 }
 type AcceptedOutput struct {
@@ -65,6 +65,42 @@ type SettingsInput struct {
 	Authorization string `header:"Authorization"`
 	Body          space.SettingsPatch
 }
+type OperatorsInput struct {
+	Authorization string `header:"Authorization"`
+}
+type OperatorChangeInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		Capabilities []string `json:"capabilities" minItems:"1" maxItems:"32"`
+	}
+}
+type OperatorCreateInput struct {
+	Authorization string `header:"Authorization"`
+	Body          struct {
+		UserID       string   `json:"user_id" minLength:"1" maxLength:"128"`
+		Capabilities []string `json:"capabilities" minItems:"1" maxItems:"32"`
+	}
+}
+type OperatorDisableInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
+type OperatorOutput struct {
+	Body struct {
+		Data operator.Operator `json:"data"`
+	}
+}
+type OperatorsOutput struct {
+	Body struct {
+		Data []operator.Operator `json:"data"`
+	}
+}
+type OperatorCreateOutput struct {
+	Body struct {
+		Data operator.OperatorCreate `json:"data"`
+	}
+}
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "ops.auth.sign_in", Method: "POST", Path: "/ops/v1/auth/sign-in", Plane: route.Ops, Subjects: []route.Subject{route.Public}}, a.signIn)
@@ -72,6 +108,10 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "ops.auth.sign_out", Method: "POST", Path: "/ops/v1/auth/sign-out", Plane: route.Ops, Permission: "ops:session", Subjects: []route.Subject{route.Human}}, a.signOut)
 	route.Register(api, route.Spec{Name: "ops.settings.get", Method: "GET", Path: "/ops/v1/settings", Plane: route.Ops, Permission: "ops:settings:read", Subjects: []route.Subject{route.Human}}, a.get)
 	route.Register(api, route.Spec{Name: "ops.settings.update", Method: "PATCH", Path: "/ops/v1/settings", Plane: route.Ops, Permission: "ops:settings:write", Subjects: []route.Subject{route.Human}, StepUp: true}, a.update)
+	route.Register(api, route.Spec{Name: "ops.operators.list", Method: "GET", Path: "/ops/v1/operators", Plane: route.Ops, Permission: "ops:operators:read", Subjects: []route.Subject{route.Human}}, a.listOperators)
+	route.Register(api, route.Spec{Name: "ops.operators.create", Method: "POST", Path: "/ops/v1/operators", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.createOperator)
+	route.Register(api, route.Spec{Name: "ops.operators.update", Method: "PATCH", Path: "/ops/v1/operators/{id}", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.updateOperator)
+	route.Register(api, route.Spec{Name: "ops.operators.disable", Method: "POST", Path: "/ops/v1/operators/{id}/disable", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.disableOperator)
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)
@@ -89,11 +129,78 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*AcceptedOutput, err
 	if err != nil {
 		return nil, err
 	}
-	digest, err := settingsDigest(in.Body.Request)
+	digest, err := canonicalDigest(in.Body.Request)
 	if err != nil {
 		return nil, err
 	}
 	if err = a.Operators.StepUp(ctx, token, in.Body.Code.Value(), in.Body.Operation, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+
+func (a *API) listOperators(ctx context.Context, in *OperatorsInput) (*OperatorsOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	items, err := a.Operators.List(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	out := &OperatorsOutput{}
+	out.Body.Data = items
+	return out, nil
+}
+
+func (a *API) createOperator(ctx context.Context, in *OperatorCreateInput) (*OperatorCreateOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(in.Body)
+	if err != nil {
+		return nil, err
+	}
+	created, err := a.Operators.Create(ctx, token, in.Body.UserID, in.Body.Capabilities, digest)
+	if err != nil {
+		return nil, err
+	}
+	out := &OperatorCreateOutput{}
+	out.Body.Data = created
+	return out, nil
+}
+
+func (a *API) updateOperator(ctx context.Context, in *OperatorChangeInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(struct {
+		ID           string   `json:"id"`
+		Capabilities []string `json:"capabilities"`
+	}{ID: in.ID, Capabilities: in.Body.Capabilities})
+	if err != nil {
+		return nil, err
+	}
+	if err = a.Operators.UpdateCapabilities(ctx, token, in.ID, in.Body.Capabilities, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+
+func (a *API) disableOperator(ctx context.Context, in *OperatorDisableInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(struct {
+		ID string `json:"id"`
+	}{ID: in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err = a.Operators.Disable(ctx, token, in.ID, digest); err != nil {
 		return nil, err
 	}
 	return accepted(), nil
@@ -145,7 +252,25 @@ func (a *API) update(ctx context.Context, in *SettingsInput) (*SettingsOutput, e
 	return out, nil
 }
 func settingsDigest(in space.SettingsPatch) ([]byte, error) {
-	raw, err := json.Marshal(in)
+	return canonicalDigestValue(in)
+}
+func canonicalDigest(raw json.RawMessage) ([]byte, error) {
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, apierr.New("VALIDATION_FAILED", "request must contain valid JSON.")
+	}
+	return canonicalDigestValue(value)
+}
+func canonicalDigestValue(value any) ([]byte, error) {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	var canonical any
+	if err := json.Unmarshal(raw, &canonical); err != nil {
+		return nil, apierr.New("VALIDATION_FAILED", "request must contain valid JSON.")
+	}
+	raw, err = json.Marshal(canonical)
 	if err != nil {
 		return nil, err
 	}

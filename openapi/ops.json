@@ -55,6 +55,26 @@
         ],
         "type": "object"
       },
+      "Enrollment": {
+        "additionalProperties": false,
+        "properties": {
+          "factor_id": {
+            "type": "string"
+          },
+          "otpauth_uri": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "factor_id",
+          "secret",
+          "otpauth_uri"
+        ],
+        "type": "object"
+      },
       "ErrorDetail": {
         "additionalProperties": false,
         "properties": {
@@ -184,6 +204,176 @@
           "refresh_token_ttl",
           "refresh_idle_ttl",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "Operator": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "email": {
+            "type": "string"
+          },
+          "last_step_up_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "email",
+          "capabilities",
+          "active",
+          "disabled",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "OperatorChangeInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/OperatorChangeInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "OperatorCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "mfa_enrollment": {
+            "$ref": "#/components/schemas/Enrollment"
+          },
+          "operator": {
+            "$ref": "#/components/schemas/Operator"
+          }
+        },
+        "required": [
+          "operator"
+        ],
+        "type": "object"
+      },
+      "OperatorCreateInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/OperatorCreateInputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "user_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "capabilities"
+        ],
+        "type": "object"
+      },
+      "OperatorCreateOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/OperatorCreateOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/OperatorCreate"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "OperatorsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "$schema": {
+            "description": "A URL to the JSON Schema for this object.",
+            "examples": [
+              "https://example.com/schemas/OperatorsOutputBody.json"
+            ],
+            "format": "uri",
+            "readOnly": true,
+            "type": "string"
+          },
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Operator"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -325,12 +515,15 @@
           },
           "operation": {
             "enum": [
-              "ops.settings.update"
+              "ops.settings.update",
+              "ops.operators.create",
+              "ops.operators.update",
+              "ops.operators.disable"
             ],
             "type": "string"
           },
           "request": {
-            "$ref": "#/components/schemas/SettingsPatch"
+            "minLength": 2
           }
         },
         "required": [
@@ -478,6 +671,188 @@
           }
         },
         "summary": "ops.auth.step_up"
+      }
+    },
+    "/ops/v1/operators": {
+      "get": {
+        "operationId": "ops.operators.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.operators.list"
+      },
+      "post": {
+        "operationId": "ops.operators.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorCreateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OperatorCreateOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.operators.create"
+      }
+    },
+    "/ops/v1/operators/{id}": {
+      "patch": {
+        "operationId": "ops.operators.update",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OperatorChangeInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.operators.update"
+      }
+    },
+    "/ops/v1/operators/{id}/disable": {
+      "post": {
+        "operationId": "ops.operators.disable",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.operators.disable"
       }
     },
     "/ops/v1/settings": {

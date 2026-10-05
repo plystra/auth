@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,6 +42,31 @@ type Session struct {
 	UserID       string
 	Capabilities []string
 	ExpiresAt    time.Time
+}
+
+// Capability names are intentionally explicit. Unknown names are rejected so a
+// typo cannot silently create an operator permission that no route enforces.
+var knownCapabilities = map[string]struct{}{
+	"ops:session":          {},
+	"ops:settings:read":    {},
+	"ops:settings:write":   {},
+	"ops:operators:read":   {},
+	"ops:operators:manage": {},
+}
+
+type Operator struct {
+	UserID       string     `json:"user_id"`
+	Email        string     `json:"email"`
+	Capabilities []string   `json:"capabilities"`
+	Active       bool       `json:"active"`
+	Disabled     bool       `json:"disabled"`
+	CreatedAt    time.Time  `json:"created_at"`
+	LastStepUpAt *time.Time `json:"last_step_up_at,omitempty"`
+}
+
+type OperatorCreate struct {
+	Operator   Operator           `json:"operator"`
+	Enrollment *factor.Enrollment `json:"mfa_enrollment,omitempty"`
 }
 
 func New(st *store.Store, factors *factor.Service, keys [][]byte) (*Service, error) {
@@ -214,7 +240,12 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 }
 
 func (s *Service) StepUp(ctx context.Context, raw, code, operation string, digest []byte) error {
-	if operation != "ops.settings.update" || len(digest) != sha256.Size {
+	switch operation {
+	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable":
+	default:
+		return s.failure(ctx, "", "ops.auth.step_up", apierr.New("VALIDATION_FAILED", "An implemented operation and its request digest are required."))
+	}
+	if len(digest) != sha256.Size {
 		return s.failure(ctx, "", "ops.auth.step_up", apierr.New("VALIDATION_FAILED", "An implemented operation and its request digest are required."))
 	}
 	return s.Run(ctx, raw, "ops.auth.step_up", "ops:session", nil, func(q *db.Queries, current Session) error {
@@ -238,6 +269,134 @@ func (s *Service) SignOut(ctx context.Context, raw string) error {
 	})
 }
 
+func (s *Service) List(ctx context.Context, raw string) ([]Operator, error) {
+	var out []Operator
+	err := s.Run(ctx, raw, "ops.operators.list", "ops:operators:read", nil, func(q *db.Queries, _ Session) error {
+		rows, err := q.ListOperators(ctx)
+		if err != nil {
+			return err
+		}
+		out = make([]Operator, 0, len(rows))
+		for _, row := range rows {
+			caps, err := decodeCapabilities(row.Capabilities)
+			if err != nil {
+				return err
+			}
+			view := Operator{UserID: row.UserID, Email: row.Email, Capabilities: caps, Active: row.Active, Disabled: row.DisabledAt.Valid, CreatedAt: row.CreatedAt.Time}
+			if row.LastStepUpAt.Valid {
+				v := row.LastStepUpAt.Time
+				view.LastStepUpAt = &v
+			}
+			out = append(out, view)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (s *Service) Create(ctx context.Context, raw, userID string, capabilities []string, digest []byte) (OperatorCreate, error) {
+	requested, err := normalizeCapabilities(capabilities)
+	if err != nil {
+		return OperatorCreate{}, s.failure(ctx, "", "ops.operators.create", err)
+	}
+	var result OperatorCreate
+	err = s.Run(ctx, raw, "ops.operators.create", "ops:operators:manage", digest, func(q *db.Queries, current Session) error {
+		if err := ensureSubset(requested, current.Capabilities); err != nil {
+			return err
+		}
+		user, err := q.LockUserForOperator(ctx, db.LockUserForOperatorParams{ID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "The requested user was not found.")
+		}
+		if err != nil {
+			return err
+		}
+		if user.DisabledAt.Valid {
+			return apierr.New("CONFLICT", "A disabled user cannot become an operator.")
+		}
+		if _, err := q.GetOperator(ctx, db.GetOperatorParams{UserID: userID}); err == nil {
+			return apierr.New("CONFLICT", "The user is already an operator.")
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		caps, _ := json.Marshal(requested)
+		if err := q.CreateOperator(ctx, db.CreateOperatorParams{UserID: userID, Capabilities: caps}); err != nil {
+			return err
+		}
+		factorCount, err := q.CountTOTPFactors(ctx, db.CountTOTPFactorsParams{UserID: userID})
+		if err != nil {
+			return err
+		}
+		result = OperatorCreate{Operator: Operator{UserID: user.ID, Email: user.Email, Capabilities: requested, Active: true, CreatedAt: time.Now().UTC()}}
+		if factorCount == 0 {
+			enrollment, err := s.Factors.BeginTOTPTx(ctx, q, userID, user.Email)
+			if err != nil {
+				return err
+			}
+			result.Enrollment = &enrollment
+		}
+		return nil
+	})
+	return result, err
+}
+
+func (s *Service) UpdateCapabilities(ctx context.Context, raw, userID string, capabilities []string, digest []byte) error {
+	requested, err := normalizeCapabilities(capabilities)
+	if err != nil {
+		return s.failure(ctx, "", "ops.operators.update", err)
+	}
+	return s.Run(ctx, raw, "ops.operators.update", "ops:operators:manage", digest, func(q *db.Queries, current Session) error {
+		if err := ensureSubset(requested, current.Capabilities); err != nil {
+			return err
+		}
+		target, err := q.LockOperator(ctx, db.LockOperatorParams{UserID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "The requested operator was not found.")
+		}
+		if err != nil {
+			return err
+		}
+		if hasCapability(target.Capabilities, "*") && !containsCapability(requested, "*") {
+			count, err := q.CountFullCapabilityOperators(ctx)
+			if err != nil {
+				return err
+			}
+			if count <= 1 {
+				return apierr.New("CONFLICT", "The last full-capability operator cannot be narrowed.")
+			}
+		}
+		caps, _ := json.Marshal(requested)
+		_, err = q.UpdateOperatorCapabilities(ctx, db.UpdateOperatorCapabilitiesParams{UserID: userID, Capabilities: caps})
+		return err
+	})
+}
+
+func (s *Service) Disable(ctx context.Context, raw, userID string, digest []byte) error {
+	return s.Run(ctx, raw, "ops.operators.disable", "ops:operators:manage", digest, func(q *db.Queries, _ Session) error {
+		target, err := q.LockOperator(ctx, db.LockOperatorParams{UserID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "The requested operator was not found.")
+		}
+		if err != nil {
+			return err
+		}
+		if hasCapability(target.Capabilities, "*") {
+			count, err := q.CountFullCapabilityOperators(ctx)
+			if err != nil {
+				return err
+			}
+			if count <= 1 {
+				return apierr.New("CONFLICT", "The last full-capability operator cannot be disabled.")
+			}
+		}
+		_, err = q.DisableOperator(ctx, db.DisableOperatorParams{UserID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("CONFLICT", "The operator is already disabled.")
+		}
+		return err
+	})
+}
+
 func (s *Service) failure(ctx context.Context, actor, operation string, cause error) error {
 	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		return audit.Write(ctx, q, "operator_session", actor, operation, "", "failure")
@@ -258,6 +417,68 @@ func allows(current Session, capability string) bool {
 
 func invalidCredentials() error {
 	return apierr.New("UNAUTHENTICATED", "Operator credentials are invalid.")
+}
+
+func decodeCapabilities(raw []byte) ([]string, error) {
+	var caps []string
+	if err := json.Unmarshal(raw, &caps); err != nil {
+		return nil, err
+	}
+	return normalizeCapabilities(caps)
+}
+
+func normalizeCapabilities(values []string) ([]string, error) {
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, apierr.New("VALIDATION_FAILED", "capabilities must not contain empty values.")
+		}
+		if value != "*" {
+			if _, ok := knownCapabilities[value]; !ok {
+				return nil, apierr.New("VALIDATION_FAILED", "capabilities contains an unknown value.")
+			}
+		}
+		seen[value] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return nil, apierr.New("VALIDATION_FAILED", "at least one operator capability is required.")
+	}
+	if _, ok := seen["*"]; ok && len(seen) != 1 {
+		return nil, apierr.New("VALIDATION_FAILED", "the wildcard capability cannot be combined with named capabilities.")
+	}
+	out := make([]string, 0, len(seen))
+	for value := range seen {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func ensureSubset(requested, owner []string) error {
+	if containsCapability(owner, "*") {
+		return nil
+	}
+	for _, value := range requested {
+		if !containsCapability(owner, value) {
+			return &apierr.Error{Code: "PERMISSION_DENIED", Message: "An operator cannot grant capabilities it does not hold.", Details: map[string]string{"permission": value}}
+		}
+	}
+	return nil
+}
+
+func containsCapability(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func hasCapability(raw []byte, want string) bool {
+	caps, err := decodeCapabilities(raw)
+	return err == nil && containsCapability(caps, want)
 }
 
 func newToken() (secret.Secret, error) {
