@@ -81,7 +81,7 @@ func (d Database) Close(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	_, err = conn.Exec(ctx, "DROP DATABASE "+quoteIdentifier(d.name))
 	return err
 }
@@ -128,7 +128,7 @@ func (h *Harness) createDatabase(ctx context.Context, name, template string) err
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if !validDatabaseName.MatchString(name) || !validDatabaseName.MatchString(template) {
 		return fmt.Errorf("invalid test database name")
 	}

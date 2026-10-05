@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -227,7 +225,12 @@ func serve(ctx context.Context) error {
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	route.RegisterNonJSON(principalMux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(signer.JWKS())
+		jwks, err := signer.JWKS()
+		if err != nil {
+			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(jwks)
 	}))
 	health := http.NewServeMux()
 	health.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -236,7 +239,7 @@ func serve(ctx context.Context) error {
 	})
 	health.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
 		if e := st.Pool.Ping(r.Context()); e != nil {
-			http.Error(w, `{"status":"not_ready"}`, 503)
+			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
@@ -279,11 +282,3 @@ func decodeDataKey(value string) (string, error) {
 	}
 	return string(b), nil
 }
-func randomID(prefix string) string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return prefix + base64.RawURLEncoding.EncodeToString(b)
-}
-
-var _ = sha256.Sum256
-var _ = time.Second

@@ -66,7 +66,11 @@ func NewSigner(pemFile, issuer string) (*Signer, error) {
 	if key.Curve != elliptic.P256() {
 		return nil, errors.New("signing key must be P-256")
 	}
-	sum := sha256.Sum256(elliptic.Marshal(elliptic.P256(), key.PublicKey.X, key.PublicKey.Y))
+	publicBytes, err := key.PublicKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode signing public key: %w", err)
+	}
+	sum := sha256.Sum256(publicBytes)
 	return &Signer{private: key, public: &key.PublicKey, issuer: issuer, keyID: fmt.Sprintf("%x", sum[:8])}, nil
 }
 func GenerateSigner(issuer string) (*Signer, error) {
@@ -131,12 +135,15 @@ func (s *Signer) Verify(token string, now time.Time, audience string) (Claims, e
 	}
 	return c, nil
 }
-func (s *Signer) JWKS() map[string]any {
-	x, y := s.public.X.Bytes(), s.public.Y.Bytes()
-	xb, yb := make([]byte, 32), make([]byte, 32)
-	copy(xb[32-len(x):], x)
-	copy(yb[32-len(y):], y)
-	return map[string]any{"keys": []any{map[string]string{"kty": "EC", "crv": "P-256", "x": base64.RawURLEncoding.EncodeToString(xb), "y": base64.RawURLEncoding.EncodeToString(yb), "use": "sig", "alg": "ES256", "kid": s.keyID}}}
+func (s *Signer) JWKS() (map[string]any, error) {
+	publicBytes, err := s.public.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode signing public key: %w", err)
+	}
+	if len(publicBytes) != 65 || publicBytes[0] != 4 {
+		return nil, errors.New("invalid P-256 public key encoding")
+	}
+	return map[string]any{"keys": []any{map[string]string{"kty": "EC", "crv": "P-256", "x": base64.RawURLEncoding.EncodeToString(publicBytes[1:33]), "y": base64.RawURLEncoding.EncodeToString(publicBytes[33:]), "use": "sig", "alg": "ES256", "kid": s.keyID}}}, nil
 }
 
 func (s *Signer) Issuer() string { return s.issuer }

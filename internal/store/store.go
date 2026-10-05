@@ -43,7 +43,8 @@ func (s *Store) Close() {
 }
 func (s *Store) Queries() *db.Queries { return db.New(s.Pool) }
 func (s *Store) InTx(ctx context.Context, fn func(*db.Queries) error) error {
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	// The store is the single permitted transaction boundary.
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}) //nolint:forbidigo
 	if err != nil {
 		return err
 	}
@@ -59,7 +60,7 @@ func Migrate(ctx context.Context, databaseURL string) error {
 	if err != nil {
 		return err
 	}
-	defer dbsql.Close()
+	defer func() { _ = dbsql.Close() }()
 	sub, err := fs.Sub(migrationFS, "migrations")
 	if err != nil {
 		return err

@@ -13,6 +13,8 @@ func (s *Signer) JWKSet() (jwk.Set, error) {
 	_ = key.Set(jwk.AlgorithmKey, "ES256")
 	_ = key.Set(jwk.KeyUsageKey, "sig")
 	set := jwk.NewSet()
-	set.AddKey(key)
+	if err := set.AddKey(key); err != nil {
+		return nil, err
+	}
 	return set, nil
 }

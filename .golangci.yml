@@ -1,0 +1,76 @@
+version: "2"
+
+linters:
+  enable:
+    - depguard
+    - forbidigo
+  settings:
+    depguard:
+      rules:
+        authz_pure:
+          files:
+            - internal/authz/engine/**/*.go
+            - internal/authz/delta/**/*.go
+          list-mode: lax
+          deny:
+            - pkg: database
+              desc: authorization logic must not depend on a database
+            - pkg: net/http
+              desc: authorization logic must not depend on HTTP
+            - pkg: os
+              desc: authorization logic must not depend on the operating system
+            - pkg: syscall
+              desc: authorization logic must not depend on operating system syscalls
+            - pkg: github.com/jackc
+              desc: authorization logic must not depend on PostgreSQL
+            - pkg: github.com/plystra/auth/internal/store
+              desc: authorization logic must not depend on persistence
+        principal_plane:
+          files:
+            - internal/plane/principal/**/*.go
+          list-mode: lax
+          deny:
+            - pkg: github.com/plystra/auth/internal/plane/server
+              desc: interaction planes must not depend on one another
+            - pkg: github.com/plystra/auth/internal/plane/ops
+              desc: interaction planes must not depend on one another
+        server_plane:
+          files:
+            - internal/plane/server/**/*.go
+          list-mode: lax
+          deny:
+            - pkg: github.com/plystra/auth/internal/plane/principal
+              desc: interaction planes must not depend on one another
+            - pkg: github.com/plystra/auth/internal/plane/ops
+              desc: interaction planes must not depend on one another
+        ops_plane:
+          files:
+            - internal/plane/ops/**/*.go
+          list-mode: lax
+          deny:
+            - pkg: github.com/plystra/auth/internal/plane/principal
+              desc: interaction planes must not depend on one another
+            - pkg: github.com/plystra/auth/internal/plane/server
+              desc: interaction planes must not depend on one another
+
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: huma\.Register
+          msg: register JSON routes through internal/route.Register
+        - pattern: time\.Now
+          msg: pass the current time into pure authorization logic
+        - pattern: '(^|\.)Begin(Tx)?$'
+          msg: open transactions through store.InTx
+
+  exclusions:
+    generated: lax
+    warn-unused: true
+    rules:
+      - path: ^internal/route/
+        linters:
+          - forbidigo
+      - path-except: ^internal/authz/(engine|delta)/
+        text: time\.Now
+        linters:
+          - forbidigo

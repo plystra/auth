@@ -43,12 +43,6 @@ type agentsListInput struct {
 	Authorization string `header:"Authorization"`
 }
 
-type agentDataOutput struct {
-	Body struct {
-		Data agent.Agent `json:"data"`
-	}
-}
-
 type agentsListOutput struct {
 	Body struct {
 		Data []agent.Agent `json:"data"`
