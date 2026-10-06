@@ -112,3 +112,45 @@ func TestNestedInactiveOwnerReturnsOwnerInactive(t *testing.T) {
 		t.Fatalf("nested inactive owner decision = %+v, want OWNER_INACTIVE", got)
 	}
 }
+
+func TestCheckTableCoversEveryScopeAndDecisionReason(t *testing.T) {
+	grant := func(permission string, scope Scope) Assignment {
+		return Assignment{MemberID: "mem_1", Permissions: []string{permission}, Scope: scope}
+	}
+	owner := func(permission string) *Request {
+		return &Request{MemberID: "mem_owner", Permission: permission, ResourceSpace: "spc_1", Assignments: []Assignment{grantFor("mem_owner", permission)}}
+	}
+	tests := []struct {
+		name string
+		in   Request
+		want Effect
+		code string
+	}{
+		{name: "invalid subject", in: Request{Permission: "document:read"}, want: Deny, code: "invalid_subject"},
+		{name: "self", in: Request{MemberID: "mem_1", Permission: "profile:read", ResourceSpace: "spc_1", ResourceOwner: "mem_1", Assignments: []Assignment{grant("profile:read", Scope{Kind: "self"})}}, want: Allow, code: "allowed"},
+		{name: "group", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", ResourceGroup: "grp_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "group", Anchor: "grp_1"})}}, want: Allow, code: "allowed"},
+		{name: "group tree", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", ResourceGroup: "grp_child", ResourceGroupAncestors: []string{"grp_root"}, Assignments: []Assignment{grant("document:read", Scope{Kind: "group_tree", Anchor: "grp_root"})}}, want: Allow, code: "allowed"},
+		{name: "space", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}}, want: Allow, code: "allowed"},
+		{name: "space tree", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_child", ResourceSpaceAncestors: []string{"spc_root"}, Assignments: []Assignment{grant("document:read", Scope{Kind: "space_tree", Anchor: "spc_root"})}}, want: Allow, code: "allowed"},
+		{name: "global", in: Request{MemberID: "mem_1", Permission: "audit:read", ResourceSpace: "spc_any", Assignments: []Assignment{grant("audit:read", Scope{Kind: "global"})}}, want: Allow, code: "allowed"},
+		{name: "unknown permission", in: Request{MemberID: "mem_1", Permission: "missing:read", ResourceSpace: "spc_1"}, want: Deny, code: "NO_MATCHING_PERMISSION"},
+		{name: "principal kind", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, PrincipalKinds: []string{"human"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}}, want: Deny, code: "PRINCIPAL_KIND_NOT_ALLOWED"},
+		{name: "envelope", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, EnvelopeEnforced: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}}, want: Deny, code: "ENVELOPE_EXCLUDED"},
+		{name: "scope", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_2", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}}, want: Deny, code: "SCOPE_OUT_OF_BOUNDS"},
+		{name: "owner inactive", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}}, want: Deny, code: "OWNER_INACTIVE"},
+		{name: "owner envelope", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}, Owner: &Request{MemberID: "mem_owner", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{grantFor("mem_owner", "other:read")}}}, want: Deny, code: "OWNER_ENVELOPE_EXCLUDED"},
+		{name: "approval", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"billing:write"}, AgentApprovalRequired: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}, Owner: owner("billing:write")}, want: Deny, code: "APPROVAL_REQUIRED"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Check(tt.in)
+			if got.Effect != tt.want || got.Code != tt.code {
+				t.Fatalf("Check() = %+v, want effect=%s code=%s", got, tt.want, tt.code)
+			}
+		})
+	}
+}
+
+func grantFor(memberID, permission string) Assignment {
+	return Assignment{MemberID: memberID, Permissions: []string{permission}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}
+}
