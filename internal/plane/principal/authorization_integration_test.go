@@ -239,6 +239,51 @@ func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
 	}
 }
 
+func TestAgentCannotAssignNewSpaceToArbitrarySharedOwnerUser(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "shared-space-creator", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_shared_owner', 'shared-owner@example.test', 'shared-owner@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO user_members (user_id, member_id, status)
+		VALUES ('usr_shared_owner', $1, 'active')
+	`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &createSpaceInput{Authorization: "Bearer " + tokens.AccessToken}
+	in.Body.Name = "Ambiguous Space"
+	in.Body.Slug = "ambiguous-space"
+	if _, err := api.createSpace(ctx, in); err == nil {
+		t.Fatal("Agent assigned a new Space to an arbitrary shared owner user")
+	} else {
+		assertPrincipalError(t, err, "USER_ACCOUNT_REQUIRED")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM spaces WHERE slug = 'ambiguous-space'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("Space was created despite ambiguous owner account")
+	}
+}
+
 func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

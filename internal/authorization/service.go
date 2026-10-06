@@ -449,17 +449,30 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 			if err != nil {
 				return "", err
 			}
+			ownerUserID := ""
 			for _, binding := range bindings {
 				if binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC())) {
 					continue
 				}
 				user, userErr := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: binding.UserID})
-				if errors.Is(userErr, pgx.ErrNoRows) || userErr != nil || user.Status != "active" {
+				if errors.Is(userErr, pgx.ErrNoRows) {
 					continue
 				}
-				return binding.UserID, nil
+				if userErr != nil {
+					return "", userErr
+				}
+				if user.Status != "active" {
+					continue
+				}
+				if ownerUserID != "" {
+					return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner has multiple active user accounts")
+				}
+				ownerUserID = binding.UserID
 			}
-			return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner has no active user account")
+			if ownerUserID == "" {
+				return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner has no active user account")
+			}
+			return ownerUserID, nil
 		}
 		if member.Type != "agent" {
 			return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner chain does not end in a user account")
