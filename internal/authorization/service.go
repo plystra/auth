@@ -493,9 +493,8 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 }
 
 // ResourceGroupForMember resolves the persisted resource node used when a
-// management action targets a member. A member may belong to several groups;
-// the first stable group is used by the current request contract, while
-// callers that address a group explicitly pass that group in CheckRequest.
+// management action targets a member. A member in several groups has no
+// unique group resource node, so whole-member operations use its Space node.
 func (s *Service) ResourceGroupForMember(ctx context.Context, memberID, spaceID string) (string, error) {
 	q := s.Store.Queries()
 	if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
@@ -505,7 +504,7 @@ func (s *Service) ResourceGroupForMember(ctx context.Context, memberID, spaceID 
 		return "", err
 	}
 	groups, err := q.ListMemberGroups(ctx, db.ListMemberGroupsParams{MemberID: memberID, SpaceID: spaceID})
-	if err != nil || len(groups) == 0 {
+	if err != nil || len(groups) != 1 {
 		return "", err
 	}
 	return groups[0].ID, nil
@@ -1094,7 +1093,7 @@ func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spac
 		return "", err
 	}
 	groups, err := q.ListMemberGroups(ctx, db.ListMemberGroupsParams{MemberID: memberID, SpaceID: spaceID})
-	if err != nil || len(groups) == 0 {
+	if err != nil || len(groups) != 1 {
 		return "", err
 	}
 	return groups[0].ID, nil

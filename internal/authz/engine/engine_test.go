@@ -101,3 +101,14 @@ func TestOwnerEnvelopeDoesNotPropagateOwnerApproval(t *testing.T) {
 		t.Fatalf("owner approval must not be required while checking the envelope: %+v", got)
 	}
 }
+
+func TestNestedInactiveOwnerReturnsOwnerInactive(t *testing.T) {
+	grant := func(member string) Assignment {
+		return Assignment{MemberID: member, Permissions: []string{"auth.members:manage"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}
+	}
+	parent := Request{MemberID: "mem_parent", PrincipalType: "agent", Permission: "auth.members:manage", ResourceSpace: "spc_1", Assignments: []Assignment{grant("mem_parent")}}
+	child := Request{MemberID: "mem_child", PrincipalType: "agent", Permission: "auth.members:manage", ResourceSpace: "spc_1", Assignments: []Assignment{grant("mem_child")}, Owner: &parent}
+	if got := Check(child); got.Effect != Deny || got.Code != "OWNER_INACTIVE" {
+		t.Fatalf("nested inactive owner decision = %+v, want OWNER_INACTIVE", got)
+	}
+}

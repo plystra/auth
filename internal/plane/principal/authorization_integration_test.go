@@ -190,6 +190,116 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 	}
 }
 
+func TestMemberInMultipleGroupsRequiresSpaceWideManagement(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	target, err := authz.CreateMember(ctx, actor.ID, "", spaceID, "multiple groups", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status) VALUES
+		('grp_a_scope', $1, 'Scoped', 'standard', 'active'),
+		('grp_z_other', $1, 'Other', 'standard', 'active')
+	`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO group_members (group_id, member_id) VALUES
+		('grp_a_scope', $1), ('grp_a_scope', $2), ('grp_z_other', $2)
+	`, actor.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by)
+		VALUES ('grt_scoped_multi', $1, '["auth.members:manage"]'::jsonb, $2, 'group_tree', 'grp_a_scope', $2)
+	`, spaceID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: target.ID}); err == nil {
+		t.Fatal("group-scoped manager changed a member shared with another group")
+	} else {
+		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
+	}
+	if err := authz.SetMemberStatus(ctx, actor.ID, spaceID, target.ID, "suspended"); err == nil {
+		t.Fatal("transactional management changed a member shared with another group")
+	} else {
+		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM members WHERE id = $1`, target.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("target status = %q after denied management", status)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_space_multi', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $2)
+	`, spaceID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: target.ID}); err != nil {
+		t.Fatalf("Space-wide manager was denied: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM members WHERE id = $1`, target.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suspended" {
+		t.Fatalf("target status = %q after Space-wide management", status)
+	}
+}
+
+func TestNestedInactiveAgentOwnerReturnsOwnerInactiveAtManagementEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "parent", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, Name: "child", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, memberID := range []string{parent.ID, child.ID} {
+		if _, err := st.Pool.Exec(ctx, `
+			INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+			VALUES ($1, $2, '["auth.members:manage"]'::jsonb, $3, 'space', $2, $4)
+		`, "grt_owner_chain_"+memberID, spaceID, memberID, owner.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, child.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET status = 'suspended' WHERE id = $1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: child.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Code != "OWNER_INACTIVE" {
+		t.Fatalf("authz.check decision = %+v, want OWNER_INACTIVE", decision)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
+		t.Fatal("child Agent with inactive ancestor used management endpoint")
+	} else {
+		assertPrincipalError(t, err, "OWNER_INACTIVE")
+	}
+}
+
 func TestManagementEndpointRejectsPermissionExcludedBySpaceEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

@@ -105,6 +105,9 @@ func Check(in Request) Decision {
 		ownerRequest.SkipApproval = true
 		owner := Check(ownerRequest)
 		if owner.Effect != Allow {
+			if owner.Code == "OWNER_INACTIVE" {
+				return Decision{Effect: Deny, Code: "OWNER_INACTIVE", Trace: append(trace, "owner chain inactive")}
+			}
 			return Decision{Effect: Deny, Code: "OWNER_ENVELOPE_EXCLUDED", Trace: append(trace, "owner envelope denied")}
 		}
 		for _, a := range matches {
