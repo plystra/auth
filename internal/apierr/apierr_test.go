@@ -8,12 +8,13 @@ import (
 
 func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 	tests := map[string]int{
-		"invalid_credentials":     http.StatusUnauthorized,
-		"browser_origin_rejected": http.StatusForbidden,
-		"BROWSER_ORIGIN_REJECTED": http.StatusForbidden,
-		"unavailable":             http.StatusServiceUnavailable,
-		"not_implemented":         http.StatusNotImplemented,
-		"invalid_grant":           http.StatusBadRequest,
+		"invalid_credentials":       http.StatusUnauthorized,
+		"browser_origin_rejected":   http.StatusForbidden,
+		"BROWSER_ORIGIN_REJECTED":   http.StatusForbidden,
+		"unavailable":               http.StatusServiceUnavailable,
+		"not_implemented":           http.StatusNotImplemented,
+		"invalid_grant":             http.StatusBadRequest,
+		"inline_grants_not_allowed": http.StatusBadRequest,
 	}
 	for code, want := range tests {
 		if got := Status(code); got != want {

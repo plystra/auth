@@ -29,7 +29,7 @@ func New(code, message string) *Error                 { return &Error{Code: code
 func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = requestID; return &c }
 func Status(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "invalid_request", "invalid_grant", "validation_failed":
+	case "invalid_request", "invalid_grant", "validation_failed", "inline_grants_not_allowed":
 		return http.StatusBadRequest
 	case "invalid_credentials", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized

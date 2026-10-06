@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"strconv"
 	"strings"
 
@@ -28,10 +29,38 @@ type API struct {
 }
 
 type CheckSubject struct {
-	Token    string `json:"token,omitempty"`
-	MemberID string `json:"member_id,omitempty"`
-	UserID   string `json:"user_id,omitempty"`
-	AgentID  string `json:"agent_id,omitempty"`
+	Token    string   `json:"token,omitempty"`
+	MemberID string   `json:"member_id,omitempty"`
+	UserID   string   `json:"user_id,omitempty"`
+	_        struct{} `json:"-" additionalProperties:"true"`
+	unknown  []string
+}
+
+func (s *CheckSubject) UnmarshalJSON(data []byte) error {
+	var fields struct {
+		Token    string `json:"token,omitempty"`
+		MemberID string `json:"member_id,omitempty"`
+		UserID   string `json:"user_id,omitempty"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	var values map[string]json.RawMessage
+	if err := json.Unmarshal(data, &values); err != nil {
+		return err
+	}
+	known := map[string]struct{}{"token": {}, "member_id": {}, "user_id": {}}
+	unknown := make([]string, 0)
+	for key := range values {
+		if _, ok := known[key]; !ok {
+			unknown = append(unknown, key)
+		}
+	}
+	s.Token = fields.Token
+	s.MemberID = fields.MemberID
+	s.UserID = fields.UserID
+	s.unknown = unknown
+	return nil
 }
 
 type CheckResource struct {
@@ -43,16 +72,11 @@ type CheckResource struct {
 }
 
 type CheckBody struct {
-	Subject  CheckSubject  `json:"subject"`
-	Action   string        `json:"action"`
-	Resource CheckResource `json:"resource"`
-	// Deprecated flat fields remain accepted for one release so older SDKs can
-	// migrate to the documented subject/action/resource shape without bypassing
-	// the same server-side checks.
-	MemberID      string `json:"member_id,omitempty"`
-	Permission    string `json:"permission,omitempty"`
-	ResourceSpace string `json:"resource_space,omitempty"`
-	ResourceOwner string `json:"resource_owner,omitempty"`
+	Subject  CheckSubject    `json:"subject"`
+	Action   string          `json:"action"`
+	Resource CheckResource   `json:"resource"`
+	Grants   json.RawMessage `json:"grants,omitempty"`
+	Roles    json.RawMessage `json:"roles,omitempty"`
 }
 
 type CheckInput struct {
@@ -103,17 +127,8 @@ func (a *API) Register(api huma.API) {
 }
 
 func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
-	if in.Body.Action == "" && in.Body.Permission != "" {
-		in.Body.Action = in.Body.Permission
-		if in.Body.Subject.MemberID == "" {
-			in.Body.Subject.MemberID = in.Body.MemberID
-		}
-		if in.Body.Resource.SpaceID == "" {
-			in.Body.Resource.SpaceID = in.Body.ResourceSpace
-		}
-		if in.Body.Resource.OwnerMemberID == "" {
-			in.Body.Resource.OwnerMemberID = in.Body.ResourceOwner
-		}
+	if len(in.Body.Grants) > 0 || len(in.Body.Roles) > 0 || len(in.Body.Subject.unknown) > 0 {
+		return nil, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
 	}
 	key, err := a.key(ctx, in.Authorization)
 	if err != nil {
@@ -156,15 +171,6 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 }
 
 func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
-	if subject.AgentID != "" {
-		if !key.AllowSubjectAssertion || a.Agents == nil {
-			return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "agent subject assertions are not enabled for this API key")
-		}
-		if _, err := a.Agents.Owner(ctx, subject.AgentID); err != nil {
-			return resolvedSubject{}, err
-		}
-		return resolvedSubject{ID: subject.AgentID, Type: "agent"}, nil
-	}
 	if subject.Token != "" {
 		if strings.HasPrefix(subject.Token, "ply_ag_") && a.Agents != nil {
 			credential, err := a.Agents.AuthenticateKey(ctx, subject.Token)

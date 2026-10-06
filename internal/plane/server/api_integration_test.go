@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
@@ -69,6 +74,42 @@ func TestAuthzCheckSubjectAssertionAndKeyScope(t *testing.T) {
 	}
 	if out.Body.Data.DenyCode != "KEY_SCOPE_EXCLUDED" {
 		t.Fatalf("out-of-scope authz.check = %+v, want KEY_SCOPE_EXCLUDED", out.Body.Data)
+	}
+}
+
+func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {
+	st, authz, member, spaceID, key, sessions := newServerFixture(t)
+	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, huma.DefaultConfig("server test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+
+	request := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	base := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+	valid := request(base)
+	if valid.Code != http.StatusOK || !strings.Contains(valid.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("documented resource facts = %d %s, want allow", valid.Code, valid.Body.String())
+	}
+	for name, body := range map[string]string{
+		"inline grants":     strings.TrimSuffix(base, "}") + `,"grants":[]}`,
+		"inline roles":      strings.TrimSuffix(base, "}") + `,"roles":[]}`,
+		"subject attribute": fmt.Sprintf(`{"subject":{"member_id":%q,"is_admin":true},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID),
+		"agent_id alias":    fmt.Sprintf(`{"subject":{"agent_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID),
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := request(body)
+			if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"INLINE_GRANTS_NOT_ALLOWED"`) {
+				t.Fatalf("inline facts = %d %s, want 400 INLINE_GRANTS_NOT_ALLOWED", w.Code, w.Body.String())
+			}
+		})
 	}
 }
 

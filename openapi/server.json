@@ -16,21 +16,11 @@
           "action": {
             "type": "string"
           },
-          "member_id": {
-            "type": "string"
-          },
-          "permission": {
-            "type": "string"
-          },
+          "grants": {},
           "resource": {
             "$ref": "#/components/schemas/CheckResource"
           },
-          "resource_owner": {
-            "type": "string"
-          },
-          "resource_space": {
-            "type": "string"
-          },
+          "roles": {},
           "subject": {
             "$ref": "#/components/schemas/CheckSubject"
           }
@@ -112,11 +102,8 @@
         "type": "object"
       },
       "CheckSubject": {
-        "additionalProperties": false,
+        "additionalProperties": true,
         "properties": {
-          "agent_id": {
-            "type": "string"
-          },
           "member_id": {
             "type": "string"
           },
