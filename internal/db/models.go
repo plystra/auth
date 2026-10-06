@@ -305,6 +305,7 @@ type Space struct {
 	ParentID      pgtype.Text        `json:"parent_id"`
 	PolicyVersion int64              `json:"policy_version"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Status        string             `json:"status"`
 }
 
 type SpaceEnvelope struct {

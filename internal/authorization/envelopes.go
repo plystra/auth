@@ -50,6 +50,9 @@ func (f *envelopeFacts) space(ctx context.Context, spaceID, permission string) (
 	}
 	ancestors, err := spaceAncestorsQueries(ctx, f.q, spaceID)
 	if err != nil {
+		if errors.Is(err, errSpaceInactive) {
+			return false, nil
+		}
 		return false, err
 	}
 	chain := append([]string{spaceID}, ancestors...)
@@ -86,6 +89,9 @@ func (f *envelopeFacts) group(ctx context.Context, groupID, spaceID, permission 
 	}
 	ancestors, err := groupAncestorsQueries(ctx, f.q, groupID, spaceID)
 	if err != nil {
+		if errors.Is(err, errGroupInactive) {
+			return false, nil
+		}
 		return false, err
 	}
 	chain := append([]string{groupID}, ancestors...)

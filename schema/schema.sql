@@ -574,3 +574,20 @@ CREATE TABLE idempotency_keys (
 );
 
 CREATE INDEX idempotency_keys_expiry_idx ON idempotency_keys (expires_at);
+
+
+ALTER TABLE spaces
+    ADD COLUMN IF NOT EXISTS status text NOT NULL DEFAULT 'active';
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'spaces_status_check'
+          AND conrelid = 'spaces'::regclass
+    ) THEN
+        ALTER TABLE spaces
+            ADD CONSTRAINT spaces_status_check
+            CHECK (status IN ('active', 'suspended'));
+    END IF;
+END $$;

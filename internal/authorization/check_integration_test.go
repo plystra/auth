@@ -44,6 +44,152 @@ func TestAuthorizationCheckRejectsGroupScopedManagementOutsideGroup(t *testing.T
 	}
 }
 
+func TestSpaceSuspensionPropagatesThroughAuthorizationCheck(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, parentID := newBindingFixture(t)
+	childID := "spc_suspension_child"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Child', 'suspension-child', $2)`, childID, parentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET scope = 'space_tree' WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: childID}
+	check := func(wantEffect engine.Effect, wantCode string) {
+		t.Helper()
+		decision, _, err := svc.Check(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Effect != wantEffect || decision.Code != wantCode {
+			t.Fatalf("Check = %+v, want effect=%s code=%q", decision, wantEffect, wantCode)
+		}
+		var transactional engine.Decision
+		if err := st.InTx(ctx, func(q *db.Queries) error {
+			var err error
+			transactional, err = svc.CheckTx(ctx, q, request)
+			return err
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if transactional.Effect != decision.Effect || transactional.Code != decision.Code {
+			t.Fatalf("CheckTx = %+v, Check = %+v", transactional, decision)
+		}
+	}
+	check(engine.Allow, "allowed")
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	check(engine.Deny, "SPACE_INACTIVE")
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'active' WHERE id = $1`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	check(engine.Allow, "allowed")
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, childID); err != nil {
+		t.Fatal(err)
+	}
+	check(engine.Deny, "SPACE_INACTIVE")
+}
+
+func TestSubjectHomeSpaceSuspensionDeniesOtherResource(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, parentID := newBindingFixture(t)
+	childID := "spc_subject_suspended"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Member home', 'subject-suspended', $2)`, childID, parentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET space_id = $1 WHERE id = $2`, childID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: parentID}
+	decision, _, err := svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("active subject home Space = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, childID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "SPACE_INACTIVE" {
+		t.Fatalf("suspended subject home Space = %+v, want SPACE_INACTIVE", decision)
+	}
+}
+
+func TestParentGroupSuspensionDeniesChildGroupResource(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	parentID, childID := "grp_suspension_parent", "grp_suspension_child"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ($1, $3, 'Parent'), ($2, $3, 'Child')`, parentID, childID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET parent_id = $1 WHERE id = $2`, parentID, childID); err != nil {
+		t.Fatal(err)
+	}
+	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID, ResourceGroup: childID}
+	decision, _, err := svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("active group chain = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'suspended' WHERE id = $1`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "RESOURCE_GROUP_INACTIVE" {
+		t.Fatalf("suspended ancestor group = %+v, want RESOURCE_GROUP_INACTIVE", decision)
+	}
+}
+
+func TestSuspendedGrantGroupStopsContributingAuthority(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	groupID := "grp_suspended_grant"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ($1, $2, 'Grant source')`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id) VALUES ($1, $2)`, groupID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_group_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_suspended_group', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, groupID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID}
+	decision, _, err := svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("active grant group = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'suspended' WHERE id = $1`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = svc.Check(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny {
+		t.Fatalf("suspended grant group = %+v, want deny", decision)
+	}
+}
+
 func TestAuthorizationCheckRejectsDisabledPermission(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)

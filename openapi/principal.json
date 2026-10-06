@@ -956,12 +956,16 @@
           },
           "slug": {
             "type": "string"
+          },
+          "status": {
+            "type": "string"
           }
         },
         "required": [
           "id",
           "name",
           "slug",
+          "status",
           "policy_version"
         ],
         "type": "object"

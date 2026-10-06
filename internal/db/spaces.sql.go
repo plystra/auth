@@ -27,7 +27,7 @@ func (q *Queries) BumpPolicyVersion(ctx context.Context, arg BumpPolicyVersionPa
 }
 
 const createSpace = `-- name: CreateSpace :one
-INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, $2, $3, $4) RETURNING id, name, slug, parent_id, policy_version, created_at
+INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, $2, $3, $4) RETURNING id, name, slug, parent_id, policy_version, created_at, status
 `
 
 type CreateSpaceParams struct {
@@ -52,12 +52,13 @@ func (q *Queries) CreateSpace(ctx context.Context, arg CreateSpaceParams) (Space
 		&i.ParentID,
 		&i.PolicyVersion,
 		&i.CreatedAt,
+		&i.Status,
 	)
 	return i, err
 }
 
 const getSpace = `-- name: GetSpace :one
-SELECT id, name, slug, parent_id, policy_version, created_at FROM spaces WHERE id = $1
+SELECT id, name, slug, parent_id, policy_version, created_at, status FROM spaces WHERE id = $1
 `
 
 type GetSpaceParams struct {
@@ -74,12 +75,13 @@ func (q *Queries) GetSpace(ctx context.Context, arg GetSpaceParams) (Space, erro
 		&i.ParentID,
 		&i.PolicyVersion,
 		&i.CreatedAt,
+		&i.Status,
 	)
 	return i, err
 }
 
 const listChildSpaces = `-- name: ListChildSpaces :many
-SELECT id, name, slug, parent_id, policy_version, created_at FROM spaces
+SELECT id, name, slug, parent_id, policy_version, created_at, status FROM spaces
 WHERE parent_id = $1 ORDER BY created_at, id
 `
 
@@ -103,6 +105,7 @@ func (q *Queries) ListChildSpaces(ctx context.Context, arg ListChildSpacesParams
 			&i.ParentID,
 			&i.PolicyVersion,
 			&i.CreatedAt,
+			&i.Status,
 		); err != nil {
 			return nil, err
 		}

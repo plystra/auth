@@ -114,6 +114,35 @@ func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
 	}
 }
 
+func TestSuspendedSpaceDeniesManagementLikeAuthorizationCheck(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	input := &spacePathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	if _, err := api.listMembers(ctx, input); err != nil {
+		t.Fatalf("active Space management: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "SPACE_INACTIVE" {
+		t.Fatalf("authz.check = %+v, want SPACE_INACTIVE", decision)
+	}
+	if _, err := api.listMembers(ctx, input); err == nil {
+		t.Fatal("suspended Space allowed management endpoint")
+	} else {
+		assertPrincipalError(t, err, decision.Code)
+	}
+}
+
 func TestMePermissionsEndpointUsesEffectiveEngineDecisionsForHumanAndAgent(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

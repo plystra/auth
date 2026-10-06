@@ -21,6 +21,9 @@ import (
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 
+var errSpaceInactive = errors.New("Space or ancestor is inactive")
+var errGroupInactive = errors.New("group or ancestor is inactive")
+
 type Service struct{ Store *store.Store }
 
 // CheckRequest describes the persisted facts needed by the authorization
@@ -75,6 +78,12 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	if member.Status != "active" {
 		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
 	}
+	if _, err := spaceAncestorsQueries(ctx, q, member.SpaceID); err != nil {
+		if errors.Is(err, errSpaceInactive) {
+			return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, 0, nil
+		}
+		return engine.Decision{}, 0, err
+	}
 	if in.ResourceSpace == "" {
 		in.ResourceSpace = member.SpaceID
 	}
@@ -87,6 +96,9 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	}
 	spaceAncestors, err := spaceAncestorsQueries(ctx, q, in.ResourceSpace)
 	if err != nil {
+		if errors.Is(err, errSpaceInactive) {
+			return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, space.PolicyVersion, nil
+		}
 		return engine.Decision{}, 0, err
 	}
 	var groupAncestors []string
@@ -103,6 +115,9 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 		}
 		groupAncestors, err = groupAncestorsQueries(ctx, q, in.ResourceGroup, in.ResourceSpace)
 		if err != nil {
+			if errors.Is(err, errGroupInactive) {
+				return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_INACTIVE"}, space.PolicyVersion, nil
+			}
 			return engine.Decision{}, 0, err
 		}
 	}
@@ -165,6 +180,12 @@ func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, member
 	if member.Status != "active" {
 		return nil, nil
 	}
+	if _, err := spaceAncestorsQueries(ctx, q, member.SpaceID); err != nil {
+		if errors.Is(err, errSpaceInactive) {
+			return nil, nil
+		}
+		return nil, err
+	}
 	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
 	if err != nil {
 		return nil, err
@@ -213,9 +234,12 @@ func spaceAncestorsQueries(ctx context.Context, q *db.Queries, spaceID string) (
 		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: current})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return ancestors, nil
+				return nil, errSpaceInactive
 			}
 			return nil, err
+		}
+		if space.Status != "active" {
+			return nil, errSpaceInactive
 		}
 		if !space.ParentID.Valid || space.ParentID.String == "" {
 			return ancestors, nil
@@ -239,9 +263,12 @@ func groupAncestorsQueries(ctx context.Context, q *db.Queries, groupID, spaceID 
 		group, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: current, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				return ancestors, nil
+				return nil, errGroupInactive
 			}
 			return nil, err
+		}
+		if group.Status != "active" {
+			return nil, errGroupInactive
 		}
 		if !group.ParentID.Valid || group.ParentID.String == "" {
 			return ancestors, nil
@@ -262,6 +289,7 @@ type Space struct {
 	Name          string `json:"name"`
 	Slug          string `json:"slug"`
 	ParentID      string `json:"parent_id,omitempty"`
+	Status        string `json:"status"`
 	PolicyVersion int64  `json:"policy_version"`
 }
 
@@ -1270,7 +1298,7 @@ func uniqueSorted(values []string) []string {
 }
 
 func toSpace(row db.Space) Space {
-	out := Space{ID: row.ID, Name: row.Name, Slug: row.Slug, PolicyVersion: row.PolicyVersion}
+	out := Space{ID: row.ID, Name: row.Name, Slug: row.Slug, Status: row.Status, PolicyVersion: row.PolicyVersion}
 	if row.ParentID.Valid {
 		out.ParentID = row.ParentID.String
 	}

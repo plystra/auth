@@ -1,11 +1,11 @@
 -- name: CreateSpace :one
-INSERT INTO spaces (id, name, slug, parent_id) VALUES (sqlc.arg(id), sqlc.arg(name), sqlc.arg(slug), sqlc.narg(parent_id)) RETURNING id, name, slug, parent_id, policy_version, created_at;
+INSERT INTO spaces (id, name, slug, parent_id) VALUES (sqlc.arg(id), sqlc.arg(name), sqlc.arg(slug), sqlc.narg(parent_id)) RETURNING *;
 
 -- name: GetSpace :one
-SELECT id, name, slug, parent_id, policy_version, created_at FROM spaces WHERE id = sqlc.arg(id);
+SELECT * FROM spaces WHERE id = sqlc.arg(id);
 
 -- name: ListChildSpaces :many
-SELECT id, name, slug, parent_id, policy_version, created_at FROM spaces
+SELECT * FROM spaces
 WHERE parent_id = sqlc.arg(parent_id) ORDER BY created_at, id;
 
 -- name: BumpPolicyVersion :one
