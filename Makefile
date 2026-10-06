@@ -1,9 +1,9 @@
 GO ?= go
 
 ifeq ($(OS),Windows_NT)
-WEB_CHECK = if exist web (cd web && bun run typecheck && bun test --run)
+WEB_CHECK = if exist web (cd web && bun run typecheck && bun run test --run)
 else
-WEB_CHECK = if [ -d web ]; then cd web && bun run typecheck && bun test --run; fi
+WEB_CHECK = if [ -d web ]; then cd web && bun run typecheck && bun run test --run; fi
 endif
 
 .PHONY: gen check web-check test build migrate openapi

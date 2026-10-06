@@ -27,7 +27,7 @@ func TestMakeCheckContainsRequiredGates(t *testing.T) {
 			t.Errorf("Makefile is missing check gate %q", required)
 		}
 	}
-	if !strings.Contains(makefile, "web-check:") || !strings.Contains(makefile, "bun run typecheck") || !strings.Contains(makefile, "bun test --run") {
+	if !strings.Contains(makefile, "web-check:") || !strings.Contains(makefile, "bun run typecheck") || !strings.Contains(makefile, "bun run test --run") {
 		t.Error("Makefile is missing the frontend typecheck and test gate")
 	}
 }
