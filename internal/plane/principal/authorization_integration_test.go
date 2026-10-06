@@ -114,6 +114,48 @@ func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
 	}
 }
 
+func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	second, err := authz.CreateMember(ctx, actor.ID, "usr_principal_actor", spaceID, "second identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{
+		Accounts:      &account.Service{Store: st},
+		Authorization: authz,
+		Sessions:      sessions,
+		Signer:        signer,
+		Agents:        &agent.Service{Store: st},
+	}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func() *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, "/v1/me/members", nil)
+		r.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	w := request()
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+actor.ID+`"`) || !strings.Contains(w.Body.String(), `"id":"`+second.ID+`"`) {
+		t.Fatalf("active member bindings = %d %s, want both members", w.Code, w.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET expires_at = now() - interval '1 minute' WHERE user_id = 'usr_principal_actor' AND member_id = $1`, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	w = request()
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+actor.ID+`"`) || strings.Contains(w.Body.String(), `"id":"`+second.ID+`"`) {
+		t.Fatalf("revoked member bindings = %d %s, want only the active member", w.Code, w.Body.String())
+	}
+}
+
 func TestCurrentMemberUsesSelectedBindingWhenUserHasMultipleMembers(t *testing.T) {
 	ctx := context.Background()
 	_, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

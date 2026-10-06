@@ -389,6 +389,21 @@ func (s *Service) GetMemberForUser(ctx context.Context, userID, spaceID string) 
 	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
 }
 
+// ListMembersForUser returns the user's active, unexpired member bindings
+// across all Spaces. Revoked bindings and inactive members are omitted by the
+// query so callers cannot accidentally expose stale identities.
+func (s *Service) ListMembersForUser(ctx context.Context, userID string) ([]Member, error) {
+	rows, err := s.Store.Queries().ListMembersForUser(ctx, db.ListMembersForUserParams{UserID: userID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Member, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status})
+	}
+	return out, nil
+}
+
 func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Member, error) {
 	row, err := s.Store.Queries().GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
 	if errors.Is(err, pgx.ErrNoRows) {

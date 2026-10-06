@@ -52,6 +52,11 @@ type MeOutput struct {
 		Data any `json:"data"`
 	}
 }
+type MembersOutput struct {
+	Body struct {
+		Data []authorization.Member `json:"data"`
+	}
+}
 type LoginInput struct {
 	Body          AuthBody
 	XForwardedFor string `header:"X-Forwarded-For"`
@@ -93,6 +98,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_in", Method: "POST", Path: "/v1/auth/sign-in", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
 	route.Register(api, route.Spec{Name: "auth.refresh", Method: "POST", Path: "/v1/auth/refresh", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.refresh)
 	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.me)
+	route.Register(api, route.Spec{Name: "auth.me_members", Method: "GET", Path: "/v1/me/members", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.meMembers)
 	route.Register(api, route.Spec{Name: "auth.sign_out", Method: "POST", Path: "/v1/auth/sign-out", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.logout)
 	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
 	route.Register(api, route.Spec{Name: "auth.password_forgot", Method: "POST", Path: "/v1/auth/password/forgot", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
@@ -172,6 +178,34 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	}
 	return out, nil
 }
+
+func (a *API) meMembers(ctx context.Context, in *BearerInput) (*MembersOutput, error) {
+	parts := strings.Fields(in.Authorization)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+	}
+	if a.Sessions == nil || a.Authorization == nil {
+		return nil, apierr.New("UNAVAILABLE", "authentication is unavailable")
+	}
+	claims, active, err := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+	}
+	if claims.Type != "user" {
+		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+	}
+	members, err := a.Authorization.ListMembersForUser(ctx, claims.Subject)
+	if err != nil {
+		return nil, err
+	}
+	out := &MembersOutput{}
+	out.Body.Data = members
+	return out, nil
+}
+
 func (a *API) logout(ctx context.Context, in *BearerInput) (*LogoutOutput, error) {
 	claims, e := bearer(a.Signer, in.Authorization)
 	if e != nil {

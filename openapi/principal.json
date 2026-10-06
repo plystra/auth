@@ -702,6 +702,24 @@
         ],
         "type": "object"
       },
+      "MembersOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Member"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "RefreshInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1489,6 +1507,43 @@
           }
         },
         "summary": "me.agents.stop"
+      }
+    },
+    "/v1/me/members": {
+      "get": {
+        "operationId": "auth.me_members",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MembersOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.me_members"
       }
     },
     "/v1/spaces": {
