@@ -183,6 +183,23 @@ func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 		t.Fatal("Agent without auth.agents:create created a child Agent")
 	}
 	assertPrincipalError(t, err, "NO_MATCHING_PERMISSION")
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_create_owner', $1, '["auth.agents:create"]'::jsonb, $2, 'space', $1, $2)
+	`, spaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"auth.agents:create"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = api.createAgent(ctx, &agentsInput{Authorization: "Bearer " + tokens.AccessToken})
+	if err == nil {
+		t.Fatal("Agent created a child after its owner lost auth.agents:create")
+	}
+	assertPrincipalError(t, err, "OWNER_ENVELOPE_EXCLUDED")
 }
 
 func newPrincipalFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, *session.Service, *security.Signer) {
