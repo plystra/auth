@@ -35,13 +35,19 @@ func Load() (Config, error) {
 }
 
 func (c Config) Validate() error {
-	if strings.TrimSpace(c.DatabaseURL) == "" || strings.TrimSpace(c.Issuer) == "" {
-		return errors.New("database URL and issuer are required")
+	if strings.TrimSpace(c.DatabaseURL) == "" {
+		return errors.New("PLYSTRA_AUTH_DATABASE_URL is required")
+	}
+	if strings.TrimSpace(c.Issuer) == "" {
+		return errors.New("PLYSTRA_AUTH_ISSUER is required")
+	}
+	if strings.TrimSpace(c.SessionHMACKeys) == "" {
+		return errors.New("PLYSTRA_AUTH_SESSION_HMAC_KEYS is required")
+	}
+	if strings.TrimSpace(c.DataKey) == "" {
+		return errors.New("PLYSTRA_AUTH_DATA_KEY is required")
 	}
 	keys := strings.Split(c.SessionHMACKeys, ",")
-	if len(keys) == 0 {
-		return errors.New("at least one session HMAC key is required")
-	}
 	for i, key := range keys {
 		if len([]byte(strings.TrimSpace(key))) < 32 {
 			return fmt.Errorf("session HMAC key %d must be at least 32 bytes", i+1)

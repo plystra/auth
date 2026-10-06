@@ -9,6 +9,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/store"
 )
 
 func TestAuthorizationCheckRejectsGroupScopedManagementOutsideGroup(t *testing.T) {
@@ -134,5 +135,83 @@ func TestAuthorizationCheckAndTransactionalManagementUseSameDecision(t *testing.
 	}
 	if outside.Effect != inside.Effect || outside.Code != inside.Code {
 		t.Fatalf("outside=%+v inside=%+v", outside, inside)
+	}
+}
+
+func TestAuditFailureRollsBackMemberStatus(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Audit rollback target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_test_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_audit_insert BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_test_audit_insert();
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMemberStatus(ctx, actor.ID, spaceID, target.ID, "suspended"); err == nil {
+		t.Fatal("member status changed despite audit failure")
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM members WHERE id = $1`, target.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("member status = %q after audit failure, want active", status)
+	}
+}
+
+func TestPrefixedIDConstraintRejectsWrongPrefix(t *testing.T) {
+	ctx := context.Background()
+	st, _, _, _ := newBindingFixture(t)
+	_, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('mem_not_a_user', 'wrong-prefix@example.test', 'wrong-prefix@example.test', 'hash', 'active')
+	`)
+	if err == nil {
+		t.Fatal("database accepted a user ID with the member prefix")
+	}
+}
+
+func TestMigrationsAreIdempotent(t *testing.T) {
+	ctx := context.Background()
+	database, err := integrationDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	if err := store.Migrate(ctx, database.URL); err != nil {
+		t.Fatalf("reapplying migrations: %v", err)
+	}
+}
+
+func TestPermissionDirectoryUsesStatusAndDisablesImmediately(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	var hasStatus, hasEnabled bool
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'permissions' AND column_name = 'status'),
+		       EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'permissions' AND column_name = 'enabled')
+	`).Scan(&hasStatus, &hasEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if !hasStatus || hasEnabled {
+		t.Fatalf("permission columns status=%v enabled=%v, want status only", hasStatus, hasEnabled)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'auth.members:manage'`); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Code != "PERMISSION_DISABLED" {
+		t.Fatalf("disabled permission decision = %+v, want PERMISSION_DISABLED", decision)
 	}
 }

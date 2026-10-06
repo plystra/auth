@@ -107,6 +107,92 @@ func TestSingleBindingSerializesConcurrentBinds(t *testing.T) {
 	}
 }
 
+func TestSharedBindingRevocationPreservesOtherBindings(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Shared member", "human", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, user := range []struct{ id, email string }{
+		{"usr_shared_one", "shared-one@example.test"},
+		{"usr_shared_two", "shared-two@example.test"},
+	} {
+		if err := insertUser(ctx, st, user.id, user.email); err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, user.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.UnbindUser(ctx, actor.ID, spaceID, target.ID, "usr_shared_one"); err != nil {
+		t.Fatal(err)
+	}
+	var active int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM user_members WHERE member_id = $1 AND status = 'active' AND revoked_at IS NULL
+	`, target.ID).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("active shared bindings = %d, want 1", active)
+	}
+	var remaining string
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT user_id FROM user_members WHERE member_id = $1 AND status = 'active'
+	`, target.ID).Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != "usr_shared_two" {
+		t.Fatalf("remaining binding = %q, want usr_shared_two", remaining)
+	}
+}
+
+func TestSameUserCanBindMultipleMembersInOneSpace(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	if err := insertUser(ctx, st, "usr_multiple_members", "multiple-members@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"First identity", "Second identity"} {
+		target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, name, "human", "single")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_multiple_members"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = $1 AND status = 'active'`, "usr_multiple_members").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("active member bindings = %d, want 2", count)
+	}
+}
+
+func TestBindingPolicyChangeRequiresPermission(t *testing.T) {
+	ctx := context.Background()
+	_, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Policy target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Limited actor", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetBindingPolicy(ctx, limited.ID, spaceID, target.ID, "shared"); err == nil {
+		t.Fatal("member without auth.bindings:manage changed a binding policy")
+	} else {
+		assertAPIErrorCode(t, err, "NO_MATCHING_PERMISSION")
+	}
+	if err := svc.SetBindingPolicy(ctx, actor.ID, spaceID, target.ID, "shared"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newBindingFixture(t *testing.T) (*store.Store, *Service, Member, string) {
 	t.Helper()
 	ctx := context.Background()
