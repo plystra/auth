@@ -134,6 +134,56 @@ func TestGeneratedOpenAPIDocumentsAreCommitted(t *testing.T) {
 	}
 }
 
+func TestSQLCUsesMigrationSchemaAndGeneratedDBOutput(t *testing.T) {
+	root := repositoryRoot(t)
+	config, err := os.ReadFile(filepath.Join(root, "sqlc.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(config)
+	for _, required := range []string{
+		"schema: \"migrations\"",
+		"out: \"internal/db\"",
+		"internal/account/queries",
+		"internal/session/queries",
+		"internal/space/queries",
+		"internal/grant",
+		"internal/store",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("sqlc.yaml is missing %q", required)
+		}
+	}
+	for _, path := range []string{
+		"internal/db/db.go",
+		"internal/db/models.go",
+		"internal/db/queries.sql.go",
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Errorf("generated sqlc output %s is missing: %v", path, err)
+		}
+	}
+}
+
+func TestSchemaSnapshotContainsMigrationDerivedAuthorizationTables(t *testing.T) {
+	root := repositoryRoot(t)
+	snapshot, err := os.ReadFile(filepath.Join(root, "schema", "schema.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(snapshot)
+	for _, required := range []string{
+		"CREATE TABLE permissions",
+		"status text NOT NULL DEFAULT 'active'",
+		"CREATE TABLE IF NOT EXISTS authorization_grants",
+		"CREATE TABLE audit_logs",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("schema snapshot is missing %q", required)
+		}
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	root, err := os.Getwd()
