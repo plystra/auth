@@ -741,7 +741,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if user.Status != "active" {
 			return apierr.New("CONFLICT", "user is not active")
 		}
-		if err := s.authorityCoverageTx(ctx, q, actorMemberID, memberID); err != nil {
+		if err := s.requireEmptyBindingDeltaTx(ctx, q, memberID, userID, spaceID); err != nil {
 			return err
 		}
 		count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
@@ -1229,27 +1229,6 @@ func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spac
 		return "", err
 	}
 	return groups[0].ID, nil
-}
-
-// authorityCoverageTx is the temporary G8 compatibility check for binding
-// authority deltas (see auth-docs/roadmap.md, G8 "权威增量求值器"). The
-// authoritative incremental evaluator will replace this key-only comparison;
-// all ordinary permission decisions already use Check.
-func (s *Service) authorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID, targetMemberID string) error {
-	actor, err := authorityKeysTx(ctx, q, actorMemberID)
-	if err != nil {
-		return err
-	}
-	target, err := authorityKeysTx(ctx, q, targetMemberID)
-	if err != nil {
-		return err
-	}
-	for permission := range target {
-		if !actor[permission] {
-			return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The binding would transfer authority the actor does not hold.", Details: map[string]string{"permission": permission}}
-		}
-	}
-	return nil
 }
 
 func authorityKeysTx(ctx context.Context, q *db.Queries, memberID string) (map[string]bool, error) {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -286,6 +287,61 @@ func TestBindingPolicyChangeRequiresPermission(t *testing.T) {
 	}
 	if err := svc.SetBindingPolicy(ctx, actor.ID, spaceID, target.ID, "shared"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBindingWithPositiveAuthorityDeltaWaitsForAssignmentRights(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Privileged identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_privileged_binding", "privileged-binding@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_privileged_binding', $1, '["auth.members:read"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, target.ID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	var versionBefore int64
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&versionBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_privileged_binding"); err == nil {
+		t.Fatal("binding transferred authority without assignment-right coverage")
+	} else {
+		assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+		var public *apierr.Error
+		if !errors.As(err, &public) {
+			t.Fatalf("denied binding error = %v", err)
+		}
+		details, ok := public.Details.(map[string]string)
+		if !ok || !strings.Contains(details["uncovered"], "auth.members:read@space:"+spaceID) {
+			t.Fatalf("denied binding did not list the uncovered scope: %v", err)
+		}
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = 'usr_privileged_binding'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("denied binding persisted %d rows", count)
+	}
+	var versionAfter int64
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&versionAfter); err != nil {
+		t.Fatal(err)
+	}
+	if versionAfter != versionBefore {
+		t.Fatalf("denied binding changed policy version: %d to %d", versionBefore, versionAfter)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'auth.members:read'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_privileged_binding"); err != nil {
+		t.Fatalf("dormant grant should not contribute a positive delta: %v", err)
 	}
 }
 
