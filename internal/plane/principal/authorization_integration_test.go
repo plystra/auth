@@ -114,6 +114,52 @@ func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
 	}
 }
 
+func TestMePermissionsEndpointUsesEffectiveEngineDecisionsForHumanAndAgent(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "permissions-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	humanTokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	for name, token := range map[string]string{"human": humanTokens.AccessToken, "agent": agentTokens.AccessToken} {
+		out, err := api.mePermissions(ctx, &BearerInput{Authorization: "Bearer " + token})
+		if err != nil {
+			t.Fatalf("%s permissions: %v", name, err)
+		}
+		found := false
+		for _, permission := range out.Body.Data {
+			if permission.Permission == "self:read" && permission.Scope == "space" && permission.Anchor == spaceID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s permissions = %+v, want effective self:read Space scope", name, out.Body.Data)
+		}
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'self:read'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.mePermissions(ctx, &BearerInput{Authorization: "Bearer " + humanTokens.AccessToken}); err == nil {
+		t.Fatal("disabled self:read was accepted by /v1/me/permissions")
+	} else {
+		assertPrincipalError(t, err, "PERMISSION_DISABLED")
+	}
+}
+
 func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

@@ -282,6 +282,16 @@ type Grant struct {
 	GrantedBy       string   `json:"granted_by"`
 }
 
+// EffectivePermission is a display-only view of a permission that is both
+// granted to a member and usable in the listed scope. It is never used as an
+// authorization input; every operation still calls Check.
+type EffectivePermission struct {
+	Permission string `json:"permission"`
+	Scope      string `json:"scope"`
+	Anchor     string `json:"anchor,omitempty"`
+	Role       string `json:"role,omitempty"`
+}
+
 var administratorPermissions = []string{
 	"self:read",
 	"auth.spaces:manage",
@@ -1007,6 +1017,57 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 
 func (s *Service) Assignments(ctx context.Context, memberID string) ([]engine.Assignment, int64, error) {
 	return s.assignmentsQueries(ctx, s.Store.Queries(), memberID)
+}
+
+// ListEffectivePermissions returns the permissions currently usable by a
+// member for display in the principal plane. It intentionally evaluates each
+// candidate through Check so Agent owner envelopes and directory status have
+// the same semantics as every other authorization decision.
+func (s *Service) ListEffectivePermissions(ctx context.Context, memberID string) ([]EffectivePermission, error) {
+	member, err := s.GetMemberAnySpace(ctx, memberID)
+	if err != nil {
+		return nil, err
+	}
+	assignments, _, err := s.Assignments(ctx, memberID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]EffectivePermission, 0)
+	seen := make(map[string]struct{})
+	for _, assignment := range assignments {
+		for _, permission := range assignment.Envelope {
+			request := CheckRequest{MemberID: memberID, Permission: permission, ResourceSpace: member.SpaceID}
+			switch assignment.Scope.Kind {
+			case "self":
+				request.ResourceOwner = memberID
+			case "group", "group_tree":
+				request.ResourceGroup = assignment.Scope.Anchor
+			}
+			decision, _, err := s.Check(ctx, request)
+			if err != nil {
+				return nil, err
+			}
+			if decision.Effect != engine.Allow {
+				continue
+			}
+			key := permission + "\x00" + assignment.Scope.Kind + "\x00" + assignment.Scope.Anchor
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			out = append(out, EffectivePermission{Permission: permission, Scope: assignment.Scope.Kind, Anchor: assignment.Scope.Anchor, Role: assignment.Role})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Permission != out[j].Permission {
+			return out[i].Permission < out[j].Permission
+		}
+		if out[i].Scope != out[j].Scope {
+			return out[i].Scope < out[j].Scope
+		}
+		return out[i].Anchor < out[j].Anchor
+	})
+	return out, nil
 }
 
 func (s *Service) assignmentsQueries(ctx context.Context, q *db.Queries, memberID string) ([]engine.Assignment, int64, error) {

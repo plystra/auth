@@ -61,6 +61,11 @@ type MembersOutput struct {
 		Data []authorization.Member `json:"data"`
 	}
 }
+type PermissionsOutput struct {
+	Body struct {
+		Data []authorization.EffectivePermission `json:"data"`
+	}
+}
 type LoginInput struct {
 	Body          AuthBody
 	XForwardedFor string `header:"X-Forwarded-For"`
@@ -102,6 +107,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_in", Method: "POST", Path: "/v1/auth/sign-in", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
 	route.Register(api, route.Spec{Name: "auth.refresh", Method: "POST", Path: "/v1/auth/refresh", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.refresh)
 	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.me)
+	route.Register(api, route.Spec{Name: "auth.me_permissions", Method: "GET", Path: "/v1/me/permissions", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.mePermissions)
 	route.Register(api, route.Spec{Name: "auth.me_members", Method: "GET", Path: "/v1/me/members", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.meMembers)
 	route.Register(api, route.Spec{Name: "auth.sign_out", Method: "POST", Path: "/v1/auth/sign-out", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.logout)
 	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
@@ -207,6 +213,20 @@ func (a *API) meMembers(ctx context.Context, in *MembersInput) (*MembersOutput, 
 	}
 	out := &MembersOutput{}
 	out.Body.Data = members
+	return out, nil
+}
+
+func (a *API) mePermissions(ctx context.Context, in *BearerInput) (*PermissionsOutput, error) {
+	member, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	if err != nil {
+		return nil, err
+	}
+	permissions, err := a.Authorization.ListEffectivePermissions(ctx, member.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &PermissionsOutput{}
+	out.Body.Data = permissions
 	return out, nil
 }
 
