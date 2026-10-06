@@ -673,6 +673,46 @@ func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 	assertPrincipalError(t, err, "OWNER_ENVELOPE_EXCLUDED")
 }
 
+func TestCreateAgentEndpointReturnsOneTimeAgentCredential(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_endpoint_agent_create', $1, '["auth.agents:create"]'::jsonb, $2, 'space', $1, $2)
+	`, spaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &agentsInput{Authorization: "Bearer " + tokens.AccessToken}
+	in.Body.Name = "one-time-credential"
+	out, err := api.createAgent(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(out.Body.Data.AgentKey, "ply_ag_") || out.Body.Data.Credential != "agent_key" {
+		t.Fatalf("agent creation response = %+v, want one-time ply_ag_ credential", out.Body.Data)
+	}
+	credential, err := agents.AuthenticateKey(ctx, out.Body.Data.AgentKey)
+	if err != nil {
+		t.Fatalf("returned credential was not usable: %v", err)
+	}
+	if credential.MemberID != out.Body.Data.Agent.ID || credential.SpaceID != spaceID {
+		t.Fatalf("credential = %+v, want created Agent %s in Space %s", credential, out.Body.Data.Agent.ID, spaceID)
+	}
+	var stored []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE member_id = $1`, out.Body.Data.Agent.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored), out.Body.Data.AgentKey) {
+		t.Fatal("agent credential secret was stored in plaintext")
+	}
+}
+
 func newPrincipalFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, *session.Service, *security.Signer) {
 	t.Helper()
 	ctx := context.Background()
