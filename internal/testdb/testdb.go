@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -34,6 +35,7 @@ type Database struct {
 }
 
 func Start(ctx context.Context) (*Harness, error) {
+	ensureDockerHost()
 	image := strings.TrimSpace(os.Getenv("PLYSTRA_TEST_POSTGRES_IMAGE"))
 	if image == "" {
 		image = DefaultPostgresImage
@@ -62,6 +64,16 @@ func Start(ctx context.Context) (*Harness, error) {
 		return nil, fmt.Errorf("migrate postgres template: %w", err)
 	}
 	return h, nil
+}
+
+// testcontainers-go falls back to probing a rootless socket when Windows has
+// no explicit Docker host. Docker Desktop exposes its Linux engine through
+// the named pipe below, so select it only for that default case.
+func ensureDockerHost() {
+	if runtime.GOOS != "windows" || strings.TrimSpace(os.Getenv("DOCKER_HOST")) != "" || strings.TrimSpace(os.Getenv("DOCKER_CONTEXT")) != "" {
+		return
+	}
+	_ = os.Setenv("DOCKER_HOST", "npipe:////./pipe/docker_engine")
 }
 
 func (h *Harness) Clone(ctx context.Context) (Database, error) {
