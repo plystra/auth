@@ -130,6 +130,18 @@ func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testin
 	if err := accounts.VerifyEmail(ctx, verification); err == nil {
 		t.Fatal("email verification token was reusable")
 	}
+	expiredVerification, err := accounts.CreateEmailVerification(ctx, "usr_token_user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE email_verification_tokens SET expires_at = now() - interval '1 second' WHERE user_id = $1 AND consumed_at IS NULL`, "usr_token_user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.VerifyEmail(ctx, expiredVerification); err == nil {
+		t.Fatal("expired email verification token was accepted")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
 
 	if err := insertAccountUser(ctx, st, "usr_reset_user", "reset-user@example.test", "active"); err != nil {
 		t.Fatal(err)
@@ -162,6 +174,18 @@ func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testin
 	}
 	if err := accounts.ResetPassword(ctx, reset, "a newly secure password"); err == nil {
 		t.Fatal("password reset token was reusable")
+	}
+	expiredReset, err := accounts.RequestPasswordReset(ctx, "reset-user@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE password_reset_tokens SET expires_at = now() - interval '1 second' WHERE user_id = $1 AND consumed_at IS NULL`, "usr_reset_user"); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.ResetPassword(ctx, expiredReset, "another secure password"); err == nil {
+		t.Fatal("expired password reset token was accepted")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
 	}
 	if _, active, err := sessions.Introspect(ctx, tokens.AccessToken, security.DefaultApplicationAudience); err != nil {
 		t.Fatal(err)

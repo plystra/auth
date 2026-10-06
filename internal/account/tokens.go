@@ -83,6 +83,9 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		v, e := q.ConsumePasswordResetToken(ctx, db.ConsumePasswordResetTokenParams{TokenHash: sha256Bytes(raw)})
 		if e != nil {
+			if errors.Is(e, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "password reset token is invalid or expired")
+			}
 			return e
 		}
 		if e = q.UpdatePassword(ctx, db.UpdatePasswordParams{ID: v, PasswordHash: hash}); e != nil {
