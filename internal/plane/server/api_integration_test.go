@@ -246,7 +246,7 @@ func assertExplainGolden(t *testing.T, name string, decision ExplainDecision) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(actual)+"\n" != string(want) {
+	if string(actual)+"\n" != strings.ReplaceAll(string(want), "\r\n", "\n") {
 		t.Fatalf("%s mismatch\nwant:\n%s\n got:\n%s", name, want, actual)
 	}
 }
