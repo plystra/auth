@@ -51,6 +51,25 @@ func TestBindUserRejectsNonHumanMember(t *testing.T) {
 	}
 }
 
+func TestMemberTypeConstraintRejectsUnknownKind(t *testing.T) {
+	ctx := context.Background()
+	st, _, _, spaceID := newBindingFixture(t)
+	_, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, kind, type, binding_policy, status)
+		VALUES ('mem_invalid_type', $1, 'Invalid member', 'user', 'robot', 'single', 'active')
+	`, spaceID)
+	if err == nil {
+		t.Fatal("members.type accepted an unknown value")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE id = 'mem_invalid_type'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("invalid member type row was persisted")
+	}
+}
+
 func TestSingleBindingSerializesConcurrentBinds(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
