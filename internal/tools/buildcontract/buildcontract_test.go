@@ -70,6 +70,24 @@ func TestEngineeringToolsArePinnedAndBoundaryRulesAreConfigured(t *testing.T) {
 	}
 }
 
+func TestCIChecksMinimumAndLatestPostgresImages(t *testing.T) {
+	root := repositoryRoot(t)
+	workflow, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "check.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(workflow)
+	for _, required := range []string{
+		"PLYSTRA_TEST_POSTGRES_IMAGE: postgres:${{ matrix.postgres }}-alpine",
+		"postgres: [17, 18]",
+		"run: make check",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("CI workflow is missing %q", required)
+		}
+	}
+}
+
 func TestTestDBUsesDockerTemplateDatabaseClones(t *testing.T) {
 	root := repositoryRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "internal", "testdb", "testdb.go"))
