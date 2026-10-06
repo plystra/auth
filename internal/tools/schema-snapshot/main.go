@@ -31,8 +31,7 @@ func main() {
 	if err := os.MkdirAll("schema", 0755); err != nil {
 		panic(err)
 	}
-	contents := strings.TrimSuffix(strings.Join(out, "\n"), "\n")
-	if err := os.WriteFile(filepath.Join("schema", "schema.sql"), []byte(contents), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join("schema", "schema.sql"), []byte(strings.Join(out, "\n")), 0644); err != nil {
 		panic(err)
 	}
 }
