@@ -588,6 +588,36 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	}
 }
 
+func TestAgentManagementRequiresVerifiedApprovalFact(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "approval-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"auth.bindings:manage"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: created.ID, Permission: "auth.bindings:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "APPROVAL_REQUIRED" {
+		t.Fatalf("unapproved Agent decision = %+v, want APPROVAL_REQUIRED", decision)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.bindings:manage"); err == nil {
+		t.Fatal("Agent governance operation ignored the missing approval")
+	} else {
+		assertPrincipalError(t, err, decision.Code)
+	}
+}
+
 func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
