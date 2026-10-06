@@ -32,6 +32,25 @@ func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
 	}
 }
 
+func TestMiddlewarePreservesValidRequestIDAndReplacesOversizedID(t *testing.T) {
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	valid := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	valid.Header.Set("X-Request-Id", "req_client_123")
+	validResponse := httptest.NewRecorder()
+	Middleware(Principal, next).ServeHTTP(validResponse, valid)
+	if got := validResponse.Header().Get("X-Request-Id"); got != "req_client_123" {
+		t.Fatalf("valid request ID = %q, want caller value", got)
+	}
+
+	oversized := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	oversized.Header.Set("X-Request-Id", strings.Repeat("x", 129))
+	oversizedResponse := httptest.NewRecorder()
+	Middleware(Principal, next).ServeHTTP(oversizedResponse, oversized)
+	if got := oversizedResponse.Header().Get("X-Request-Id"); got == "" || len(got) > 128 || got == strings.Repeat("x", 129) {
+		t.Fatalf("oversized request ID = %q, want a generated bounded ID", got)
+	}
+}
+
 func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
 	if !userOnly([]Subject{User}) {
 		t.Fatal("a user-account route should be allowed without a member permission")
