@@ -205,7 +205,7 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	servers := []*http.Server{{Addr: c.HTTPAddr, Handler: otelhttp.NewHandler(route.MiddlewareWithOriginPolicy(route.Principal, principalMux, principalOriginPolicy), "principal")}, {Addr: c.ServerAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server")}, {Addr: c.OpsAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops")}, {Addr: ":8090", Handler: health}}
+	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicy(route.Principal, principalMux, principalOriginPolicy), "principal"), otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server"), otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops"), health)
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)
@@ -225,6 +225,15 @@ func serve(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+func planeServers(c config.Config, healthAddr string, principal, server, ops, health http.Handler) []*http.Server {
+	return []*http.Server{
+		{Addr: c.HTTPAddr, Handler: principal},
+		{Addr: c.ServerAddr, Handler: server},
+		{Addr: c.OpsAddr, Handler: ops},
+		{Addr: healthAddr, Handler: health},
+	}
 }
 
 func registerHealth(mux *http.ServeMux, ping func(context.Context) error) {
