@@ -24,15 +24,15 @@ type API struct {
 type SignInInput struct {
 	Body struct {
 		Email    string        `json:"email" maxLength:"254"`
-		Password secret.Secret `json:"password" minLength:"1" maxLength:"1024"`
-		MFACode  secret.Secret `json:"mfa_code" minLength:"6" maxLength:"6"`
+		Password secret.String `json:"password" minLength:"1" maxLength:"1024"`
+		MFACode  secret.String `json:"mfa_code" minLength:"6" maxLength:"6"`
 	}
 	UserAgent string `header:"User-Agent" maxLength:"1024"`
 }
 type SignInOutput struct {
 	Body struct {
 		Data struct {
-			AccessToken secret.Secret `json:"access_token"`
+			AccessToken secret.String `json:"access_token"`
 			TokenType   string        `json:"token_type"`
 			ExpiresAt   time.Time     `json:"expires_at"`
 		} `json:"data"`
@@ -44,7 +44,7 @@ type AuthInput struct {
 type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Code      secret.Secret   `json:"mfa_code" minLength:"6" maxLength:"6"`
+		Code      secret.String   `json:"mfa_code" minLength:"6" maxLength:"6"`
 		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}

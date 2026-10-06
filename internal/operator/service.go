@@ -38,7 +38,7 @@ type Service struct {
 }
 
 type Session struct {
-	Token        secret.Secret
+	Token        secret.String
 	ID           string
 	UserID       string
 	Capabilities []string
@@ -546,7 +546,7 @@ func hasCapability(raw []byte, want string) bool {
 	return err == nil && containsCapability(caps, want)
 }
 
-func newToken() (secret.Secret, error) {
+func newToken() (secret.String, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err

@@ -23,11 +23,11 @@ import (
 
 type Service struct {
 	Store   *store.Store
-	DataKey secret.Secret
+	DataKey secret.String
 }
 type Enrollment struct {
 	FactorID string        `json:"factor_id"`
-	Secret   secret.Secret `json:"secret"`
+	Secret   secret.String `json:"secret"`
 	URI      string        `json:"otpauth_uri"`
 }
 
