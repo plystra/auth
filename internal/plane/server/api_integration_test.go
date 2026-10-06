@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -156,6 +158,96 @@ func TestAuthzBatchCheckEvaluatesItemsIndependently(t *testing.T) {
 	}
 	if w := request(`{"requests":[` + strings.Join(items, ",") + `]}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
 		t.Fatalf("oversized batch = %d %s, want 400 VALIDATION_FAILED", w.Code, w.Body.String())
+	}
+}
+
+func TestAuthzExplainHTTPUsesGoldenTraceAndAuditsDenials(t *testing.T) {
+	ctx := context.Background()
+	st, authz, member, spaceID, key, sessions := newServerFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET scopes = '["auth.authz:check", "auth.authz:explain", "auth.tokens:introspect"]'::jsonb WHERE prefix = $1`, strings.SplitN(key, ".", 2)[0]); err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	request := func(secret, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/server/v1/authz/explain", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+secret)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	body := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+	allow := request(key, body)
+	if allow.Code != http.StatusOK {
+		t.Fatalf("explain allow status = %d, body = %s", allow.Code, allow.Body.String())
+	}
+	var allowResponse struct {
+		Data ExplainDecision `json:"data"`
+	}
+	if err := json.Unmarshal(allow.Body.Bytes(), &allowResponse); err != nil {
+		t.Fatal(err)
+	}
+	if allowResponse.Data.Decision != string(engine.Allow) || allowResponse.Data.DecisionID == "" || len(allowResponse.Data.Trace) == 0 {
+		t.Fatalf("explain allow response = %+v", allowResponse.Data)
+	}
+	assertExplainGolden(t, "explain_allow.golden", allowResponse.Data)
+
+	deniedBody := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"missing:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+	deny := request(key, deniedBody)
+	if deny.Code != http.StatusOK {
+		t.Fatalf("explain deny status = %d, body = %s", deny.Code, deny.Body.String())
+	}
+	var denyResponse struct {
+		Data ExplainDecision `json:"data"`
+	}
+	if err := json.Unmarshal(deny.Body.Bytes(), &denyResponse); err != nil {
+		t.Fatal(err)
+	}
+	if denyResponse.Data.Decision != string(engine.Deny) || denyResponse.Data.DenyCode != "UNKNOWN_PERMISSION" || len(denyResponse.Data.Trace) == 0 {
+		t.Fatalf("explain deny response = %+v", denyResponse.Data)
+	}
+	assertExplainGolden(t, "explain_deny.golden", denyResponse.Data)
+	var action string
+	if err := st.Pool.QueryRow(ctx, `SELECT action FROM audit_logs WHERE action = 'authz.explain' ORDER BY occurred_at DESC LIMIT 1`).Scan(&action); err != nil {
+		t.Fatal(err)
+	}
+	if action != "authz.explain" {
+		t.Fatalf("explain deny audit action = %q", action)
+	}
+
+	apps := &application.Service{Store: st}
+	withoutExplain, err := apps.CreateKey(ctx, "app_server_test", "without-explain", []string{"auth.authz:check"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied := request(withoutExplain, body); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"PERMISSION_DENIED"`) {
+		t.Fatalf("missing explain scope = %d %s", denied.Code, denied.Body.String())
+	}
+}
+
+func assertExplainGolden(t *testing.T, name string, decision ExplainDecision) {
+	t.Helper()
+	golden := struct {
+		Decision string        `json:"decision"`
+		DenyCode string        `json:"deny_code,omitempty"`
+		Summary  string        `json:"summary"`
+		Trace    []ExplainStep `json:"trace"`
+	}{Decision: decision.Decision, DenyCode: decision.DenyCode, Summary: decision.Summary, Trace: decision.Trace}
+	actual, err := json.MarshalIndent(golden, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join("testdata", name)
+	want, err := os.ReadFile(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual)+"\n" != string(want) {
+		t.Fatalf("%s mismatch\nwant:\n%s\n got:\n%s", name, want, actual)
 	}
 }
 

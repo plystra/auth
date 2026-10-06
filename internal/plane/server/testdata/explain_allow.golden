@@ -1,0 +1,21 @@
+{
+  "decision": "allow",
+  "summary": "self:read is allowed",
+  "trace": [
+    {
+      "step": "authorization",
+      "result": "pass",
+      "detail": "member matched"
+    },
+    {
+      "step": "authorization",
+      "result": "pass",
+      "detail": "permission matched"
+    },
+    {
+      "step": "authorization",
+      "result": "pass",
+      "detail": "scope matched"
+    }
+  ]
+}

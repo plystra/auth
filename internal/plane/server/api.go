@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -97,6 +98,27 @@ type CheckOutput struct {
 	}
 }
 
+type ExplainStep struct {
+	Step   string `json:"step"`
+	Result string `json:"result"`
+	Detail string `json:"detail"`
+}
+
+type ExplainDecision struct {
+	Decision      string        `json:"decision"`
+	DenyCode      string        `json:"deny_code,omitempty"`
+	DecisionID    string        `json:"decision_id"`
+	PolicyVersion string        `json:"policy_version"`
+	Summary       string        `json:"summary"`
+	Trace         []ExplainStep `json:"trace"`
+}
+
+type ExplainOutput struct {
+	Body struct {
+		Data ExplainDecision `json:"data"`
+	}
+}
+
 type BatchCheckBody struct {
 	Requests []CheckBody `json:"requests"`
 }
@@ -139,6 +161,7 @@ type resolvedSubject struct {
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
 	route.Register(api, route.Spec{Name: "authz.batch_check", Method: "POST", Path: "/server/v1/authz/batch-check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true, MaxBodyBytes: 256 * 1024}, a.batchCheck)
+	route.Register(api, route.Spec{Name: "authz.explain", Method: "POST", Path: "/server/v1/authz/explain", Plane: route.Server, Permission: "auth.authz:explain", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.explain)
 	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
 }
 
@@ -176,44 +199,92 @@ func (a *API) batchCheck(ctx context.Context, in *BatchCheckInput) (*BatchCheckO
 	return out, nil
 }
 
-func (a *API) checkWithKey(ctx context.Context, key application.Key, body CheckBody) (*CheckOutput, error) {
-	if len(body.Grants) > 0 || len(body.Roles) > 0 || len(body.Subject.unknown) > 0 {
+func (a *API) explain(ctx context.Context, in *CheckInput) (*ExplainOutput, error) {
+	if len(in.Body.Grants) > 0 || len(in.Body.Roles) > 0 || len(in.Body.Subject.unknown) > 0 {
 		return nil, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
 	}
-	if !contains(key.Scopes, "auth.authz:check") {
-		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for authorization checks.")
+	key, err := a.key(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	evaluation, err := a.evaluateWithKey(ctx, key, in.Body, "auth.authz:explain")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.writeDenyAudit(ctx, key, in.Body, evaluation.decision, "authz.explain"); err != nil {
+		return nil, err
+	}
+	out := &ExplainOutput{}
+	out.Body.Data = ExplainDecision{
+		Decision:      string(evaluation.decision.Effect),
+		DecisionID:    string(ids.New[ids.ID]("dec")),
+		PolicyVersion: strconv.FormatInt(evaluation.policyVersion, 10),
+		Summary:       explainSummary(in.Body.Action, evaluation.decision),
+		Trace:         explainTrace(evaluation.decision),
+	}
+	if evaluation.decision.Effect == engine.Deny {
+		out.Body.Data.DenyCode = evaluation.decision.Code
+	}
+	return out, nil
+}
+
+func (a *API) checkWithKey(ctx context.Context, key application.Key, body CheckBody) (*CheckOutput, error) {
+	evaluation, err := a.evaluateWithKey(ctx, key, body, "auth.authz:check")
+	if err != nil {
+		return nil, err
+	}
+	return a.writeDecisionWithVersion(ctx, key, body, evaluation.memberID, evaluation.spaceID, evaluation.decision, evaluation.policyVersion)
+}
+
+type authorizationEvaluation struct {
+	decision      engine.Decision
+	policyVersion int64
+	memberID      string
+	spaceID       string
+}
+
+func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body CheckBody, requiredScope string) (authorizationEvaluation, error) {
+	if len(body.Grants) > 0 || len(body.Roles) > 0 || len(body.Subject.unknown) > 0 {
+		return authorizationEvaluation{}, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
+	}
+	if !contains(key.Scopes, requiredScope) {
+		return authorizationEvaluation{}, apierr.New("PERMISSION_DENIED", "API key is not scoped for this authorization operation.")
+	}
+	if a.Authorization == nil {
+		return authorizationEvaluation{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	spaceID := strings.TrimSpace(body.Resource.SpaceID)
 	if spaceID == "" {
 		spaceID = key.SpaceID
 	}
 	if spaceID != key.SpaceID {
-		return a.writeDecision(ctx, key, body, "", spaceID, engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"})
+		version, err := a.Authorization.PolicyVersion(ctx, spaceID)
+		if err != nil {
+			return authorizationEvaluation{}, err
+		}
+		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"}, policyVersion: version, spaceID: spaceID}, nil
 	}
 	resolved, err := a.resolveSubject(ctx, key, body.Subject, spaceID)
 	if err != nil {
-		return nil, err
+		return authorizationEvaluation{}, err
 	}
 	memberID := resolved.ID
-	if a.Authorization == nil {
-		return nil, apierr.New("UNAVAILABLE", "authorization is unavailable")
-	}
 	permission := strings.TrimSpace(body.Action)
 	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, permission) {
 		policyVersion, versionErr := a.Authorization.PolicyVersion(ctx, spaceID)
 		if versionErr != nil {
-			return nil, versionErr
+			return authorizationEvaluation{}, versionErr
 		}
-		return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion)
+		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
 	}
 	decision, policyVersion, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
 		ResourceGroup: body.Resource.GroupID, ResourceOwner: body.Resource.OwnerMemberID,
 	})
 	if err != nil {
-		return nil, err
+		return authorizationEvaluation{}, err
 	}
-	return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, decision, policyVersion)
+	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
 }
 
 func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
@@ -280,18 +351,6 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 	return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
 }
 
-func (a *API) writeDecision(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision) (*CheckOutput, error) {
-	version := int64(0)
-	if a.Authorization != nil && spaceID != "" {
-		var err error
-		version, err = a.Authorization.PolicyVersion(ctx, spaceID)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, decision, version)
-}
-
 func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision, policyVersion int64) (*CheckOutput, error) {
 	out := &CheckOutput{}
 	out.Body.Data.Decision = string(decision.Effect)
@@ -299,20 +358,61 @@ func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key,
 	out.Body.Data.PolicyVersion = strconv.FormatInt(policyVersion, 10)
 	if decision.Effect == engine.Deny {
 		out.Body.Data.DenyCode = decision.Code
-		if a.Applications != nil && a.Applications.Store != nil {
-			extra := map[string]string{}
-			if body.Subject.Token == "" {
-				extra["subject_source"] = "application_assertion"
-			}
-			err := a.Applications.Store.InTx(ctx, func(q *db.Queries) error {
-				return audit.WriteWithMetadata(ctx, q, "application", key.ID, "authz.check", body.Resource.ID, "deny", extra)
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
+	}
+	if err := a.writeDenyAudit(ctx, key, body, decision, "authz.check"); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+func (a *API) writeDenyAudit(ctx context.Context, key application.Key, body CheckBody, decision engine.Decision, action string) error {
+	if decision.Effect == engine.Deny && a.Applications != nil && a.Applications.Store != nil {
+		extra := map[string]string{}
+		if body.Subject.Token == "" {
+			extra["subject_source"] = "application_assertion"
+		}
+		return a.Applications.Store.InTx(ctx, func(q *db.Queries) error {
+			return audit.WriteWithMetadata(ctx, q, "application", key.ID, action, body.Resource.ID, "deny", extra)
+		})
+	}
+	return nil
+}
+
+func explainSummary(action string, decision engine.Decision) string {
+	if decision.Effect == engine.Allow {
+		return fmt.Sprintf("%s is allowed", action)
+	}
+	return fmt.Sprintf("%s is denied: %s", action, decision.Code)
+}
+
+func explainTrace(decision engine.Decision) []ExplainStep {
+	if len(decision.Trace) == 0 {
+		detail := "authorization denied"
+		switch decision.Code {
+		case "UNKNOWN_PERMISSION":
+			detail = "permission is not registered"
+		case "PERMISSION_DISABLED":
+			detail = "permission is disabled"
+		case "ACTOR_MEMBER_INACTIVE":
+			detail = "subject member is inactive"
+		case "OWNER_INACTIVE":
+			detail = "owner chain contains an inactive member"
+		case "RESOURCE_GROUP_NOT_FOUND":
+			detail = "resource group was not found in the Space"
+		case "SPACE_INACTIVE":
+			detail = "resource Space is inactive"
+		}
+		return []ExplainStep{{Step: "authorization", Result: "fail", Detail: detail}}
+	}
+	trace := make([]ExplainStep, 0, len(decision.Trace))
+	for i, detail := range decision.Trace {
+		result := "pass"
+		if decision.Effect == engine.Deny && i == len(decision.Trace)-1 {
+			result = "fail"
+		}
+		trace = append(trace, ExplainStep{Step: "authorization", Result: result, Detail: detail})
+	}
+	return trace
 }
 
 func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectOutput, error) {

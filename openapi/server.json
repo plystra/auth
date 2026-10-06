@@ -176,6 +176,75 @@
         ],
         "type": "object"
       },
+      "ExplainDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "type": "string"
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "deny_code": {
+            "type": "string"
+          },
+          "policy_version": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "trace": {
+            "items": {
+              "$ref": "#/components/schemas/ExplainStep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "decision",
+          "decision_id",
+          "policy_version",
+          "summary",
+          "trace"
+        ],
+        "type": "object"
+      },
+      "ExplainOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ExplainDecision"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "ExplainStep": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "result": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "step",
+          "result",
+          "detail"
+        ],
+        "type": "object"
+      },
       "IntrospectInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -300,6 +369,53 @@
           }
         },
         "summary": "authz.check"
+      }
+    },
+    "/server/v1/authz/explain": {
+      "post": {
+        "operationId": "authz.explain",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExplainOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "authz.explain"
       }
     },
     "/server/v1/tokens/introspect": {

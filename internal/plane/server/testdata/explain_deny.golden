@@ -1,0 +1,12 @@
+{
+  "decision": "deny",
+  "deny_code": "UNKNOWN_PERMISSION",
+  "summary": "missing:read is denied: UNKNOWN_PERMISSION",
+  "trace": [
+    {
+      "step": "authorization",
+      "result": "fail",
+      "detail": "permission is not registered"
+    }
+  ]
+}
