@@ -972,8 +972,9 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 }
 
 // authorityCoverageTx is the temporary G8 compatibility check for binding
-// authority deltas. The authoritative incremental evaluator will replace this
-// key-only comparison; all ordinary permission decisions already use Check.
+// authority deltas (see auth-docs/roadmap.md, G8 "权威增量求值器"). The
+// authoritative incremental evaluator will replace this key-only comparison;
+// all ordinary permission decisions already use Check.
 func (s *Service) authorityCoverageTx(ctx context.Context, q *db.Queries, actorMemberID, targetMemberID string) error {
 	actor, err := authorityKeysTx(ctx, q, actorMemberID)
 	if err != nil {
