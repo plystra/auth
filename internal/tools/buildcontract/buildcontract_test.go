@@ -190,6 +190,31 @@ func TestSchemaSnapshotContainsMigrationDerivedAuthorizationTables(t *testing.T)
 	}
 }
 
+func TestOnlyStoreOwnsTransactionEntry(t *testing.T) {
+	root := repositoryRoot(t)
+	internalRoot := filepath.Join(root, "internal")
+	err := filepath.Walk(internalRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") || strings.Contains(path, string(filepath.Separator)+"store"+string(filepath.Separator)) {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		source := string(data)
+		if strings.Contains(source, "Begin(") || strings.Contains(source, "BeginTx(") {
+			t.Errorf("%s opens a transaction directly; use store.InTx", path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	root, err := os.Getwd()
