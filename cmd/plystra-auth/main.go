@@ -132,6 +132,7 @@ func serve(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	warnSharedPublicOpsListener(slog.Default(), c)
 	st, e := store.Open(ctx, c.DatabaseURL)
 	if e != nil {
 		return e
@@ -225,6 +226,13 @@ func serve(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+func warnSharedPublicOpsListener(logger *slog.Logger, c config.Config) {
+	if logger == nil || strings.TrimSpace(c.HTTPAddr) == "" || strings.TrimSpace(c.OpsAddr) == "" || strings.TrimSpace(c.HTTPAddr) != strings.TrimSpace(c.OpsAddr) {
+		return
+	}
+	logger.Warn("operations listener shares public listener address", "addr", strings.TrimSpace(c.OpsAddr))
 }
 
 func planeServers(c config.Config, healthAddr string, principal, server, ops, health http.Handler) []*http.Server {

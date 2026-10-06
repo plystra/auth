@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -142,5 +144,19 @@ func TestPlaneServersBindDistinctListeners(t *testing.T) {
 			t.Fatalf("listen on %q: %v", server.Addr, err)
 		}
 		listeners = append(listeners, listener)
+	}
+}
+
+func TestWarnSharedPublicOpsListener(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, nil))
+	warnSharedPublicOpsListener(logger, config.Config{HTTPAddr: ":8080", OpsAddr: ":8080"})
+	if !strings.Contains(output.String(), "operations listener shares public listener address") || !strings.Contains(output.String(), "addr=:8080") {
+		t.Fatalf("shared listener warning = %q", output.String())
+	}
+	output.Reset()
+	warnSharedPublicOpsListener(logger, config.Config{HTTPAddr: ":8080", OpsAddr: ":8082"})
+	if output.Len() != 0 {
+		t.Fatalf("unexpected warning for distinct listeners: %q", output.String())
 	}
 }
