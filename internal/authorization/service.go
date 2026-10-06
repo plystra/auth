@@ -447,33 +447,33 @@ func (s *Service) PolicyVersion(ctx context.Context, spaceID string) (int64, err
 	return row.PolicyVersion, err
 }
 
-// EnsureDefaultMembership gives a newly registered user the default Space
-// identity while keeping the member, role grant, and audit record atomic.
-func (s *Service) EnsureDefaultMembership(ctx context.Context, userID, displayName string) error {
-	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if _, err := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: "spc_01h00000000000000000000000"}); err == nil {
-			return nil
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
-			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: "spc_01h00000000000000000000000", Name: displayName, Type: "human", BindingPolicy: "single",
-		})
-		if err != nil {
-			return err
-		}
-		if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: member.ID}); err != nil {
-			return err
-		}
-		role, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: "rol_01h00000000000000000000001", SpaceID: "spc_01h00000000000000000000000"})
-		if err != nil {
-			return err
-		}
-		if _, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"}); err != nil {
-			return err
-		}
-		return audit.Write(ctx, q, "system", "system", "member.default_bind", member.ID, "success")
+// EnsureDefaultMembershipTx is part of the caller's registration transaction.
+func (s *Service) EnsureDefaultMembershipTx(ctx context.Context, q *db.Queries, userID, displayName string) (string, error) {
+	if existing, err := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: "spc_01h00000000000000000000000"}); err == nil {
+		return existing.ID, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
+		ID: string(ids.New[ids.MemberID]("mem")), SpaceID: "spc_01h00000000000000000000000", Name: displayName, Type: "human", BindingPolicy: "single",
 	})
+	if err != nil {
+		return "", err
+	}
+	if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: member.ID}); err != nil {
+		return "", err
+	}
+	role, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: "rol_01h00000000000000000000001", SpaceID: "spc_01h00000000000000000000000"})
+	if err != nil {
+		return "", err
+	}
+	if _, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"}); err != nil {
+		return "", err
+	}
+	if err := audit.Write(ctx, q, "system", "system", "member.default_bind", member.ID, "success"); err != nil {
+		return "", err
+	}
+	return member.ID, nil
 }
 
 func (s *Service) ListMembers(ctx context.Context, spaceID string) ([]Member, error) {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/space"
@@ -102,6 +103,72 @@ func TestConcurrentRegistrationSameEmailHasSingleSuccess(t *testing.T) {
 	}
 	if successes != 1 || conflicts != attempts-1 {
 		t.Fatalf("concurrent registrations: successes=%d conflicts=%d, want one success and %d conflicts", successes, conflicts, attempts-1)
+	}
+}
+
+func TestRegistrationRollsBackUserAndDefaultMembershipWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE instance_settings SET registration_mode = 'open', require_email_verification = false`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_registration_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'registration audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_registration_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_registration_audit_insert();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	authz := &authorization.Service{Store: st}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz}
+	if _, err := accounts.Register(ctx, RegisterInput{Email: "rollback@example.test", Password: "a sufficiently long password"}, nil, ""); err == nil {
+		t.Fatal("registration succeeded despite audit failure")
+	}
+	var users, members int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE email_normalized = 'rollback@example.test'`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE name = 'rollback@example.test'`).Scan(&members); err != nil {
+		t.Fatal(err)
+	}
+	if users != 0 || members != 0 {
+		t.Fatalf("registration left partial state: users=%d members=%d", users, members)
+	}
+}
+
+func TestRegistrationCreatesDefaultMemberBindingAndGrant(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE instance_settings SET registration_mode = 'open'`); err != nil {
+		t.Fatal(err)
+	}
+	authz := &authorization.Service{Store: st}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz}
+	result, err := accounts.Register(ctx, RegisterInput{Email: "joined@example.test", Password: "a sufficiently long password"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.User.Status != "pending" {
+		t.Fatalf("registered user status = %q, want pending", result.User.Status)
+	}
+	var memberID string
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT m.id FROM members m JOIN user_members um ON um.member_id = m.id
+		WHERE um.user_id = $1 AND m.space_id = $2 AND m.type = 'human' AND um.status = 'active'
+	`, result.User.ID, DefaultSpaceID).Scan(&memberID); err != nil {
+		t.Fatal(err)
+	}
+	var grants, audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, memberID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action IN ('auth.register', 'member.default_bind') AND actor_id IN ($1, 'system')`, result.User.ID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 1 || audits != 2 {
+		t.Fatalf("registration state: grants=%d audits=%d, want one grant and two audit entries", grants, audits)
 	}
 }
 

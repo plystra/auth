@@ -80,23 +80,41 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 		return AuthResult{}, e
 	}
 	var u db.CreateUserRow
-	status := "active"
-	var verificationHash []byte
-	if settings.RequireEmailVerification {
-		status = "pending"
-		_, verificationHash, e = opaqueToken("ev_")
-		if e != nil {
-			return AuthResult{}, e
-		}
-	}
+	var memberID string
+	var requireEmailVerification bool
 	e = s.Store.InTx(ctx, func(q *db.Queries) error {
-		u, e = q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: hash, Status: status})
-		if e != nil {
-			return e
+		current, err := s.Settings.GetTx(ctx, q)
+		if err != nil {
+			return err
 		}
-		if settings.RequireEmailVerification {
-			if e = q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: string(ids.New[ids.ID]("evt")), UserID: u.ID, TokenHash: verificationHash, ExpiresAt: pgTime(time.Now().UTC().Add(24 * time.Hour))}); e != nil {
-				return e
+		if current.RegistrationMode != "open" {
+			return apierr.New("forbidden", "registration is not open")
+		}
+		if len(in.Password) < current.PasswordMinLength {
+			return apierr.New("invalid_request", "password does not meet the configured minimum length")
+		}
+		requireEmailVerification = current.RequireEmailVerification
+		status := "active"
+		if requireEmailVerification {
+			status = "pending"
+		}
+		u, err = q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: hash, Status: status})
+		if err != nil {
+			return err
+		}
+		if s.Authorization != nil {
+			memberID, err = s.Authorization.EnsureDefaultMembershipTx(ctx, q, u.ID, email)
+			if err != nil {
+				return err
+			}
+		}
+		if requireEmailVerification {
+			_, verificationHash, err := opaqueToken("ev_")
+			if err != nil {
+				return err
+			}
+			if err := q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: string(ids.New[ids.ID]("evt")), UserID: u.ID, TokenHash: verificationHash, ExpiresAt: pgTime(time.Now().UTC().Add(24 * time.Hour))}); err != nil {
+				return err
 			}
 		}
 		return audit.Write(ctx, q, "public", u.ID, "auth.register", u.ID, "success")
@@ -107,21 +125,8 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 		}
 		return AuthResult{}, e
 	}
-	if s.Authorization != nil {
-		if e := s.Authorization.EnsureDefaultMembership(ctx, u.ID, email); e != nil {
-			return AuthResult{}, e
-		}
-	}
-	if settings.RequireEmailVerification {
+	if requireEmailVerification {
 		return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time)}, nil
-	}
-	memberID := ""
-	if s.Authorization != nil {
-		if member, memberErr := s.Authorization.GetMemberForUser(ctx, u.ID, DefaultSpaceID); memberErr == nil {
-			memberID = member.ID
-		} else {
-			return AuthResult{}, memberErr
-		}
 	}
 	tokens, e := s.Sessions.CreateForMember(ctx, u.ID, memberID, ip, ua, 1)
 	if e != nil {

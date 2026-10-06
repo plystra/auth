@@ -33,6 +33,14 @@ func (s *Service) Get(ctx context.Context) (InstanceSettings, error) {
 	return decode(row), nil
 }
 
+func (s *Service) GetTx(ctx context.Context, q *db.Queries) (InstanceSettings, error) {
+	row, err := q.LockInstanceSettings(ctx)
+	if err != nil {
+		return InstanceSettings{}, err
+	}
+	return decode(row), nil
+}
+
 type SettingsPatch struct {
 	RegistrationMode         *string        `json:"registration_mode,omitempty"`
 	RequireEmailVerification *bool          `json:"require_email_verification,omitempty"`
