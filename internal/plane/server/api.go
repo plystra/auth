@@ -97,6 +97,21 @@ type CheckOutput struct {
 	}
 }
 
+type BatchCheckBody struct {
+	Requests []CheckBody `json:"requests"`
+}
+
+type BatchCheckInput struct {
+	Authorization string `header:"Authorization"`
+	Body          BatchCheckBody
+}
+
+type BatchCheckOutput struct {
+	Body struct {
+		Data []CheckDecision `json:"data"`
+	}
+}
+
 type IntrospectInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
@@ -123,6 +138,7 @@ type resolvedSubject struct {
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
+	route.Register(api, route.Spec{Name: "authz.batch_check", Method: "POST", Path: "/server/v1/authz/batch-check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true, MaxBodyBytes: 256 * 1024}, a.batchCheck)
 	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
 }
 
@@ -134,17 +150,47 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	if err != nil {
 		return nil, err
 	}
+	return a.checkWithKey(ctx, key, in.Body)
+}
+
+func (a *API) batchCheck(ctx context.Context, in *BatchCheckInput) (*BatchCheckOutput, error) {
+	if len(in.Body.Requests) == 0 || len(in.Body.Requests) > 100 {
+		return nil, apierr.New("VALIDATION_FAILED", "requests must contain between 1 and 100 items")
+	}
+	key, err := a.key(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
 	if !contains(key.Scopes, "auth.authz:check") {
 		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for authorization checks.")
 	}
-	spaceID := strings.TrimSpace(in.Body.Resource.SpaceID)
+	out := &BatchCheckOutput{}
+	out.Body.Data = make([]CheckDecision, 0, len(in.Body.Requests))
+	for _, body := range in.Body.Requests {
+		decision, checkErr := a.checkWithKey(ctx, key, body)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		out.Body.Data = append(out.Body.Data, decision.Body.Data)
+	}
+	return out, nil
+}
+
+func (a *API) checkWithKey(ctx context.Context, key application.Key, body CheckBody) (*CheckOutput, error) {
+	if len(body.Grants) > 0 || len(body.Roles) > 0 || len(body.Subject.unknown) > 0 {
+		return nil, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
+	}
+	if !contains(key.Scopes, "auth.authz:check") {
+		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for authorization checks.")
+	}
+	spaceID := strings.TrimSpace(body.Resource.SpaceID)
 	if spaceID == "" {
 		spaceID = key.SpaceID
 	}
 	if spaceID != key.SpaceID {
-		return a.writeDecision(ctx, key, in.Body, "", spaceID, engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"})
+		return a.writeDecision(ctx, key, body, "", spaceID, engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"})
 	}
-	resolved, err := a.resolveSubject(ctx, key, in.Body.Subject, spaceID)
+	resolved, err := a.resolveSubject(ctx, key, body.Subject, spaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -152,22 +198,22 @@ func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
 	if a.Authorization == nil {
 		return nil, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
-	permission := strings.TrimSpace(in.Body.Action)
+	permission := strings.TrimSpace(body.Action)
 	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, permission) {
 		policyVersion, versionErr := a.Authorization.PolicyVersion(ctx, spaceID)
 		if versionErr != nil {
 			return nil, versionErr
 		}
-		return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion)
+		return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion)
 	}
 	decision, policyVersion, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
-		ResourceGroup: in.Body.Resource.GroupID, ResourceOwner: in.Body.Resource.OwnerMemberID,
+		ResourceGroup: body.Resource.GroupID, ResourceOwner: body.Resource.OwnerMemberID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return a.writeDecisionWithVersion(ctx, key, in.Body, memberID, spaceID, decision, policyVersion)
+	return a.writeDecisionWithVersion(ctx, key, body, memberID, spaceID, decision, policyVersion)
 }
 
 func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {

@@ -40,6 +40,7 @@ type Spec struct {
 	Subjects           []Subject
 	StepUp             bool
 	AuthoritativeCheck bool
+	MaxBodyBytes       int64
 	NonJSON            bool
 }
 type Handler func(http.ResponseWriter, *http.Request)
@@ -66,7 +67,11 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	registry.Lock()
 	registry.specs = append(registry.specs, spec)
 	registry.Unlock()
-	huma.Register(api, huma.Operation{OperationID: spec.Name, Method: spec.Method, Path: spec.Path, Summary: spec.Name, MaxBodyBytes: 64 * 1024}, func(ctx context.Context, input *I) (*O, error) {
+	maxBodyBytes := spec.MaxBodyBytes
+	if maxBodyBytes == 0 {
+		maxBodyBytes = 64 * 1024
+	}
+	huma.Register(api, huma.Operation{OperationID: spec.Name, Method: spec.Method, Path: spec.Path, Summary: spec.Name, MaxBodyBytes: maxBodyBytes}, func(ctx context.Context, input *I) (*O, error) {
 		out, err := handler(ctx, input)
 		if err == nil {
 			return out, nil

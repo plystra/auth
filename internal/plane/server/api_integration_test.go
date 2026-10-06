@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -110,6 +111,45 @@ func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {
 				t.Fatalf("inline facts = %d %s, want 400 INLINE_GRANTS_NOT_ALLOWED", w.Code, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestAuthzBatchCheckEvaluatesItemsIndependently(t *testing.T) {
+	st, authz, member, spaceID, key, sessions := newServerFixture(t)
+	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, huma.DefaultConfig("server test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	request := func(body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/server/v1/authz/batch-check", strings.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	allowed := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+	denied := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"missing:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+	w := request(`{"requests":[` + allowed + `,` + denied + `]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("batch status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data []CheckDecision `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Data) != 2 || response.Data[0].Decision != "allow" || response.Data[1].Decision != "deny" || response.Data[1].DenyCode != "UNKNOWN_PERMISSION" {
+		t.Fatalf("batch decisions = %+v, want allow then UNKNOWN_PERMISSION deny", response.Data)
+	}
+	items := make([]string, 101)
+	for i := range items {
+		items[i] = allowed
+	}
+	if w := request(`{"requests":[` + strings.Join(items, ",") + `]}`); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("oversized batch = %d %s, want 400 VALIDATION_FAILED", w.Code, w.Body.String())
 	}
 }
 
