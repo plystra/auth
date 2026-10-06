@@ -546,7 +546,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		return apierr.New("VALIDATION_FAILED", "user_id is required")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
@@ -594,7 +594,7 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 
 func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
@@ -631,7 +631,7 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 		return apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
@@ -665,7 +665,7 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 		return apierr.New("VALIDATION_FAILED", "member status is invalid")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:manage", spaceID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.members:manage", spaceID, memberID); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
@@ -969,6 +969,37 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 		return nil
 	}
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+}
+
+func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, targetMemberID string) error {
+	groupID, err := resourceGroupForMemberTx(ctx, q, targetMemberID, spaceID)
+	if err != nil {
+		return err
+	}
+	decision, err := s.CheckTx(ctx, q, CheckRequest{
+		MemberID: actorMemberID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID,
+	})
+	if err != nil {
+		return err
+	}
+	if decision.Effect == engine.Allow {
+		return nil
+	}
+	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+}
+
+func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (string, error) {
+	if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", apierr.New("NOT_FOUND", "member was not found in this Space")
+		}
+		return "", err
+	}
+	groups, err := q.ListMemberGroups(ctx, db.ListMemberGroupsParams{MemberID: memberID, SpaceID: spaceID})
+	if err != nil || len(groups) == 0 {
+		return "", err
+	}
+	return groups[0].ID, nil
 }
 
 // authorityCoverageTx is the temporary G8 compatibility check for binding

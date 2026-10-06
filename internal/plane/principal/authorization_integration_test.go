@@ -74,12 +74,12 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
-	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
+	if _, err := api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); err == nil {
 		t.Fatal("group-scoped manager was allowed to manage the whole Space")
 	} else {
 		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
 	}
-	if _, err := api.actorForSpaceTarget(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage", outside.ID); err == nil {
+	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: outside.ID}); err == nil {
 		t.Fatal("group-scoped manager was allowed to manage a member outside the group")
 	} else {
 		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
@@ -91,8 +91,24 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 	if insideDecision.Effect != engine.Allow {
 		t.Fatalf("authz.check equivalent target decision = %+v, want allow", insideDecision)
 	}
-	if _, err := api.actorForSpaceTarget(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage", member.ID); err != nil {
+	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: member.ID}); err != nil {
 		t.Fatalf("management endpoint denied the same target authz.check allows: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'auth.members:manage'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); err == nil {
+		t.Fatal("management endpoint accepted a disabled permission")
+	} else {
+		assertPrincipalError(t, err, "PERMISSION_DISABLED")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'active', principal_kinds = '["agent"]'::jsonb WHERE key = 'auth.members:manage'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); err == nil {
+		t.Fatal("management endpoint accepted a disallowed principal kind")
+	} else {
+		assertPrincipalError(t, err, "PRINCIPAL_KIND_NOT_ALLOWED")
 	}
 }
 
@@ -121,6 +137,15 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	}
 	if _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
 		t.Fatalf("Agent H/A management endpoint was denied: %v", err)
+	}
+	for _, token := range []string{humanTokens.AccessToken, agentTokens.AccessToken} {
+		input := &createMemberInput{Authorization: "Bearer " + token, ID: spaceID}
+		input.Body.Name = "management endpoint member"
+		input.Body.Kind = "human"
+		input.Body.BindingPolicy = "single"
+		if _, err := api.createMember(ctx, input); err != nil {
+			t.Fatalf("H/A management handler denied an equivalent grant: %v", err)
+		}
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
 		t.Fatal(err)
