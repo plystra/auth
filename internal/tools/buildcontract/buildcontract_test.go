@@ -1,6 +1,7 @@
 package buildcontract
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,6 +102,34 @@ func TestRepositoryPublishesLicenseAndSecurityPolicy(t *testing.T) {
 	for _, required := range []string{"GitHub Security", "Advisory", "3 business days", "7 business days", "14 days"} {
 		if !strings.Contains(string(security), required) {
 			t.Errorf("SECURITY.md is missing %q", required)
+		}
+	}
+}
+
+func TestGeneratedOpenAPIDocumentsAreCommitted(t *testing.T) {
+	root := repositoryRoot(t)
+	for _, name := range []string{"principal.json", "server.json", "ops.json"} {
+		path := filepath.Join(root, "openapi", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		var document struct {
+			OpenAPI string                     `json:"openapi"`
+			Info    map[string]json.RawMessage `json:"info"`
+			Paths   map[string]json.RawMessage `json:"paths"`
+		}
+		if err := json.Unmarshal(data, &document); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if document.OpenAPI != "3.1.0" {
+			t.Errorf("%s OpenAPI version = %q, want 3.1.0", name, document.OpenAPI)
+		}
+		if len(document.Info) == 0 {
+			t.Errorf("%s is missing the OpenAPI info object", name)
+		}
+		if len(document.Paths) == 0 {
+			t.Errorf("%s contains no generated paths", name)
 		}
 	}
 }
