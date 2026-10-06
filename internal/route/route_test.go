@@ -1,10 +1,15 @@
 package route
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 )
 
 func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
@@ -33,5 +38,27 @@ func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
 	}
 	if userOnly([]Subject{User, Human}) || userOnly([]Subject{Human}) || userOnly(nil) {
 		t.Fatal("only an exact U-only subject set may omit a member permission")
+	}
+}
+
+func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	api := humago.New(mux, huma.DefaultConfig("route test", "1.0.0"))
+	Register(api, Spec{
+		Name: "route.internal-error", Method: http.MethodGet, Path: "/internal-error",
+		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
+	}, func(context.Context, *struct{}) (*struct{}, error) {
+		return nil, errors.New("database connection details must not escape")
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/internal-error", nil)
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", res.Code, http.StatusServiceUnavailable)
+	}
+	body := res.Body.String()
+	if !strings.Contains(body, `"code":"UNAVAILABLE"`) || strings.Contains(body, "database connection details") {
+		t.Fatalf("response = %s, want sanitized UNAVAILABLE error", body)
 	}
 }
