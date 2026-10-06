@@ -249,6 +249,7 @@ func TestSQLCUsesMigrationSchemaAndGeneratedDBOutput(t *testing.T) {
 		"internal/grant",
 		"internal/store",
 		"internal/operator/queries",
+		"internal/idempotency",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("sqlc.yaml is missing %q", required)
@@ -277,6 +278,7 @@ func TestSchemaSnapshotContainsMigrationDerivedAuthorizationTables(t *testing.T)
 		"status text NOT NULL DEFAULT 'active'",
 		"CREATE TABLE IF NOT EXISTS authorization_grants",
 		"CREATE TABLE audit_logs",
+		"CREATE TABLE idempotency_keys",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("schema snapshot is missing %q", required)

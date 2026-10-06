@@ -142,6 +142,22 @@ type GroupMember struct {
 	Source   string `json:"source"`
 }
 
+type IdempotencyKey struct {
+	ID              string             `json:"id"`
+	ScopeHash       string             `json:"scope_hash"`
+	Method          string             `json:"method"`
+	Path            string             `json:"path"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	RequestHash     []byte             `json:"request_hash"`
+	State           string             `json:"state"`
+	StatusCode      pgtype.Int4        `json:"status_code"`
+	ResponseHeaders []byte             `json:"response_headers"`
+	ResponseBody    []byte             `json:"response_body"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
 type InstanceSetting struct {
 	ID                       bool               `json:"id"`
 	RegistrationMode         string             `json:"registration_mode"`

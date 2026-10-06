@@ -3,6 +3,7 @@ package apierr
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -36,5 +37,13 @@ func TestErrorJSONIsEnvelope(t *testing.T) {
 	}
 	if got.Error.Code != "invalid_grant" || got.Error.Message != "grant is invalid" {
 		t.Fatalf("unexpected envelope: %s", raw)
+	}
+}
+
+func TestWriteUsesExplicitStatusOverride(t *testing.T) {
+	response := httptest.NewRecorder()
+	Write(response, WithStatus(New("IDEMPOTENCY_KEY_REUSED", "key was reused"), http.StatusConflict))
+	if response.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusConflict)
 	}
 }

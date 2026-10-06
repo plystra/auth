@@ -60,7 +60,7 @@ func Status(code string) int {
 }
 func Write(w http.ResponseWriter, e *Error) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(Status(e.Code))
+	w.WriteHeader(e.GetStatus())
 	_ = json.NewEncoder(w).Encode(e)
 }
 func Wrap(code string, err error) *Error { return &Error{Code: code, Message: fmt.Sprintf("%s", err)} }
