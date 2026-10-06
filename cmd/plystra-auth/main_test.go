@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -30,5 +32,33 @@ func TestJWKSWellKnownEndpointPublishesSigningKey(t *testing.T) {
 	}
 	if len(body.Keys) != 1 || body.Keys[0]["alg"] != "ES256" || body.Keys[0]["use"] != "sig" {
 		t.Fatalf("JWKS = %+v, want one ES256 signing key", body.Keys)
+	}
+}
+
+func TestHealthEndpointsReportLivenessAndReadiness(t *testing.T) {
+	var mux http.ServeMux
+	registerHealth(&mux, func(context.Context) error { return nil })
+
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if res.Code != http.StatusOK || res.Body.String() != `{"status":"ok"}` {
+		t.Fatalf("healthz = (%d, %q), want (200, ok)", res.Code, res.Body.String())
+	}
+
+	res = httptest.NewRecorder()
+	mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if res.Code != http.StatusOK || res.Body.String() != `{"status":"ready"}` {
+		t.Fatalf("readyz = (%d, %q), want (200, ready)", res.Code, res.Body.String())
+	}
+}
+
+func TestReadyEndpointReportsDependencyFailure(t *testing.T) {
+	var mux http.ServeMux
+	registerHealth(&mux, func(context.Context) error { return errors.New("database unavailable") })
+
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if res.Code != http.StatusServiceUnavailable || res.Body.String() != `{"status":"not_ready"}`+"\n" {
+		t.Fatalf("readyz failure = (%d, %q), want (503, not_ready)", res.Code, res.Body.String())
 	}
 }

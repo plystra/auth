@@ -225,17 +225,7 @@ func serve(ctx context.Context) error {
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, signer)
 	health := http.NewServeMux()
-	health.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	})
-	health.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if e := st.Pool.Ping(r.Context()); e != nil {
-			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = w.Write([]byte(`{"status":"ready"}`))
-	})
+	registerHealth(health, st.Pool.Ping)
 	servers := []*http.Server{{Addr: c.HTTPAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Principal, principalMux), "principal")}, {Addr: c.ServerAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server")}, {Addr: c.OpsAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops")}, {Addr: ":8090", Handler: health}}
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
@@ -256,6 +246,24 @@ func serve(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+func registerHealth(mux *http.ServeMux, ping func(context.Context) error) {
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if err := ping(r.Context()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	})
 }
 
 func registerJWKS(mux *http.ServeMux, signer *security.Signer) {
