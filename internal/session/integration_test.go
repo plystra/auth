@@ -225,6 +225,14 @@ func TestRefreshCanSwitchBoundMemberAndUpdatesAccessClaims(t *testing.T) {
 			return Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
 		},
 	}
+	if _, err := sessions.CreateForMember(ctx, "usr_switch_test", "mem_switch_missing", nil, "", 1); err == nil {
+		t.Fatal("session creation accepted an unbound member")
+	} else {
+		var public *apierr.Error
+		if !errors.As(err, &public) || public.Code != "PERMISSION_DENIED" {
+			t.Fatalf("unbound session creation error = %v, want PERMISSION_DENIED", err)
+		}
+	}
 	issued, err := sessions.CreateForMember(ctx, "usr_switch_test", "mem_switch_a", nil, "", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -265,6 +273,27 @@ func TestRefreshCanSwitchBoundMemberAndUpdatesAccessClaims(t *testing.T) {
 	}
 	if claims.MemberID != "mem_switch_b" || claims.SpaceID != "spc_01h00000000000000000000000" {
 		t.Fatalf("continued access claims = %+v, want member B and default Space", claims)
+	}
+	if _, active, err := sessions.Introspect(ctx, continued.AccessToken, security.DefaultApplicationAudience); err != nil {
+		t.Fatal(err)
+	} else if !active {
+		t.Fatal("active bound member token failed introspection")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET status = 'revoked', revoked_at = now() WHERE user_id = 'usr_switch_test' AND member_id = 'mem_switch_b'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := sessions.Introspect(ctx, continued.AccessToken, security.DefaultApplicationAudience); err != nil {
+		t.Fatal(err)
+	} else if active {
+		t.Fatal("revoked member binding remained active during introspection")
+	}
+	if _, err := sessions.Refresh(ctx, continued.RefreshToken); err == nil {
+		t.Fatal("revoked member binding accepted a refresh")
+	} else {
+		var public *apierr.Error
+		if !errors.As(err, &public) || public.Code != "PERMISSION_DENIED" {
+			t.Fatalf("revoked binding refresh error = %v, want PERMISSION_DENIED", err)
+		}
 	}
 }
 

@@ -86,16 +86,23 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 	var sessionID string
 	spaceID := ""
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		active, checkErr := activeUser(ctx, q, userID)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !active {
+			return apierr.New("invalid_grant", "the account is not active")
+		}
 		var persistedMember pgtype.Text
 		if memberID != "" {
-			member, memberErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
-			if memberErr != nil {
-				return memberErr
+			var permitted bool
+			spaceID, permitted, checkErr = boundMemberSpace(ctx, q, userID, memberID, now)
+			if checkErr != nil {
+				return checkErr
 			}
-			if member.Status != "active" {
-				return apierr.New("PERMISSION_DENIED", "the selected member is not active")
+			if !permitted {
+				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
 			}
-			spaceID = member.SpaceID
 			persistedMember = pgtype.Text{String: memberID, Valid: true}
 		}
 		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, MemberID: persistedMember, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance))})
@@ -187,26 +194,26 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 			return nil
 		}
 		uid, assurance = sess.UserID, int(sess.AssuranceLevel)
+		active, checkErr := activeUser(ctx, q, uid)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !active {
+			return apierr.New("invalid_grant", "the account is not active")
+		}
 		memberID = sess.MemberID.String
 		if requestedMemberID != "" {
 			memberID = requestedMemberID
 		}
 		if memberID != "" {
-			binding, bindingErr := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: uid, MemberID: memberID})
-			if bindingErr != nil || binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(now)) {
-				if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
-					return bindingErr
-				}
+			var permitted bool
+			spaceID, permitted, checkErr = boundMemberSpace(ctx, q, uid, memberID, now)
+			if checkErr != nil {
+				return checkErr
+			}
+			if !permitted {
 				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
 			}
-			member, memberErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
-			if memberErr != nil {
-				return memberErr
-			}
-			if member.Status != "active" {
-				return apierr.New("PERMISSION_DENIED", "the selected member is not active")
-			}
-			spaceID = member.SpaceID
 			if err := q.SetSessionMember(ctx, db.SetSessionMemberParams{ID: sid, UserID: uid, MemberID: pgtype.Text{String: memberID, Valid: true}}); err != nil {
 				return err
 			}
@@ -324,7 +331,53 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 	if user.DisabledAt.Valid || user.Status != "active" {
 		return security.Claims{}, false, nil
 	}
+	if claims.MemberID != sess.MemberID.String {
+		return security.Claims{}, false, nil
+	}
+	if claims.MemberID != "" {
+		spaceID, permitted, err := boundMemberSpace(ctx, s.Store.Queries(), claims.Subject, claims.MemberID, time.Now().UTC())
+		if err != nil {
+			return security.Claims{}, false, err
+		}
+		if !permitted || claims.SpaceID != spaceID {
+			return security.Claims{}, false, nil
+		}
+	} else if claims.SpaceID != "" {
+		return security.Claims{}, false, nil
+	}
 	return claims, true, nil
+}
+
+func activeUser(ctx context.Context, q *db.Queries, userID string) (bool, error) {
+	user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return user.Status == "active" && !user.DisabledAt.Valid, nil
+}
+
+func boundMemberSpace(ctx context.Context, q *db.Queries, userID, memberID string, now time.Time) (string, bool, error) {
+	binding, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(now)) {
+		return "", false, nil
+	}
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return member.SpaceID, member.Status == "active" && member.Type == "human", nil
 }
 
 func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (security.Claims, bool, error) {
