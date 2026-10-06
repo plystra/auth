@@ -32,6 +32,35 @@ func TestMakeCheckContainsRequiredGates(t *testing.T) {
 	}
 }
 
+func TestRepositoryModuleAndLayoutMatchTechStack(t *testing.T) {
+	root := repositoryRoot(t)
+	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"module github.com/plystra/auth", "go 1.26"} {
+		if !strings.Contains(string(goMod), required) {
+			t.Errorf("go.mod is missing %q", required)
+		}
+	}
+	for _, directory := range []string{
+		"cmd/plystra-auth",
+		"internal/route",
+		"internal/plane/principal",
+		"internal/plane/server",
+		"internal/plane/ops",
+		"internal/authz/engine",
+		"internal/authz/delta",
+		"migrations",
+		"schema",
+		"openapi",
+	} {
+		if info, statErr := os.Stat(filepath.Join(root, directory)); statErr != nil || !info.IsDir() {
+			t.Errorf("tech-stack directory %q is missing", directory)
+		}
+	}
+}
+
 func TestEngineeringToolsArePinnedAndBoundaryRulesAreConfigured(t *testing.T) {
 	root := repositoryRoot(t)
 	goMod, err := os.ReadFile(filepath.Join(root, "go.mod"))
