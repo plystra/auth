@@ -59,6 +59,16 @@ func TestAgentAuthorityIsBoundToOwnerEnvelope(t *testing.T) {
 	}
 }
 
+func TestCheckRejectsAnExplicitlyEmptyEffectiveEnvelope(t *testing.T) {
+	request := Request{
+		MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}, EnvelopeEnforced: true}},
+	}
+	if got := Check(request); got.Effect != Deny || got.Code != "ENVELOPE_EXCLUDED" {
+		t.Fatalf("explicitly empty envelope decision = %+v, want ENVELOPE_EXCLUDED", got)
+	}
+}
+
 func TestAgentApprovalAndPrincipalKind(t *testing.T) {
 	request := Request{
 		MemberID: "mem_agent", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1",

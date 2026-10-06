@@ -46,7 +46,7 @@ WITH RECURSIVE member_groups AS (
     WHERE g.parent_id IS NOT NULL
 )
 SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
-       ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
+       ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id, ag.grantee_group_id,
        p.key AS permission_key, p.status, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
 LEFT JOIN roles r ON r.id = ag.role_id
@@ -75,3 +75,19 @@ WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
 -- name: GetPermissionByKey :one
 SELECT id, key, description, status, created_at FROM permissions WHERE key=sqlc.arg(key);
+
+-- name: GetSpaceEnvelopePermission :one
+SELECT e.mode
+FROM space_envelopes p
+LEFT JOIN space_envelope_entries e
+  ON e.space_id = p.space_id
+ AND e.permission_id = (SELECT id FROM permissions WHERE key = sqlc.arg(permission_key))
+WHERE p.space_id = sqlc.arg(space_id);
+
+-- name: GetGroupEnvelopePermission :one
+SELECT e.mode
+FROM group_envelopes p
+LEFT JOIN group_envelope_entries e
+  ON e.group_id = p.group_id
+ AND e.permission_id = (SELECT id FROM permissions WHERE key = sqlc.arg(permission_key))
+WHERE p.group_id = sqlc.arg(group_id);

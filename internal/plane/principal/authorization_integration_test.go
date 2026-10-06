@@ -112,6 +112,40 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 	}
 }
 
+func TestManagementEndpointRejectsPermissionExcludedBySpaceEnvelope(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
+		t.Fatalf("baseline management permission = %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1)`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO space_envelope_entries (space_id, permission_id, mode)
+		SELECT $1, id, 'delegate' FROM permissions WHERE key = 'auth.members:read'
+	`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "ENVELOPE_EXCLUDED" {
+		t.Fatalf("authz.check decision = %+v, want ENVELOPE_EXCLUDED", decision)
+	}
+	if _, err := api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); err == nil {
+		t.Fatal("management endpoint ignored the Space envelope")
+	} else {
+		assertPrincipalError(t, err, "ENVELOPE_EXCLUDED")
+	}
+}
+
 func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

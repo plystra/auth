@@ -126,6 +126,16 @@ type Group struct {
 	Status        string             `json:"status"`
 }
 
+type GroupEnvelope struct {
+	GroupID string `json:"group_id"`
+}
+
+type GroupEnvelopeEntry struct {
+	GroupID      string `json:"group_id"`
+	PermissionID string `json:"permission_id"`
+	Mode         string `json:"mode"`
+}
+
 type GroupMember struct {
 	GroupID  string `json:"group_id"`
 	MemberID string `json:"member_id"`
@@ -279,6 +289,16 @@ type Space struct {
 	ParentID      pgtype.Text        `json:"parent_id"`
 	PolicyVersion int64              `json:"policy_version"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+type SpaceEnvelope struct {
+	SpaceID string `json:"space_id"`
+}
+
+type SpaceEnvelopeEntry struct {
+	SpaceID      string `json:"space_id"`
+	PermissionID string `json:"permission_id"`
+	Mode         string `json:"mode"`
 }
 
 type User struct {

@@ -776,6 +776,27 @@ func (q *Queries) GetGrantInSpace(ctx context.Context, arg GetGrantInSpaceParams
 	return i, err
 }
 
+const getGroupEnvelopePermission = `-- name: GetGroupEnvelopePermission :one
+SELECT e.mode
+FROM group_envelopes p
+LEFT JOIN group_envelope_entries e
+  ON e.group_id = p.group_id
+ AND e.permission_id = (SELECT id FROM permissions WHERE key = $1)
+WHERE p.group_id = $2
+`
+
+type GetGroupEnvelopePermissionParams struct {
+	PermissionKey string `json:"permission_key"`
+	GroupID       string `json:"group_id"`
+}
+
+func (q *Queries) GetGroupEnvelopePermission(ctx context.Context, arg GetGroupEnvelopePermissionParams) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, getGroupEnvelopePermission, arg.PermissionKey, arg.GroupID)
+	var mode pgtype.Text
+	err := row.Scan(&mode)
+	return mode, err
+}
+
 const getGroupInSpace = `-- name: GetGroupInSpace :one
 SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
 FROM groups
@@ -1023,6 +1044,27 @@ func (q *Queries) GetRoleInSpace(ctx context.Context, arg GetRoleInSpaceParams) 
 	return i, err
 }
 
+const getSpaceEnvelopePermission = `-- name: GetSpaceEnvelopePermission :one
+SELECT e.mode
+FROM space_envelopes p
+LEFT JOIN space_envelope_entries e
+  ON e.space_id = p.space_id
+ AND e.permission_id = (SELECT id FROM permissions WHERE key = $1)
+WHERE p.space_id = $2
+`
+
+type GetSpaceEnvelopePermissionParams struct {
+	PermissionKey string `json:"permission_key"`
+	SpaceID       string `json:"space_id"`
+}
+
+func (q *Queries) GetSpaceEnvelopePermission(ctx context.Context, arg GetSpaceEnvelopePermissionParams) (pgtype.Text, error) {
+	row := q.db.QueryRow(ctx, getSpaceEnvelopePermission, arg.PermissionKey, arg.SpaceID)
+	var mode pgtype.Text
+	err := row.Scan(&mode)
+	return mode, err
+}
+
 const getUserMemberBinding = `-- name: GetUserMemberBinding :one
 SELECT user_id, member_id, status, expires_at, revoked_at
 FROM user_members WHERE user_id = $1 AND member_id = $2
@@ -1252,7 +1294,7 @@ WITH RECURSIVE member_groups AS (
     WHERE g.parent_id IS NOT NULL
 )
 SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
-       ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id,
+       ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id, ag.grantee_group_id,
        p.key AS permission_key, p.status, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
 LEFT JOIN roles r ON r.id = ag.role_id
@@ -1283,6 +1325,7 @@ type ListMemberAssignmentsRow struct {
 	AnchorSpaceID   pgtype.Text `json:"anchor_space_id"`
 	AnchorGroupID   pgtype.Text `json:"anchor_group_id"`
 	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text `json:"grantee_group_id"`
 	PermissionKey   string      `json:"permission_key"`
 	Status          string      `json:"status"`
 	Delegable       bool        `json:"delegable"`
@@ -1309,6 +1352,7 @@ func (q *Queries) ListMemberAssignments(ctx context.Context, arg ListMemberAssig
 			&i.AnchorSpaceID,
 			&i.AnchorGroupID,
 			&i.GranteeMemberID,
+			&i.GranteeGroupID,
 			&i.PermissionKey,
 			&i.Status,
 			&i.Delegable,

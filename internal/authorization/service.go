@@ -903,6 +903,14 @@ func (s *Service) assignmentsQueries(ctx context.Context, q *db.Queries, memberI
 	if err != nil {
 		return nil, 0, err
 	}
+	if len(rows) == 0 {
+		return nil, 0, nil
+	}
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if err != nil {
+		return nil, 0, err
+	}
+	envelopes := newEnvelopeFacts(q)
 	type aggregate struct {
 		assignment engine.Assignment
 		seen       map[string]struct{}
@@ -910,6 +918,10 @@ func (s *Service) assignmentsQueries(ctx context.Context, q *db.Queries, memberI
 	aggs := map[string]*aggregate{}
 	var policyVersion int64
 	for _, row := range rows {
+		permitted, err := envelopes.permitsAssignment(ctx, row, member.SpaceID)
+		if err != nil {
+			return nil, 0, err
+		}
 		if row.PolicyVersion > policyVersion {
 			policyVersion = row.PolicyVersion
 		}
@@ -927,11 +939,14 @@ func (s *Service) assignmentsQueries(ctx context.Context, q *db.Queries, memberI
 			}
 			var principalKinds []string
 			_ = json.Unmarshal(row.PrincipalKinds, &principalKinds)
-			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}, PrincipalKinds: principalKinds, AgentApprovalRequired: row.AgentApproval == "required"}, seen: map[string]struct{}{}}
+			item = &aggregate{assignment: engine.Assignment{MemberID: memberID, Role: row.RoleName, Scope: engine.Scope{Kind: row.Scope, Anchor: anchor}, EnvelopeEnforced: true, PrincipalKinds: principalKinds, AgentApprovalRequired: row.AgentApproval == "required"}, seen: map[string]struct{}{}}
 			aggs[aggregateKey] = item
 		}
 		if _, ok := item.seen[row.PermissionKey]; !ok {
 			item.assignment.Permissions = append(item.assignment.Permissions, row.PermissionKey)
+			if permitted {
+				item.assignment.Envelope = append(item.assignment.Envelope, row.PermissionKey)
+			}
 			item.seen[row.PermissionKey] = struct{}{}
 		}
 	}

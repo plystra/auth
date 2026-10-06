@@ -17,6 +17,7 @@ type Assignment struct {
 	Permissions           []string
 	Scope                 Scope
 	Envelope              []string
+	EnvelopeEnforced      bool
 	PrincipalKinds        []string
 	AgentApprovalRequired bool
 }
@@ -70,7 +71,7 @@ func Check(in Request) Decision {
 			sawPrincipalKind = true
 			continue
 		}
-		if len(a.Envelope) > 0 && !contains(a.Envelope, in.Permission) {
+		if (a.EnvelopeEnforced || len(a.Envelope) > 0) && !contains(a.Envelope, in.Permission) {
 			sawEnvelope = true
 			continue
 		}
