@@ -124,12 +124,19 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 		ApprovalValid:          in.ApprovalValid,
 	}
 	if in.ResourceOwner != "" && in.ResourceOwner != in.MemberID {
-		if owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner}); ownerErr == nil && owned {
+		owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner})
+		if ownerErr != nil {
+			return engine.Decision{}, 0, ownerErr
+		}
+		if owned {
 			request.SelfOwners = []string{in.ResourceOwner}
 		}
 	}
 	if member.Type == "agent" {
 		owner, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: in.MemberID})
+		if ownerErr != nil && !errors.Is(ownerErr, pgx.ErrNoRows) {
+			return engine.Decision{}, 0, ownerErr
+		}
 		if ownerErr == nil && owner.OwnerMemberID.Valid && owner.OwnerMemberID.String != "" {
 			// Rebuild the owner request from the same persisted facts. The owner
 			// decision itself is intentionally recomputed by engine.Check so the
@@ -149,7 +156,13 @@ func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, member
 		return nil, nil
 	}
 	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
-	if err != nil || member.Status != "active" {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if member.Status != "active" {
 		return nil, nil
 	}
 	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
@@ -169,12 +182,19 @@ func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, member
 	}
 	request := &engine.Request{MemberID: memberID, PrincipalType: member.Type, Permission: in.Permission, ResourceSpace: in.ResourceSpace, ResourceSpaceAncestors: spaceAncestors, ResourceGroup: in.ResourceGroup, ResourceGroupAncestors: groupAncestors, ResourceOwner: in.ResourceOwner, Assignments: assignments, SkipApproval: true}
 	if in.ResourceOwner != "" && in.ResourceOwner != memberID {
-		if owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: memberID, TargetMemberID: in.ResourceOwner}); ownerErr == nil && owned {
+		owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: memberID, TargetMemberID: in.ResourceOwner})
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+		if owned {
 			request.SelfOwners = []string{in.ResourceOwner}
 		}
 	}
 	if member.Type == "agent" {
 		owner, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+		if ownerErr != nil && !errors.Is(ownerErr, pgx.ErrNoRows) {
+			return nil, ownerErr
+		}
 		if ownerErr == nil && owner.OwnerMemberID.Valid && owner.OwnerMemberID.String != "" {
 			request.Owner, err = s.ownerRequestQueries(ctx, q, owner.OwnerMemberID.String, in, depth+1)
 			if err != nil {
