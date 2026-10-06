@@ -560,6 +560,52 @@
         ],
         "type": "object"
       },
+      "DeviceSession": {
+        "additionalProperties": false,
+        "properties": {
+          "assurance_level": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "auth_time": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "ip": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "user_agent": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "created_at",
+          "last_seen_at",
+          "expires_at",
+          "auth_time",
+          "assurance_level"
+        ],
+        "type": "object"
+      },
       "EffectivePermission": {
         "additionalProperties": false,
         "properties": {
@@ -656,6 +702,15 @@
           "scope",
           "granted_by"
         ],
+        "type": "object"
+      },
+      "LogoutInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "all": {
+            "type": "boolean"
+          }
+        },
         "type": "object"
       },
       "LogoutOutputBody": {
@@ -850,6 +905,36 @@
           "description",
           "managed",
           "permissions"
+        ],
+        "type": "object"
+      },
+      "SessionOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "SessionsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/DeviceSession"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -1177,6 +1262,15 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoutInputBody"
+              }
+            }
+          }
+        },
         "responses": {
           "200": {
             "content": {
@@ -1629,6 +1723,88 @@
           }
         },
         "summary": "auth.me_permissions"
+      }
+    },
+    "/v1/me/sessions": {
+      "get": {
+        "operationId": "auth.sessions.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.sessions.list"
+      }
+    },
+    "/v1/me/sessions/{id}": {
+      "delete": {
+        "operationId": "auth.sessions.revoke",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.sessions.revoke"
       }
     },
     "/v1/spaces": {

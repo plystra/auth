@@ -6,6 +6,18 @@ RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_
 -- name: GetSession :one
 SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level FROM sessions WHERE id = sqlc.arg(id);
 
+-- name: ListUserSessions :many
+SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+FROM sessions
+WHERE user_id = sqlc.arg(user_id)
+  AND revoked_at IS NULL
+  AND expires_at > now()
+ORDER BY last_seen_at DESC, id;
+
+-- name: RevokeUserSession :exec
+UPDATE sessions SET revoked_at = COALESCE(revoked_at, now())
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+
 -- name: RevokeSession :exec
 UPDATE sessions SET revoked_at = COALESCE(revoked_at, now()) WHERE id = sqlc.arg(id);
 

@@ -160,6 +160,71 @@ func TestMePermissionsEndpointUsesEffectiveEngineDecisionsForHumanAndAgent(t *te
 	}
 }
 
+func TestUserSessionEndpointsListAndRevokeCurrentOrAllSessions(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	first, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "first", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "second", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed, err := api.listSessions(ctx, &BearerInput{Authorization: "Bearer " + first.AccessToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Body.Data) != 2 {
+		t.Fatalf("listed sessions = %+v, want both active sessions", listed.Body.Data)
+	}
+	revoked, err := api.revokeSession(ctx, &SessionPathInput{Authorization: "Bearer " + first.AccessToken, ID: second.SessionID})
+	if err != nil || !revoked.Body.Data.Revoked {
+		t.Fatalf("revoke session = %+v, %v", revoked, err)
+	}
+	if _, active, err := sessions.Introspect(ctx, second.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("revoked session introspection = active=%v err=%v", active, err)
+	}
+	if _, err := api.logout(ctx, &LogoutInput{Authorization: "Bearer " + first.AccessToken}); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := sessions.Introspect(ctx, first.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("current logout introspection = active=%v err=%v", active, err)
+	}
+	third, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "third", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "fourth", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := &struct {
+		All bool `json:"all,omitempty"`
+	}{All: true}
+	if _, err := api.logout(ctx, &LogoutInput{Authorization: "Bearer " + third.AccessToken, Body: all}); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := sessions.Introspect(ctx, fourth.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("all-session logout introspection = active=%v err=%v", active, err)
+	}
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "session-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.listSessions(ctx, &BearerInput{Authorization: "Bearer " + agentTokens.AccessToken}); err == nil {
+		t.Fatal("Agent accessed user device sessions")
+	} else {
+		assertPrincipalError(t, err, "USER_ACCOUNT_REQUIRED")
+	}
+}
+
 func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

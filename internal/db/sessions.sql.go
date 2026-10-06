@@ -222,6 +222,65 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSess
 	return i, err
 }
 
+const listUserSessions = `-- name: ListUserSessions :many
+SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+FROM sessions
+WHERE user_id = $1
+  AND revoked_at IS NULL
+  AND expires_at > now()
+ORDER BY last_seen_at DESC, id
+`
+
+type ListUserSessionsParams struct {
+	UserID string `json:"user_id"`
+}
+
+type ListUserSessionsRow struct {
+	ID             string             `json:"id"`
+	UserID         string             `json:"user_id"`
+	MemberID       pgtype.Text        `json:"member_id"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	Ip             pgtype.Text        `json:"ip"`
+	UserAgent      pgtype.Text        `json:"user_agent"`
+	AuthTime       pgtype.Timestamptz `json:"auth_time"`
+	AssuranceLevel int16              `json:"assurance_level"`
+}
+
+func (q *Queries) ListUserSessions(ctx context.Context, arg ListUserSessionsParams) ([]ListUserSessionsRow, error) {
+	rows, err := q.db.Query(ctx, listUserSessions, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUserSessionsRow{}
+	for rows.Next() {
+		var i ListUserSessionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.MemberID,
+			&i.CreatedAt,
+			&i.LastSeenAt,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.Ip,
+			&i.UserAgent,
+			&i.AuthTime,
+			&i.AssuranceLevel,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockOperatorSession = `-- name: LockOperatorSession :one
 SELECT s.id, s.user_id, s.token_hash, s.created_at, s.last_seen_at, s.expires_at, s.idle_expires_at, s.access_expires_at, s.revoked_at, s.assurance_level, s.step_up_operation, s.step_up_digest, s.step_up_expires_at, s.ip, s.user_agent FROM operator_sessions s
 WHERE s.token_hash = $1 AND s.revoked_at IS NULL
@@ -360,6 +419,21 @@ type RevokeUserRefreshTokensParams struct {
 
 func (q *Queries) RevokeUserRefreshTokens(ctx context.Context, arg RevokeUserRefreshTokensParams) error {
 	_, err := q.db.Exec(ctx, revokeUserRefreshTokens, arg.UserID)
+	return err
+}
+
+const revokeUserSession = `-- name: RevokeUserSession :exec
+UPDATE sessions SET revoked_at = COALESCE(revoked_at, now())
+WHERE id = $1 AND user_id = $2
+`
+
+type RevokeUserSessionParams struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) RevokeUserSession(ctx context.Context, arg RevokeUserSessionParams) error {
+	_, err := q.db.Exec(ctx, revokeUserSession, arg.ID, arg.UserID)
 	return err
 }
 

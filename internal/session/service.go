@@ -37,6 +37,18 @@ type Tokens struct {
 	SessionID    string `json:"session_id"`
 }
 
+type DeviceSession struct {
+	ID             string    `json:"id"`
+	MemberID       string    `json:"member_id,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	IP             string    `json:"ip,omitempty"`
+	UserAgent      string    `json:"user_agent,omitempty"`
+	AuthTime       time.Time `json:"auth_time"`
+	AssuranceLevel int16     `json:"assurance_level"`
+}
+
 func (s *Service) hashToken(token string) []byte {
 	mac := hmac.New(sha256.New, s.HMACKeys[0])
 	_, _ = mac.Write([]byte(token))
@@ -290,6 +302,53 @@ func (s *Service) Revoke(ctx context.Context, sid string) error {
 			return err
 		}
 		return q.RevokeSessionRefreshTokens(ctx, db.RevokeSessionRefreshTokensParams{SessionID: sid})
+	})
+}
+
+func (s *Service) ListUserSessions(ctx context.Context, userID string) ([]DeviceSession, error) {
+	rows, err := s.Store.Queries().ListUserSessions(ctx, db.ListUserSessionsParams{UserID: userID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]DeviceSession, 0, len(rows))
+	for _, row := range rows {
+		item := DeviceSession{ID: row.ID, CreatedAt: row.CreatedAt.Time, LastSeenAt: row.LastSeenAt.Time, ExpiresAt: row.ExpiresAt.Time, AuthTime: row.AuthTime.Time, AssuranceLevel: row.AssuranceLevel}
+		if row.MemberID.Valid {
+			item.MemberID = row.MemberID.String
+		}
+		if row.Ip.Valid {
+			item.IP = row.Ip.String
+		}
+		if row.UserAgent.Valid {
+			item.UserAgent = row.UserAgent.String
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}
+
+func (s *Service) RevokeUserSession(ctx context.Context, userID, sessionID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.GetSession(ctx, db.GetSessionParams{ID: sessionID})
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && row.UserID != userID {
+			return apierr.New("NOT_FOUND", "session was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if err := q.RevokeUserSession(ctx, db.RevokeUserSessionParams{ID: sessionID, UserID: userID}); err != nil {
+			return err
+		}
+		return q.RevokeSessionRefreshTokens(ctx, db.RevokeSessionRefreshTokensParams{SessionID: sessionID})
+	})
+}
+
+func (s *Service) RevokeAllUserSessions(ctx context.Context, userID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID}); err != nil {
+			return err
+		}
+		return q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: userID})
 	})
 }
 func (s *Service) VerifyAccess(token string) (security.Claims, error) {

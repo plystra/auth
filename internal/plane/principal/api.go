@@ -101,6 +101,28 @@ type LogoutOutput struct {
 		} `json:"data"`
 	}
 }
+type LogoutInput struct {
+	Authorization string `header:"Authorization"`
+	Body          *struct {
+		All bool `json:"all,omitempty"`
+	}
+}
+type SessionPathInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
+type SessionsOutput struct {
+	Body struct {
+		Data []session.DeviceSession `json:"data"`
+	}
+}
+type SessionOutput struct {
+	Body struct {
+		Data struct {
+			Revoked bool `json:"revoked"`
+		} `json:"data"`
+	}
+}
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_up", Method: "POST", Path: "/v1/auth/sign-up", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.register)
@@ -110,6 +132,8 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.me_permissions", Method: "GET", Path: "/v1/me/permissions", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.mePermissions)
 	route.Register(api, route.Spec{Name: "auth.me_members", Method: "GET", Path: "/v1/me/members", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.meMembers)
 	route.Register(api, route.Spec{Name: "auth.sign_out", Method: "POST", Path: "/v1/auth/sign-out", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.logout)
+	route.Register(api, route.Spec{Name: "auth.sessions.list", Method: "GET", Path: "/v1/me/sessions", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.listSessions)
+	route.Register(api, route.Spec{Name: "auth.sessions.revoke", Method: "DELETE", Path: "/v1/me/sessions/{id}", Plane: route.Principal, Subjects: []route.Subject{route.User}}, a.revokeSession)
 	route.Register(api, route.Spec{Name: "auth.email_verify", Method: "POST", Path: "/v1/auth/email/verify", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.verifyEmail)
 	route.Register(api, route.Spec{Name: "auth.password_forgot", Method: "POST", Path: "/v1/auth/password/forgot", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetRequest)
 	route.Register(api, route.Spec{Name: "auth.password_reset", Method: "POST", Path: "/v1/auth/password/reset", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.passwordResetConfirm)
@@ -230,23 +254,80 @@ func (a *API) mePermissions(ctx context.Context, in *BearerInput) (*PermissionsO
 	return out, nil
 }
 
-func (a *API) logout(ctx context.Context, in *BearerInput) (*LogoutOutput, error) {
-	claims, e := bearer(a.Signer, in.Authorization)
+func (a *API) logout(ctx context.Context, in *LogoutInput) (*LogoutOutput, error) {
+	claims, e := a.userClaims(ctx, in.Authorization)
 	if e != nil {
 		return nil, e
-	}
-	if claims.Type != "user" {
-		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
 	}
 	if claims.SessionID == "" {
 		return nil, apierr.New("unauthorized", "session claim is required")
 	}
-	if e = a.Sessions.Revoke(ctx, claims.SessionID); e != nil {
+	if in.Body != nil && in.Body.All {
+		e = a.Sessions.RevokeAllUserSessions(ctx, claims.Subject)
+	} else {
+		e = a.Sessions.Revoke(ctx, claims.SessionID)
+	}
+	if e != nil {
 		return nil, e
 	}
 	out := &LogoutOutput{}
 	out.Body.Data.Revoked = true
 	return out, nil
+}
+
+func (a *API) listSessions(ctx context.Context, in *BearerInput) (*SessionsOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	sessions, err := a.Sessions.ListUserSessions(ctx, claims.Subject)
+	if err != nil {
+		return nil, err
+	}
+	out := &SessionsOutput{}
+	out.Body.Data = sessions
+	return out, nil
+}
+
+func (a *API) revokeSession(ctx context.Context, in *SessionPathInput) (*SessionOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Sessions.RevokeUserSession(ctx, claims.Subject, in.ID); err != nil {
+		return nil, err
+	}
+	out := &SessionOutput{}
+	out.Body.Data.Revoked = true
+	return out, nil
+}
+
+func (a *API) userClaims(ctx context.Context, authorization string) (security.Claims, error) {
+	parts := strings.Fields(authorization)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A bearer access token is required.")
+	}
+	if a.Sessions == nil {
+		claims, err := bearer(a.Signer, authorization)
+		if err != nil {
+			return security.Claims{}, err
+		}
+		if claims.Type != "user" {
+			return security.Claims{}, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+		}
+		return security.Claims{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
+	}
+	claims, active, err := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	if !active {
+		return security.Claims{}, apierr.New("UNAUTHENTICATED", "The access token is invalid.")
+	}
+	if claims.Type != "user" {
+		return security.Claims{}, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+	}
+	return claims, nil
 }
 func bearer(s *security.Signer, value string) (security.Claims, error) {
 	parts := strings.Fields(value)

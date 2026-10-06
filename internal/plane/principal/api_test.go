@@ -29,7 +29,7 @@ func TestLogoutRejectsAgentAccessTokenWithUserAccountRequired(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &API{Signer: signer}
-	_, err = api.logout(context.Background(), &BearerInput{Authorization: "Bearer " + token})
+	_, err = api.logout(context.Background(), &LogoutInput{Authorization: "Bearer " + token})
 	var public *apierr.Error
 	if !strings.Contains(err.Error(), "user account") || !errors.As(err, &public) || public.Code != "USER_ACCOUNT_REQUIRED" {
 		t.Fatalf("logout error = %v, want USER_ACCOUNT_REQUIRED", err)
