@@ -14,6 +14,12 @@ sql:
       - "internal/grant"
       - "internal/store"
       - "internal/operator/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
     gen:
       go:
         package: "db"
