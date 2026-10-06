@@ -24,8 +24,10 @@ RETURNING id, session_id, family_id, token_hash, issued_at, expires_at, used_at,
 -- name: LockRefreshToken :one
 SELECT id, session_id, family_id, token_hash, issued_at, expires_at, used_at, revoked_at FROM refresh_tokens WHERE token_hash = sqlc.arg(token_hash) FOR UPDATE;
 
--- name: MarkRefreshUsed :exec
-UPDATE refresh_tokens SET used_at = now() WHERE id = sqlc.arg(id) AND used_at IS NULL;
+-- name: MarkRefreshUsed :one
+UPDATE refresh_tokens SET used_at = now()
+WHERE id = sqlc.arg(id) AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+RETURNING id;
 
 -- name: RevokeRefreshFamily :exec
 UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, now()) WHERE family_id = sqlc.arg(family_id);

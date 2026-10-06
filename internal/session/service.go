@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/security"
@@ -113,6 +114,7 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 	now := time.Now().UTC()
 	sid, uid, family := "", "", ""
 	assurance := 1
+	rejected := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
 		var token db.RefreshToken
 		found := false
@@ -129,29 +131,56 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 		if !found {
 			return apierr.New("invalid_grant", "refresh token is invalid")
 		}
-		if token.RevokedAt.Valid || token.UsedAt.Valid || token.ExpiresAt.Time.Before(now) || (st.RefreshIdleTTL > 0 && token.IssuedAt.Time.Add(st.RefreshIdleTTL).Before(now)) {
+		replayed := token.UsedAt.Valid
+		invalid := token.RevokedAt.Valid || replayed || !token.ExpiresAt.Time.After(now) || (st.RefreshIdleTTL > 0 && !token.IssuedAt.Time.Add(st.RefreshIdleTTL).After(now))
+		if !invalid {
+			_, err = q.MarkRefreshUsed(ctx, db.MarkRefreshUsedParams{ID: token.ID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				replayed = true
+				invalid = true
+			} else if err != nil {
+				return err
+			}
+		}
+		if invalid {
 			if err = q.RevokeRefreshFamily(ctx, db.RevokeRefreshFamilyParams{FamilyID: token.FamilyID}); err != nil {
 				return err
 			}
 			if err = q.RevokeSession(ctx, db.RevokeSessionParams{ID: token.SessionID}); err != nil {
 				return err
 			}
-			return apierr.New("invalid_grant", "refresh token has been revoked")
-		}
-		if err = q.MarkRefreshUsed(ctx, db.MarkRefreshUsedParams{ID: token.ID}); err != nil {
-			return err
+			if replayed {
+				if err = audit.WriteWithPriority(ctx, q, "public", "", "auth.session.refresh_replay", token.SessionID, "failure", "high"); err != nil {
+					return err
+				}
+			}
+			rejected = true
+			return nil
 		}
 		sid, family = token.SessionID, token.FamilyID
 		sess, err := q.GetSession(ctx, db.GetSessionParams{ID: sid})
 		if err != nil {
 			return err
 		}
+		if sess.RevokedAt.Valid || !sess.ExpiresAt.Time.After(now) {
+			if err := q.RevokeRefreshFamily(ctx, db.RevokeRefreshFamilyParams{FamilyID: family}); err != nil {
+				return err
+			}
+			rejected = true
+			return nil
+		}
 		uid, assurance = sess.UserID, int(sess.AssuranceLevel)
 		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{ID: string(ids.New[ids.RefreshTokenID]("rft")), SessionID: sid, FamilyID: family, TokenHash: s.hashToken(next), ExpiresAt: pgTime(now.Add(st.RefreshTTL))})
-		return err
+		if err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", uid, "auth.session.refresh", sid, "success")
 	})
 	if err != nil {
 		return Tokens{}, err
+	}
+	if rejected {
+		return Tokens{}, apierr.New("invalid_grant", "refresh token has been revoked")
 	}
 	jti, _ := randomToken("jti_")
 	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "user"})

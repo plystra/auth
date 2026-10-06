@@ -11,8 +11,20 @@ import (
 )
 
 func Write(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome string) error {
+	return write(ctx, q, actorType, actorID, action, target, outcome, "")
+}
+
+func WriteWithPriority(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome, priority string) error {
+	return write(ctx, q, actorType, actorID, action, target, outcome, priority)
+}
+
+func write(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome, priority string) error {
 	info := requestinfo.Get(ctx)
-	metadata, err := json.Marshal(map[string]string{"plane": info.Plane, "credential_type": actorType})
+	metadataFields := map[string]string{"plane": info.Plane, "credential_type": actorType}
+	if priority != "" {
+		metadataFields["priority"] = priority
+	}
+	metadata, err := json.Marshal(metadataFields)
 	if err != nil {
 		return err
 	}

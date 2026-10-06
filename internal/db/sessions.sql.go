@@ -246,17 +246,21 @@ func (q *Queries) LockRefreshToken(ctx context.Context, arg LockRefreshTokenPara
 	return i, err
 }
 
-const markRefreshUsed = `-- name: MarkRefreshUsed :exec
-UPDATE refresh_tokens SET used_at = now() WHERE id = $1 AND used_at IS NULL
+const markRefreshUsed = `-- name: MarkRefreshUsed :one
+UPDATE refresh_tokens SET used_at = now()
+WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+RETURNING id
 `
 
 type MarkRefreshUsedParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) MarkRefreshUsed(ctx context.Context, arg MarkRefreshUsedParams) error {
-	_, err := q.db.Exec(ctx, markRefreshUsed, arg.ID)
-	return err
+func (q *Queries) MarkRefreshUsed(ctx context.Context, arg MarkRefreshUsedParams) (string, error) {
+	row := q.db.QueryRow(ctx, markRefreshUsed, arg.ID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
 }
 
 const revokeOperatorSession = `-- name: RevokeOperatorSession :exec
