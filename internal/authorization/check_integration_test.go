@@ -118,6 +118,46 @@ func TestAgentAuthorizationUsesOwnerEnvelope(t *testing.T) {
 	}
 }
 
+func TestAgentGroupGrantStillRequiresOwnerEnvelope(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "group-grant-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_agent_grant"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status) VALUES ($1, $2, 'Agent grant group', 'standard', 'active')
+	`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id) VALUES ($1, $2)`, groupID, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_group_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_group_grant', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, groupID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	check := func(wantEffect engine.Effect, wantCode string) {
+		t.Helper()
+		decision, _, err := svc.Check(ctx, CheckRequest{MemberID: created.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Effect != wantEffect || decision.Code != wantCode {
+			t.Fatalf("Agent group grant decision = %+v, want %s %s", decision, wantEffect, wantCode)
+		}
+	}
+	check(engine.Allow, "allowed")
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	check(engine.Deny, "OWNER_ENVELOPE_EXCLUDED")
+}
+
 func TestAuthorizationCheckAndTransactionalManagementUseSameDecision(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
