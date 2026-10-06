@@ -223,15 +223,7 @@ func serve(ctx context.Context) error {
 	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
-	route.RegisterNonJSON(principalMux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		jwks, err := signer.JWKS()
-		if err != nil {
-			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(jwks)
-	}))
+	registerJWKS(principalMux, signer)
 	health := http.NewServeMux()
 	health.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -264,6 +256,18 @@ func serve(ctx context.Context) error {
 		_ = srv.Shutdown(shutdownCtx)
 	}
 	return nil
+}
+
+func registerJWKS(mux *http.ServeMux, signer *security.Signer) {
+	route.RegisterNonJSON(mux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		jwks, err := signer.JWKS()
+		if err != nil {
+			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(jwks)
+	}))
 }
 func parseKeys(v string) [][]byte {
 	var out [][]byte
