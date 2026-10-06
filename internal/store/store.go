@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"fmt"
 	"io/fs"
 	"strconv"
@@ -14,11 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/migrations"
 	"github.com/pressly/goose/v3"
 )
-
-//go:embed migrations/*.sql
-var migrationFS embed.FS
 
 type Store struct{ Pool *pgxpool.Pool }
 
@@ -63,11 +60,7 @@ func Migrate(ctx context.Context, databaseURL string) error {
 		return err
 	}
 	defer func() { _ = dbsql.Close() }()
-	sub, err := fs.Sub(migrationFS, "migrations")
-	if err != nil {
-		return err
-	}
-	provider, err := goose.NewProvider(goose.DialectPostgres, dbsql, sub)
+	provider, err := goose.NewProvider(goose.DialectPostgres, dbsql, migrations.FS)
 	if err != nil {
 		return err
 	}
@@ -94,7 +87,7 @@ func CheckMigrationVersion(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func LatestMigrationVersion() (int64, error) {
-	entries, err := fs.ReadDir(migrationFS, "migrations")
+	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
 		return 0, fmt.Errorf("read embedded migrations: %w", err)
 	}
