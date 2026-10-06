@@ -17,7 +17,7 @@ func main() {
 		if err != nil {
 			panic(err)
 		}
-		lines := strings.Split(string(data), "\n")
+		lines := strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n")
 		for _, line := range lines {
 			if strings.TrimSpace(line) == "-- +goose Down" {
 				break
@@ -31,7 +31,8 @@ func main() {
 	if err := os.MkdirAll("schema", 0755); err != nil {
 		panic(err)
 	}
-	if err := os.WriteFile(filepath.Join("schema", "schema.sql"), []byte(strings.Join(out, "\n")), 0644); err != nil {
+	contents := strings.TrimSuffix(strings.Join(out, "\n"), "\n")
+	if err := os.WriteFile(filepath.Join("schema", "schema.sql"), []byte(contents), 0644); err != nil {
 		panic(err)
 	}
 }
