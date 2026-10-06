@@ -12,6 +12,7 @@ type Error struct {
 	Message   string `json:"message"`
 	Details   any    `json:"details,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
+	status    int
 }
 
 // MarshalJSON keeps errors returned by Huma handlers and errors written by
@@ -23,10 +24,16 @@ func (e *Error) MarshalJSON() ([]byte, error) {
 	}{Error: (*payload)(e)})
 }
 
-func (e *Error) Error() string                        { return e.Code + ": " + e.Message }
-func (e *Error) GetStatus() int                       { return Status(e.Code) }
+func (e *Error) Error() string { return e.Code + ": " + e.Message }
+func (e *Error) GetStatus() int {
+	if e.status != 0 {
+		return e.status
+	}
+	return Status(e.Code)
+}
 func New(code, message string) *Error                 { return &Error{Code: code, Message: message} }
 func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = requestID; return &c }
+func WithStatus(e *Error, status int) *Error          { c := *e; c.status = status; return &c }
 func Status(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "invalid_request", "invalid_grant", "validation_failed", "inline_grants_not_allowed":

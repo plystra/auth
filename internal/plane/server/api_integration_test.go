@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
@@ -89,7 +88,7 @@ func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
 	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
-	api.Register(humago.New(mux, huma.DefaultConfig("server test", "1.0.0")))
+	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
 
 	request := func(body string) *httptest.ResponseRecorder {
@@ -125,7 +124,7 @@ func TestAuthzBatchCheckEvaluatesItemsIndependently(t *testing.T) {
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
 	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
-	api.Register(humago.New(mux, huma.DefaultConfig("server test", "1.0.0")))
+	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
 	request := func(body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -164,7 +163,7 @@ func TestAuthzRoutesRejectUnknownFieldsAndUseDocumentedBodyLimits(t *testing.T) 
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
 	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
-	api.Register(humago.New(mux, huma.DefaultConfig("server test", "1.0.0")))
+	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
 	request := func(path, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -177,21 +176,23 @@ func TestAuthzRoutesRejectUnknownFieldsAndUseDocumentedBodyLimits(t *testing.T) 
 	}
 	base := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
 	unknown := strings.TrimSuffix(base, "}") + `,"unexpected":true}`
-	if w := request("/server/v1/authz/check", unknown); w.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unknown authz.check field status = %d, body = %s, want 422", w.Code, w.Body.String())
+	if w := request("/server/v1/authz/check", unknown); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("unknown authz.check field status = %d, body = %s, want 400 VALIDATION_FAILED", w.Code, w.Body.String())
+	} else if strings.Contains(w.Body.String(), `"value"`) || strings.Contains(w.Body.String(), member.ID) {
+		t.Fatalf("unknown authz.check field leaked request data: %s", w.Body.String())
 	}
 	largeAction := strings.Repeat("x", 70*1024)
 	large := fmt.Sprintf(`{"subject":{"member_id":%q},"action":%q,"resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, largeAction, member.ID, spaceID)
-	if w := request("/server/v1/authz/check", large); w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized authz.check status = %d, body = %s, want 413", w.Code, w.Body.String())
+	if w := request("/server/v1/authz/check", large); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("oversized authz.check status = %d, body = %s, want 400 VALIDATION_FAILED", w.Code, w.Body.String())
 	}
 	batchBody := `{"requests":[` + large + `]}`
 	if w := request("/server/v1/authz/batch-check", batchBody); w.Code == http.StatusRequestEntityTooLarge {
 		t.Fatalf("batch body under 256 KiB was rejected as oversized: %s", w.Body.String())
 	}
 	overBatch := `{"requests":[` + fmt.Sprintf(`{"subject":{"member_id":%q},"action":%q,"resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, strings.Repeat("y", 270*1024), member.ID, spaceID) + `]}`
-	if w := request("/server/v1/authz/batch-check", overBatch); w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("oversized batch status = %d, body = %s, want 413", w.Code, w.Body.String())
+	if w := request("/server/v1/authz/batch-check", overBatch); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("oversized batch status = %d, body = %s, want 400 VALIDATION_FAILED", w.Code, w.Body.String())
 	}
 }
 

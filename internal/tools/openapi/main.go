@@ -12,6 +12,7 @@ import (
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/plane/server"
 	"github.com/plystra/auth/internal/protocol"
+	"github.com/plystra/auth/internal/route"
 )
 
 func main() {
@@ -22,7 +23,7 @@ func main() {
 }
 func build(register func(huma.API)) *huma.OpenAPI {
 	mux := http.NewServeMux()
-	api := humago.New(mux, huma.DefaultConfig("Plystra Auth", "1.0.0"))
+	api := humago.New(mux, route.HumaConfig("Plystra Auth", "1.0.0"))
 	register(api)
 	protocol.HTTP{Issuer: "https://auth.plystra.com"}.Register(mux)
 	return api.OpenAPI()

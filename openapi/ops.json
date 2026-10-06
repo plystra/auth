@@ -4,15 +4,6 @@
       "AcceptedOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AcceptedOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct1"
           }
@@ -75,85 +66,24 @@
         ],
         "type": "object"
       },
-      "ErrorDetail": {
+      "Error": {
         "additionalProperties": false,
         "properties": {
-          "location": {
-            "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
+          "code": {
             "type": "string"
           },
+          "details": {},
           "message": {
-            "description": "Error message text",
             "type": "string"
           },
-          "value": {
-            "description": "The value at the given location"
-          }
-        },
-        "type": "object"
-      },
-      "ErrorModel": {
-        "additionalProperties": false,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ErrorModel.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "detail": {
-            "description": "A human-readable explanation specific to this occurrence of the problem.",
-            "examples": [
-              "Property foo is required but is missing."
-            ],
-            "type": "string"
-          },
-          "errors": {
-            "description": "Optional list of individual error details",
-            "items": {
-              "$ref": "#/components/schemas/ErrorDetail"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "instance": {
-            "description": "A URI reference that identifies the specific occurrence of the problem.",
-            "examples": [
-              "https://example.com/error-log/abc123"
-            ],
-            "format": "uri",
-            "type": "string"
-          },
-          "status": {
-            "description": "HTTP status code",
-            "examples": [
-              400
-            ],
-            "format": "int64",
-            "type": "integer"
-          },
-          "title": {
-            "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
-            "examples": [
-              "Bad Request"
-            ],
-            "type": "string"
-          },
-          "type": {
-            "default": "about:blank",
-            "description": "A URI reference to human-readable documentation for the error.",
-            "examples": [
-              "https://example.com/errors/example"
-            ],
-            "format": "uri",
+          "request_id": {
             "type": "string"
           }
         },
+        "required": [
+          "code",
+          "message"
+        ],
         "type": "object"
       },
       "InstanceSettings": {
@@ -253,15 +183,6 @@
       "OperatorChangeInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/OperatorChangeInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "capabilities": {
             "items": {
               "type": "string"
@@ -297,15 +218,6 @@
       "OperatorCreateInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/OperatorCreateInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "capabilities": {
             "items": {
               "type": "string"
@@ -332,15 +244,6 @@
       "OperatorCreateOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/OperatorCreateOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/OperatorCreate"
           }
@@ -353,15 +256,6 @@
       "OperatorsOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/OperatorsOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Operator"
@@ -380,15 +274,6 @@
       "SettingsOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SettingsOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/InstanceSettings"
           }
@@ -401,15 +286,6 @@
       "SettingsPatch": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SettingsPatch.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "access_token_ttl": {
             "format": "int64",
             "type": "integer"
@@ -444,15 +320,6 @@
       "SignInInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SignInInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "email": {
             "maxLength": 254,
             "type": "string"
@@ -478,15 +345,6 @@
       "SignInOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/SignInOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct"
           }
@@ -499,15 +357,6 @@
       "StepUpInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/StepUpInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "mfa_code": {
             "maxLength": 6,
             "minLength": 6,
@@ -577,9 +426,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -614,9 +463,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -661,9 +510,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -698,9 +547,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -743,9 +592,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -798,9 +647,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -843,9 +692,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -880,9 +729,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -925,9 +774,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },

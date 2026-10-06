@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/route"
@@ -39,7 +38,7 @@ func TestLogoutRejectsAgentAccessTokenWithUserAccountRequired(t *testing.T) {
 
 func TestSignOutRouteDeclaresUserAccountSubject(t *testing.T) {
 	api := &API{}
-	api.Register(humago.New(http.NewServeMux(), huma.DefaultConfig("principal test", "1.0.0")))
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
 	for _, spec := range route.Specs() {
 		if spec.Name != "auth.sign_out" {
 			continue

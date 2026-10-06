@@ -13,7 +13,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -176,10 +175,10 @@ func serve(ctx context.Context) error {
 	principalMux := http.NewServeMux()
 	serverMux := http.NewServeMux()
 	opsMux := http.NewServeMux()
-	pcfg := huma.DefaultConfig("Plystra Auth principal", "1.0.0")
+	pcfg := route.HumaConfig("Plystra Auth principal", "1.0.0")
 	pcfg.Info.Description = "User and agent authentication"
-	scfg := huma.DefaultConfig("Plystra Auth server", "1.0.0")
-	ocfg := huma.DefaultConfig("Plystra Auth operations", "1.0.0")
+	scfg := route.HumaConfig("Plystra Auth server", "1.0.0")
+	ocfg := route.HumaConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
 	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))

@@ -73,15 +73,6 @@
       "AgentAcceptedOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentAcceptedOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct"
           }
@@ -114,15 +105,6 @@
       "AgentCreatedOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentCreatedOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/AgentCreated"
           }
@@ -135,15 +117,6 @@
       "AgentGrantInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentGrantInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "anchor_space_id": {
             "type": "string"
           },
@@ -168,15 +141,6 @@
       "AgentSecretOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentSecretOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct2"
           }
@@ -189,15 +153,6 @@
       "AgentsInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentsInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "expires_at": {
             "format": "date-time",
             "type": "string"
@@ -217,15 +172,6 @@
       "AgentsListOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AgentsListOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Agent"
@@ -244,15 +190,6 @@
       "AuthBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "email": {
             "type": "string"
           },
@@ -269,15 +206,6 @@
       "AuthOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/AuthResult"
           }
@@ -305,15 +233,6 @@
       "AuthorizationDataOutputAcceptedDataBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputAcceptedDataBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/AcceptedData"
           }
@@ -326,15 +245,6 @@
       "AuthorizationDataOutputCreatedSpaceDataBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputCreatedSpaceDataBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/CreatedSpaceData"
           }
@@ -347,15 +257,6 @@
       "AuthorizationDataOutputGrantBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputGrantBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/Grant"
           }
@@ -368,15 +269,6 @@
       "AuthorizationDataOutputListBindingBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputListBindingBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Binding"
@@ -395,15 +287,6 @@
       "AuthorizationDataOutputListMemberBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputListMemberBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Member"
@@ -422,15 +305,6 @@
       "AuthorizationDataOutputListRoleBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputListRoleBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Role"
@@ -449,15 +323,6 @@
       "AuthorizationDataOutputListSpaceBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputListSpaceBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "items": {
               "$ref": "#/components/schemas/Space"
@@ -476,15 +341,6 @@
       "AuthorizationDataOutputMemberBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputMemberBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/Member"
           }
@@ -497,15 +353,6 @@
       "AuthorizationDataOutputRoleBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputRoleBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/Role"
           }
@@ -518,15 +365,6 @@
       "AuthorizationDataOutputSpaceBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/AuthorizationDataOutputSpaceBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/Space"
           }
@@ -539,15 +377,6 @@
       "BindUserInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/BindUserInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "user_id": {
             "type": "string"
           }
@@ -587,15 +416,6 @@
       "CreateGrantInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateGrantInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "anchor_space_id": {
             "type": "string"
           },
@@ -627,15 +447,6 @@
       "CreateMemberInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateMemberInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "binding_policy": {
             "type": "string"
           },
@@ -659,15 +470,6 @@
       "CreateRoleInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateRoleInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "description": {
             "type": "string"
           },
@@ -693,15 +495,6 @@
       "CreateSpaceInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/CreateSpaceInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "name": {
             "type": "string"
           },
@@ -767,99 +560,29 @@
         ],
         "type": "object"
       },
-      "ErrorDetail": {
+      "Error": {
         "additionalProperties": false,
         "properties": {
-          "location": {
-            "description": "Where the error occurred, e.g. 'body.items[3].tags' or 'path.thing-id'",
+          "code": {
             "type": "string"
           },
+          "details": {},
           "message": {
-            "description": "Error message text",
             "type": "string"
           },
-          "value": {
-            "description": "The value at the given location"
-          }
-        },
-        "type": "object"
-      },
-      "ErrorModel": {
-        "additionalProperties": false,
-        "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ErrorModel.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
-          "detail": {
-            "description": "A human-readable explanation specific to this occurrence of the problem.",
-            "examples": [
-              "Property foo is required but is missing."
-            ],
-            "type": "string"
-          },
-          "errors": {
-            "description": "Optional list of individual error details",
-            "items": {
-              "$ref": "#/components/schemas/ErrorDetail"
-            },
-            "type": [
-              "array",
-              "null"
-            ]
-          },
-          "instance": {
-            "description": "A URI reference that identifies the specific occurrence of the problem.",
-            "examples": [
-              "https://example.com/error-log/abc123"
-            ],
-            "format": "uri",
-            "type": "string"
-          },
-          "status": {
-            "description": "HTTP status code",
-            "examples": [
-              400
-            ],
-            "format": "int64",
-            "type": "integer"
-          },
-          "title": {
-            "description": "A short, human-readable summary of the problem type. This value should not change between occurrences of the error.",
-            "examples": [
-              "Bad Request"
-            ],
-            "type": "string"
-          },
-          "type": {
-            "default": "about:blank",
-            "description": "A URI reference to human-readable documentation for the error.",
-            "examples": [
-              "https://example.com/errors/example"
-            ],
-            "format": "uri",
+          "request_id": {
             "type": "string"
           }
         },
+        "required": [
+          "code",
+          "message"
+        ],
         "type": "object"
       },
       "GenericOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/GenericOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct1"
           }
@@ -916,15 +639,6 @@
       "LogoutOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/LogoutOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/DataStruct"
           }
@@ -937,15 +651,6 @@
       "MeOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/MeOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {}
         },
         "required": [
@@ -988,15 +693,6 @@
       "MemberPatchInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/MemberPatchInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "binding_policy": {
             "type": "string"
           }
@@ -1009,15 +705,6 @@
       "RefreshInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/RefreshInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "member_id": {
             "type": "string"
           },
@@ -1033,15 +720,6 @@
       "RefreshOutputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/RefreshOutputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "data": {
             "$ref": "#/components/schemas/Tokens"
           }
@@ -1054,15 +732,6 @@
       "ResetConfirmInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ResetConfirmInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "password": {
             "type": "string"
           },
@@ -1079,15 +748,6 @@
       "ResetRequestInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/ResetRequestInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "email": {
             "type": "string"
           }
@@ -1224,15 +884,6 @@
       "VerifyEmailInputBody": {
         "additionalProperties": false,
         "properties": {
-          "$schema": {
-            "description": "A URL to the JSON Schema for this object.",
-            "examples": [
-              "https://example.com/schemas/VerifyEmailInputBody.json"
-            ],
-            "format": "uri",
-            "readOnly": true,
-            "type": "string"
-          },
           "token": {
             "type": "string"
           }
@@ -1276,9 +927,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1314,9 +965,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1352,9 +1003,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1390,9 +1041,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1444,9 +1095,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1481,9 +1132,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1519,9 +1170,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1556,9 +1207,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1593,9 +1244,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1638,9 +1289,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1683,9 +1334,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1738,9 +1389,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1783,9 +1434,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1828,9 +1479,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1875,9 +1526,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1920,9 +1571,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -1965,9 +1616,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2020,9 +1671,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2073,9 +1724,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2118,9 +1769,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2171,9 +1822,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2234,9 +1885,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2287,9 +1938,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2340,9 +1991,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2393,9 +2044,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2446,9 +2097,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2507,9 +2158,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2568,9 +2219,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2613,9 +2264,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },
@@ -2666,9 +2317,9 @@
           },
           "default": {
             "content": {
-              "application/problem+json": {
+              "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorModel"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             },

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 )
 
@@ -62,7 +61,7 @@ func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
 
 func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
 	mux := http.NewServeMux()
-	api := humago.New(mux, huma.DefaultConfig("route test", "1.0.0"))
+	api := humago.New(mux, HumaConfig("route test", "1.0.0"))
 	Register(api, Spec{
 		Name: "route.internal-error", Method: http.MethodGet, Path: "/internal-error",
 		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
