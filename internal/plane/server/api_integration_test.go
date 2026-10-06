@@ -76,6 +76,13 @@ func TestAuthzCheckSubjectAssertionAndKeyScope(t *testing.T) {
 	if out.Body.Data.DenyCode != "KEY_SCOPE_EXCLUDED" {
 		t.Fatalf("out-of-scope authz.check = %+v, want KEY_SCOPE_EXCLUDED", out.Body.Data)
 	}
+	var subjectSource string
+	if err := st.Pool.QueryRow(ctx, `SELECT metadata->>'subject_source' FROM audit_logs WHERE action = 'authz.check' ORDER BY occurred_at DESC LIMIT 1`).Scan(&subjectSource); err != nil {
+		t.Fatal(err)
+	}
+	if subjectSource != "application_assertion" {
+		t.Fatalf("subject assertion audit marker = %q, want application_assertion", subjectSource)
+	}
 }
 
 func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {

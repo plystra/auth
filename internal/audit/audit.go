@@ -18,11 +18,24 @@ func WriteWithPriority(ctx context.Context, q *db.Queries, actorType, actorID, a
 	return write(ctx, q, actorType, actorID, action, target, outcome, priority)
 }
 
+func WriteWithMetadata(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome string, extra map[string]string) error {
+	return writeWithMetadata(ctx, q, actorType, actorID, action, target, outcome, "", extra)
+}
+
 func write(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome, priority string) error {
+	return writeWithMetadata(ctx, q, actorType, actorID, action, target, outcome, priority, nil)
+}
+
+func writeWithMetadata(ctx context.Context, q *db.Queries, actorType, actorID, action, target, outcome, priority string, extra map[string]string) error {
 	info := requestinfo.Get(ctx)
 	metadataFields := map[string]string{"plane": info.Plane, "credential_type": actorType}
 	if priority != "" {
 		metadataFields["priority"] = priority
+	}
+	for key, value := range extra {
+		if key != "" && value != "" {
+			metadataFields[key] = value
+		}
 	}
 	metadata, err := json.Marshal(metadataFields)
 	if err != nil {

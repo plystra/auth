@@ -300,8 +300,12 @@ func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key,
 	if decision.Effect == engine.Deny {
 		out.Body.Data.DenyCode = decision.Code
 		if a.Applications != nil && a.Applications.Store != nil {
+			extra := map[string]string{}
+			if body.Subject.Token == "" {
+				extra["subject_source"] = "application_assertion"
+			}
 			err := a.Applications.Store.InTx(ctx, func(q *db.Queries) error {
-				return audit.Write(ctx, q, "application", key.ID, "authz.check", body.Resource.ID, "deny")
+				return audit.WriteWithMetadata(ctx, q, "application", key.ID, "authz.check", body.Resource.ID, "deny", extra)
 			})
 			if err != nil {
 				return nil, err
