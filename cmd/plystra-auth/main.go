@@ -24,7 +24,6 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/factor"
-	"github.com/plystra/auth/internal/idempotency"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/operator"
 	"github.com/plystra/auth/internal/plane/ops"
@@ -140,7 +139,6 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	defer st.Close()
-	idempotencySvc := &idempotency.Service{Store: st}
 	var signer *security.Signer
 	if c.SigningKeyFile != "" {
 		signer, e = security.NewSigner(c.SigningKeyFile, c.Issuer)
@@ -209,7 +207,7 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, principalMux, principalOriginPolicy, idempotencySvc), "principal"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Server, serverMux, idempotencySvc), "server"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Ops, opsMux, idempotencySvc), "ops"), health)
+	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicy(route.Principal, principalMux, principalOriginPolicy), "principal"), otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server"), otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops"), health)
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)

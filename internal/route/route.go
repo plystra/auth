@@ -116,22 +116,14 @@ func WithPlane(ctx context.Context, p Plane) context.Context {
 	return context.WithValue(ctx, planeKey{}, p)
 }
 func Middleware(p Plane, next http.Handler) http.Handler {
-	return middleware(p, next, nil, nil)
+	return middleware(p, next, nil)
 }
 
 func MiddlewareWithOriginPolicy(p Plane, next http.Handler, policy OriginPolicy) http.Handler {
-	return middleware(p, next, policy, nil)
+	return middleware(p, next, policy)
 }
 
-func MiddlewareWithIdempotency(p Plane, next http.Handler, idempotencyStore IdempotencyStore) http.Handler {
-	return middleware(p, next, nil, idempotencyStore)
-}
-
-func MiddlewareWithOriginPolicyAndIdempotency(p Plane, next http.Handler, policy OriginPolicy, idempotencyStore IdempotencyStore) http.Handler {
-	return middleware(p, next, policy, idempotencyStore)
-}
-
-func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, idempotencyStore IdempotencyStore) http.Handler {
+func middleware(p Plane, next http.Handler, originPolicy OriginPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if id == "" || len(id) > 128 {
@@ -172,11 +164,6 @@ func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, idempoten
 				return
 			}
 		}
-		request := r.WithContext(ctx)
-		if idempotencyStore != nil && isWriteMethod(r.Method) {
-			serveIdempotent(w, request, next, p, idempotencyStore)
-			return
-		}
-		next.ServeHTTP(w, request)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

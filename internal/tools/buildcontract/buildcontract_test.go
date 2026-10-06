@@ -249,7 +249,6 @@ func TestSQLCUsesMigrationSchemaAndGeneratedDBOutput(t *testing.T) {
 		"internal/grant",
 		"internal/store",
 		"internal/operator/queries",
-		"internal/idempotency",
 	} {
 		if !strings.Contains(source, required) {
 			t.Errorf("sqlc.yaml is missing %q", required)

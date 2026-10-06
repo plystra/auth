@@ -1,53 +1,15 @@
 package route
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
-	"github.com/plystra/auth/internal/idempotency"
 )
-
-type fakeIdempotencyStore struct {
-	id           string
-	requestHash  []byte
-	completed    bool
-	statusCode   int
-	responseBody []byte
-	headers      map[string][]string
-}
-
-func (f *fakeIdempotencyStore) Reserve(_ context.Context, _ string, _ string, _ string, _ string, requestHash []byte) (idempotency.Reservation, error) {
-	if f.id == "" {
-		f.id = "idk_test"
-		f.requestHash = append([]byte(nil), requestHash...)
-		return idempotency.Reservation{ID: f.id}, nil
-	}
-	if !bytes.Equal(f.requestHash, requestHash) {
-		return idempotency.Reservation{Conflict: true}, nil
-	}
-	if f.completed {
-		return idempotency.Reservation{Replay: true, StatusCode: f.statusCode, Headers: f.headers, Body: f.responseBody}, nil
-	}
-	return idempotency.Reservation{InProgress: true}, nil
-}
-
-func (f *fakeIdempotencyStore) Complete(_ context.Context, id string, statusCode int, headers map[string][]string, body []byte) error {
-	if id != f.id {
-		return errors.New("unknown reservation")
-	}
-	f.completed = true
-	f.statusCode = statusCode
-	f.headers = headers
-	f.responseBody = append([]byte(nil), body...)
-	return nil
-}
 
 func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
 	called := false
@@ -153,39 +115,5 @@ func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
 	body := res.Body.String()
 	if !strings.Contains(body, `"code":"UNAVAILABLE"`) || strings.Contains(body, "database connection details") {
 		t.Fatalf("response = %s, want sanitized UNAVAILABLE error", body)
-	}
-}
-
-func TestIdempotencyKeyReplaysResponseAndRejectsChangedRequest(t *testing.T) {
-	var store fakeIdempotencyStore
-	calls := 0
-	handler := MiddlewareWithIdempotency(Principal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write(body)
-	}), &store)
-	request := func(body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodPost, "http://auth.test/v1/members", strings.NewReader(body))
-		req.Header.Set("Idempotency-Key", "create-member-1")
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, req)
-		return response
-	}
-	first := request(`{"name":"one"}`)
-	if first.Code != http.StatusCreated || first.Body.String() != `{"name":"one"}` || calls != 1 {
-		t.Fatalf("first response = (%d, %q), calls=%d", first.Code, first.Body.String(), calls)
-	}
-	second := request(`{"name":"one"}`)
-	if second.Code != http.StatusCreated || second.Body.String() != first.Body.String() || second.Header().Get("Idempotency-Replayed") != "true" || calls != 1 {
-		t.Fatalf("replayed response = (%d, %q, replay=%q), calls=%d", second.Code, second.Body.String(), second.Header().Get("Idempotency-Replayed"), calls)
-	}
-	third := request(`{"name":"two"}`)
-	if third.Code != http.StatusConflict || !strings.Contains(third.Body.String(), "IDEMPOTENCY_KEY_REUSED") || calls != 1 {
-		t.Fatalf("changed request response = (%d, %q), calls=%d", third.Code, third.Body.String(), calls)
 	}
 }

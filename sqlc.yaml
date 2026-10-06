@@ -14,7 +14,6 @@ sql:
       - "internal/grant"
       - "internal/store"
       - "internal/operator/queries"
-      - "internal/idempotency"
     gen:
       go:
         package: "db"
