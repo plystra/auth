@@ -60,7 +60,7 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	if spec.Name == "" || spec.Method == "" || spec.Path == "" || spec.Plane == "" || len(spec.Subjects) == 0 {
 		panic("route: incomplete route.Spec")
 	}
-	if spec.Permission == "" && !contains(spec.Subjects, Public) && !contains(spec.Subjects, User) {
+	if spec.Permission == "" && !contains(spec.Subjects, Public) && !userOnly(spec.Subjects) {
 		panic("route: non-public route requires permission")
 	}
 	registry.Lock()
@@ -97,6 +97,10 @@ func contains(ss []Subject, want Subject) bool {
 		}
 	}
 	return false
+}
+
+func userOnly(subjects []Subject) bool {
+	return len(subjects) == 1 && subjects[0] == User
 }
 
 type planeKey struct{}

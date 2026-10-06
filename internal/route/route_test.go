@@ -26,3 +26,12 @@ func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
 		t.Fatalf("response = %s, want BROWSER_ORIGIN_REJECTED", res.Body.String())
 	}
 }
+
+func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
+	if !userOnly([]Subject{User}) {
+		t.Fatal("a user-account route should be allowed without a member permission")
+	}
+	if userOnly([]Subject{User, Human}) || userOnly([]Subject{Human}) || userOnly(nil) {
+		t.Fatal("only an exact U-only subject set may omit a member permission")
+	}
+}
