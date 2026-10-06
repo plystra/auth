@@ -85,6 +85,26 @@ func TestTestDBUsesDockerTemplateDatabaseClones(t *testing.T) {
 	}
 }
 
+func TestRepositoryPublishesLicenseAndSecurityPolicy(t *testing.T) {
+	root := repositoryRoot(t)
+	license, err := os.ReadFile(filepath.Join(root, "LICENSE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(license), "Apache License") || !strings.Contains(string(license), "END OF TERMS AND CONDITIONS") {
+		t.Fatal("LICENSE is not the Apache-2.0 text")
+	}
+	security, err := os.ReadFile(filepath.Join(root, "SECURITY.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"GitHub Security", "Advisory", "3 business days", "7 business days", "14 days"} {
+		if !strings.Contains(string(security), required) {
+			t.Errorf("SECURITY.md is missing %q", required)
+		}
+	}
+}
+
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
 	root, err := os.Getwd()
