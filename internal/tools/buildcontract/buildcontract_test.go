@@ -88,6 +88,27 @@ func TestCIChecksMinimumAndLatestPostgresImages(t *testing.T) {
 	}
 }
 
+func TestAgentsGuideMapsChangesToSourcesAndVerification(t *testing.T) {
+	root := repositoryRoot(t)
+	guide, err := os.ReadFile(filepath.Join(root, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(guide)
+	for _, required := range []string{
+		"../auth-docs/tech-stack.md",
+		"migrations/",
+		"internal/<domain>/queries/",
+		"route.Register",
+		"make gen",
+		"make check",
+	} {
+		if !strings.Contains(source, required) {
+			t.Errorf("AGENTS.md is missing change-map entry %q", required)
+		}
+	}
+}
+
 func TestTestDBUsesDockerTemplateDatabaseClones(t *testing.T) {
 	root := repositoryRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "internal", "testdb", "testdb.go"))
