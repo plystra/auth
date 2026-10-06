@@ -70,6 +70,54 @@ func TestMemberTypeConstraintRejectsUnknownKind(t *testing.T) {
 	}
 }
 
+func TestGroupMembershipAndParentStayWithinSpace(t *testing.T) {
+	ctx := context.Background()
+	st, _, actor, spaceID := newBindingFixture(t)
+	otherSpaceID := "spc_other_group_integrity"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug) VALUES ($1, 'Other Space', 'other-group-integrity')`, otherSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	firstGroupID := "grp_integrity_first"
+	secondGroupID := "grp_integrity_second"
+	otherGroupID := "grp_integrity_other"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name) VALUES
+		($1, $4, 'First'), ($2, $4, 'Second'), ($3, $5, 'Other')
+	`, firstGroupID, secondGroupID, otherGroupID, spaceID, otherSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id) VALUES ($1, $2)`, otherGroupID, actor.ID); err == nil {
+		t.Fatal("database accepted a member from a different Space")
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id, space_id) VALUES ($1, $2, $3)`, firstGroupID, actor.ID, otherSpaceID); err == nil {
+		t.Fatal("database accepted a forged membership Space")
+	}
+	for _, groupID := range []string{firstGroupID, secondGroupID} {
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id) VALUES ($1, $2)`, groupID, actor.ID); err != nil {
+			t.Fatalf("member joining another group in its Space: %v", err)
+		}
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM group_members WHERE member_id = $1 AND space_id = $2`, actor.ID, spaceID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("same-Space group memberships = %d, want 2", count)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE group_members SET group_id = $1 WHERE group_id = $2 AND member_id = $3`, otherGroupID, firstGroupID, actor.ID); err == nil {
+		t.Fatal("database moved a membership into another Space")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET space_id = $1 WHERE id = $2`, otherSpaceID, actor.ID); err == nil {
+		t.Fatal("database moved a member away from its groups")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET space_id = $1 WHERE id = $2`, otherSpaceID, firstGroupID); err == nil {
+		t.Fatal("database moved a group away from its members")
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, parent_id) VALUES ('grp_integrity_cross_parent', $1, 'Invalid child', $2)`, spaceID, otherGroupID); err == nil {
+		t.Fatal("database accepted a parent group from another Space")
+	}
+}
+
 func TestSingleBindingSerializesConcurrentBinds(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)

@@ -140,6 +140,7 @@ type GroupMember struct {
 	GroupID  string `json:"group_id"`
 	MemberID string `json:"member_id"`
 	Source   string `json:"source"`
+	SpaceID  string `json:"space_id"`
 }
 
 type IdempotencyKey struct {
