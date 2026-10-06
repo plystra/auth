@@ -147,6 +147,9 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	if !active {
 		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
 	}
+	if _, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read"); err != nil {
+		return nil, err
+	}
 	out := &MeOutput{}
 	if claims.Type == "agent" {
 		if a.Agents == nil {

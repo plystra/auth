@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
@@ -36,6 +37,42 @@ func TestMain(m *testing.M) {
 		code = 1
 	}
 	os.Exit(code)
+}
+
+func TestIdentityEndpointsUseAuthorizationEngine(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{
+		Accounts:      &account.Service{Store: st},
+		Authorization: authz,
+		Sessions:      sessions,
+		Signer:        signer,
+		Agents:        &agent.Service{Store: st},
+	}
+	header := "Bearer " + tokens.AccessToken
+	if _, err := api.me(ctx, &BearerInput{Authorization: header}); err != nil {
+		t.Fatalf("baseline /v1/me authorization = %v", err)
+	}
+	if _, err := api.listAgents(ctx, &agentsListInput{Authorization: header}); err != nil {
+		t.Fatalf("baseline /v1/me/agents authorization = %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'self:read'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.me(ctx, &BearerInput{Authorization: header}); err == nil {
+		t.Fatal("/v1/me bypassed the authorization engine")
+	} else {
+		assertPrincipalError(t, err, "PERMISSION_DISABLED")
+	}
+	if _, err := api.listAgents(ctx, &agentsListInput{Authorization: header}); err == nil {
+		t.Fatal("/v1/me/agents bypassed the authorization engine")
+	} else {
+		assertPrincipalError(t, err, "PERMISSION_DISABLED")
+	}
 }
 
 func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T) {
@@ -74,15 +111,29 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
-	if _, err := api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); err == nil {
+	spaceDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createErr := error(nil)
+	if _, createErr = api.createMember(ctx, &createMemberInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}); createErr == nil {
 		t.Fatal("group-scoped manager was allowed to manage the whole Space")
 	} else {
-		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
+		assertPrincipalError(t, createErr, spaceDecision.Code)
 	}
-	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: outside.ID}); err == nil {
+	outsideGroup, err := authz.ResourceGroupForMember(ctx, outside.ID, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID, ResourceGroup: outsideGroup})
+	if err != nil {
+		t.Fatal(err)
+	}
+	suspendErr := error(nil)
+	if _, suspendErr = api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: outside.ID}); suspendErr == nil {
 		t.Fatal("group-scoped manager was allowed to manage a member outside the group")
 	} else {
-		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
+		assertPrincipalError(t, suspendErr, targetDecision.Code)
 	}
 	insideDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID, ResourceGroup: groupID})
 	if err != nil {
