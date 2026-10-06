@@ -98,7 +98,10 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 		if e = q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: v}); e != nil {
 			return e
 		}
-		return q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: v})
+		if e = q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: v}); e != nil {
+			return e
+		}
+		return audit.Write(ctx, q, "public", v, "auth.password.reset", v, "success")
 	})
 }
 func sha256Bytes(v string) []byte { sum := sha256.Sum256([]byte(strings.TrimSpace(v))); return sum[:] }

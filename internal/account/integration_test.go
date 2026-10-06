@@ -261,6 +261,7 @@ func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testin
 	if err := accounts.VerifyEmail(ctx, verification); err != nil {
 		t.Fatal(err)
 	}
+	assertAuditAction(t, st, "auth.email.verify", "usr_token_user")
 	if err := accounts.VerifyEmail(ctx, verification); err == nil {
 		t.Fatal("email verification token was reusable")
 	}
@@ -306,6 +307,7 @@ func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testin
 	if err := accounts.ResetPassword(ctx, reset, "a newly secure password"); err != nil {
 		t.Fatal(err)
 	}
+	assertAuditAction(t, st, "auth.password.reset", "usr_reset_user")
 	if err := accounts.ResetPassword(ctx, reset, "a newly secure password"); err == nil {
 		t.Fatal("password reset token was reusable")
 	}
@@ -325,6 +327,93 @@ func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testin
 		t.Fatal(err)
 	} else if active {
 		t.Fatal("password reset did not revoke the existing session")
+	}
+}
+
+func TestEmailVerificationRollsBackWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_verify_rollback", "verify-rollback@example.test", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}}
+	token, err := accounts.CreateEmailVerification(ctx, "usr_verify_rollback")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectAuditInserts(t, st, "verification audit failure")
+	if err := accounts.VerifyEmail(ctx, token); err == nil {
+		t.Fatal("email verification succeeded despite audit failure")
+	}
+	var verified, consumed bool
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT u.email_verified_at IS NOT NULL, t.consumed_at IS NOT NULL
+		FROM users u JOIN email_verification_tokens t ON t.user_id = u.id
+		WHERE u.id = $1
+	`, "usr_verify_rollback").Scan(&verified, &consumed); err != nil {
+		t.Fatal(err)
+	}
+	if verified || consumed {
+		t.Fatalf("email verification state changed after audit failure: verified=%v consumed=%v", verified, consumed)
+	}
+}
+
+func TestPasswordResetRollsBackWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	passwords := security.DefaultPasswordHasher()
+	oldHash, err := passwords.Hash("the original secure password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_reset_rollback', 'reset-rollback@example.test', 'reset-rollback@example.test', $1, 'active')
+	`, oldHash); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{Store: st, Signer: signer, HMACKeys: [][]byte{[]byte(strings.Repeat("h", 32))}, Settings: func(context.Context) (session.Settings, error) {
+		return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+	}}
+	accounts := &Service{Store: st, Passwords: passwords, Sessions: sessions, Settings: &space.Service{Store: st}}
+	issued, err := sessions.CreateForMember(ctx, "usr_reset_rollback", "", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := accounts.RequestPasswordReset(ctx, "reset-rollback@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectAuditInserts(t, st, "password reset audit failure")
+	if err := accounts.ResetPassword(ctx, token, "the replacement secure password"); err == nil {
+		t.Fatal("password reset succeeded despite audit failure")
+	}
+	var persistedHash string
+	if err := st.Pool.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, "usr_reset_rollback").Scan(&persistedHash); err != nil {
+		t.Fatal(err)
+	}
+	if persistedHash != oldHash {
+		t.Fatal("password hash changed after audit failure")
+	}
+	var consumed, revoked bool
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT t.consumed_at IS NOT NULL, s.revoked_at IS NOT NULL
+		FROM password_reset_tokens t CROSS JOIN sessions s
+		WHERE t.user_id = $1 AND s.user_id = $1
+	`, "usr_reset_rollback").Scan(&consumed, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if consumed || revoked {
+		t.Fatalf("password reset state changed after audit failure: consumed=%v revoked=%v", consumed, revoked)
+	}
+	if _, active, err := sessions.Introspect(ctx, issued.AccessToken, security.DefaultApplicationAudience); err != nil {
+		t.Fatal(err)
+	} else if !active {
+		t.Fatal("existing session was revoked after audit failure")
 	}
 }
 
@@ -356,5 +445,29 @@ func assertAccountError(t *testing.T, err error, code string) {
 	var public *apierr.Error
 	if !errors.As(err, &public) || public.Code != code {
 		t.Fatalf("error = %v, want code %q", err, code)
+	}
+}
+
+func assertAuditAction(t *testing.T, st *store.Store, action, actorID string) {
+	t.Helper()
+	var count int
+	if err := st.Pool.QueryRow(context.Background(), `SELECT count(*) FROM audit_logs WHERE action = $1 AND actor_id = $2`, action, actorID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("audit action %q count = %d, want 1", action, count)
+	}
+}
+
+func rejectAuditInserts(t *testing.T, st *store.Store, message string) {
+	t.Helper()
+	if _, err := st.Pool.Exec(context.Background(), fmt.Sprintf(`
+		CREATE FUNCTION reject_account_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION '%s'; END;
+		$$;
+		CREATE TRIGGER test_reject_account_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_account_audit_insert();
+	`, message)); err != nil {
+		t.Fatal(err)
 	}
 }

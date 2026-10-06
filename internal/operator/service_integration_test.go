@@ -179,6 +179,38 @@ func TestOperatorStepUpBindsRequestDigestAndIsSingleUse(t *testing.T) {
 	}
 }
 
+func TestOperatorMutationRollsBackWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	insertOperator(t, st, "usr_operator_audit_owner", "audit-owner", `["ops:operators:manage"]`)
+	insertOperator(t, st, "usr_operator_audit_target", "audit-target", `["ops:operators:read"]`)
+	key := []byte(strings.Repeat("h", 32))
+	raw := insertOperatorSession(t, st, "usr_operator_audit_owner", key, nil)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_operator_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'operator audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_operator_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_operator_audit_insert();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpdateCapabilities(ctx, raw, "usr_operator_audit_target", []string{"ops:operators:manage"}, nil); err == nil {
+		t.Fatal("operator capability update succeeded despite audit failure")
+	}
+	var capabilities []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT capabilities FROM operators WHERE user_id = $1`, "usr_operator_audit_target").Scan(&capabilities); err != nil {
+		t.Fatal(err)
+	}
+	if string(capabilities) != `["ops:operators:read"]` {
+		t.Fatalf("operator capabilities changed after audit failure: %s", capabilities)
+	}
+}
+
 func newOperatorStore(t *testing.T) *store.Store {
 	t.Helper()
 	database, err := operatorDB.Clone(context.Background())

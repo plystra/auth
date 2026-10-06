@@ -157,6 +157,32 @@ func TestAgentStopAndDeleteRevokeCredentialsAcrossSubtreeAndKeepTombstones(t *te
 	}
 }
 
+func TestAgentStatusMutationRollsBackWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	agents := &Service{Store: st}
+	ag, key, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "audit-rollback-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_agent_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'agent audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_agent_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_agent_audit_insert();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := agents.Stop(ctx, owner.ID, ag.ID); err == nil {
+		t.Fatal("agent stop succeeded despite audit failure")
+	}
+	assertMemberStatus(t, st, ag.ID, "active")
+	if _, err := agents.AuthenticateKey(ctx, key); err != nil {
+		t.Fatalf("agent credential became unusable after audit failure: %v", err)
+	}
+}
+
 func newAgentFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string) {
 	t.Helper()
 	ctx := context.Background()
