@@ -118,6 +118,45 @@ func TestOperatorCapabilitySubsetAndLastFullOperatorProtection(t *testing.T) {
 	}
 }
 
+func TestOperatorBootstrapOnlyRunsWithoutExistingOperators(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	hash, err := security.DefaultPasswordHasher().Hash("bootstrap-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_operator_bootstrap', 'bootstrap@example.test', 'bootstrap@example.test', $1, 'active')
+	`, hash); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte(strings.Repeat("h", 32))
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.Bootstrap(ctx, "usr_operator_bootstrap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.UserID != "usr_operator_bootstrap" || !strings.HasPrefix(result.APIKey, "ply_sk_") || result.TOTPSecret == "" {
+		t.Fatalf("bootstrap result = %+v, want user, API key, and TOTP enrollment", result)
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM operators`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("operator count = %d, want 1", count)
+	}
+	if _, err := svc.Bootstrap(ctx, "usr_operator_bootstrap"); err == nil {
+		t.Fatal("bootstrap succeeded after an operator already existed")
+	} else {
+		assertOperatorError(t, err, "CONFLICT")
+	}
+}
+
 func TestOperatorStepUpBindsRequestDigestAndIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	st := newOperatorStore(t)

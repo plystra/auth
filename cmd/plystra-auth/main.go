@@ -12,23 +12,18 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
-	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
-	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
-	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
-	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/operator"
 	"github.com/plystra/auth/internal/plane/ops"
@@ -107,54 +102,20 @@ func operatorCommand() *cobra.Command {
 			return e
 		}
 		defer st.Close()
-		var created, apiKey, totpSecret string
 		dataKey, err := decodeDataKey(c.DataKey)
 		if err != nil {
 			return err
 		}
 		factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey)}
-		e = st.InTx(cmd.Context(), func(q *db.Queries) error {
-			if e := q.LockOperatorBootstrap(cmd.Context()); e != nil {
-				return e
-			}
-			count, e := q.CountOperators(cmd.Context())
-			if e != nil {
-				return e
-			}
-			if count != 0 {
-				return errors.New("an operator already exists; use the operations plane")
-			}
-			u, e := q.GetUserByID(cmd.Context(), db.GetUserByIDParams{ID: userID})
-			if e != nil {
-				return fmt.Errorf("load bootstrap user: %w", e)
-			}
-			if u.DisabledAt.Valid {
-				return errors.New("bootstrap user is disabled")
-			}
-			caps, _ := json.Marshal([]string{"*"})
-			rawKey, prefix, keyHash, keyErr := application.GenerateSecret()
-			if keyErr != nil {
-				return keyErr
-			}
-			apiKey = rawKey
-			if _, e = q.CreateAPIKey(cmd.Context(), db.CreateAPIKeyParams{ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash, Scopes: []byte(`["auth.authz:check","auth.tokens:introspect"]`), ExpiresAt: pgtype.Timestamptz{Time: time.Now().UTC().Add(365 * 24 * time.Hour), Valid: true}}); e != nil {
-				return e
-			}
-			if e = q.CreateOperator(cmd.Context(), db.CreateOperatorParams{UserID: u.ID, Capabilities: caps}); e != nil {
-				return e
-			}
-			enrollment, e := factorSvc.BeginTOTPTx(cmd.Context(), q, u.ID, u.Email)
-			if e != nil {
-				return e
-			}
-			totpSecret = enrollment.Secret.Value()
-			created = u.ID
-			return audit.Write(cmd.Context(), q, "operator", u.ID, "ops.operator.bootstrap", u.ID, "success")
-		})
-		if e != nil {
-			return e
+		opsSvc, err := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
+		if err != nil {
+			return err
 		}
-		fmt.Printf("operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", created, totpSecret, apiKey)
+		result, err := opsSvc.Bootstrap(cmd.Context(), userID)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", result.UserID, result.TOTPSecret, result.APIKey)
 		return nil
 	}}
 	bootstrap.Flags().StringVar(&userID, "user-id", "", "existing user ID to promote to the first operator")

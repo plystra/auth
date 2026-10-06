@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
@@ -69,6 +70,12 @@ type OperatorCreate struct {
 	Enrollment *factor.Enrollment `json:"mfa_enrollment,omitempty"`
 }
 
+type BootstrapResult struct {
+	UserID     string
+	TOTPSecret string
+	APIKey     string
+}
+
 func New(st *store.Store, factors *factor.Service, keys [][]byte) (*Service, error) {
 	if st == nil {
 		return nil, errors.New("operator store is required")
@@ -91,6 +98,64 @@ func New(st *store.Store, factors *factor.Service, keys [][]byte) (*Service, err
 	}
 	s.dummyHash, err = s.Passwords.Hash(dummy.Value())
 	return s, err
+}
+
+// Bootstrap creates the first full-capability operator while holding the
+// database bootstrap lock. It is intentionally usable only before any
+// operator exists; subsequent operator changes go through the operations
+// session and capability checks.
+func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return BootstrapResult{}, apierr.New("VALIDATION_FAILED", "user_id is required")
+	}
+	var result BootstrapResult
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := q.LockOperatorBootstrap(ctx); err != nil {
+			return err
+		}
+		count, err := q.CountOperators(ctx)
+		if err != nil {
+			return err
+		}
+		if count != 0 {
+			return apierr.New("CONFLICT", "an operator already exists; use the operations plane")
+		}
+		user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "bootstrap user was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if user.DisabledAt.Valid || user.Status != "active" {
+			return apierr.New("CONFLICT", "bootstrap user is not active")
+		}
+		caps, err := json.Marshal([]string{"*"})
+		if err != nil {
+			return err
+		}
+		rawKey, prefix, keyHash, err := application.GenerateSecret()
+		if err != nil {
+			return err
+		}
+		if _, err := q.CreateAPIKey(ctx, db.CreateAPIKeyParams{
+			ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash,
+			Scopes: []byte(`["auth.authz:check","auth.tokens:introspect"]`), ExpiresAt: pgtype.Timestamptz{Time: time.Now().UTC().Add(365 * 24 * time.Hour), Valid: true},
+		}); err != nil {
+			return err
+		}
+		if err := q.CreateOperator(ctx, db.CreateOperatorParams{UserID: user.ID, Capabilities: caps}); err != nil {
+			return err
+		}
+		enrollment, err := s.Factors.BeginTOTPTx(ctx, q, user.ID, user.Email)
+		if err != nil {
+			return err
+		}
+		result = BootstrapResult{UserID: user.ID, TOTPSecret: enrollment.Secret.Value(), APIKey: rawKey}
+		return audit.Write(ctx, q, "operator", user.ID, "ops.operator.bootstrap", user.ID, "success")
+	})
+	return result, err
 }
 
 func (s *Service) limit(ctx context.Context, kind, value string, count int) error {
