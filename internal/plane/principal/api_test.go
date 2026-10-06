@@ -3,11 +3,15 @@ package principal
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
 
@@ -31,4 +35,19 @@ func TestLogoutRejectsAgentAccessTokenWithUserAccountRequired(t *testing.T) {
 	if !strings.Contains(err.Error(), "user account") || !errors.As(err, &public) || public.Code != "USER_ACCOUNT_REQUIRED" {
 		t.Fatalf("logout error = %v, want USER_ACCOUNT_REQUIRED", err)
 	}
+}
+
+func TestSignOutRouteDeclaresUserAccountSubject(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), huma.DefaultConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "auth.sign_out" {
+			continue
+		}
+		if len(spec.Subjects) != 1 || spec.Subjects[0] != route.User || spec.Permission != "" {
+			t.Fatalf("sign-out route = %+v, want U subject without member permission", spec)
+		}
+		return
+	}
+	t.Fatal("sign-out route was not registered")
 }
