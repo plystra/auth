@@ -241,6 +241,12 @@ func TestRefreshCanSwitchBoundMemberAndUpdatesAccessClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if initial.Issuer != signer.Issuer() || initial.Audience != security.DefaultApplicationAudience || initial.Subject != "usr_switch_test" || initial.SessionID != issued.SessionID || initial.Type != "user" || len(initial.AMR) != 1 || initial.AMR[0] != "pwd" || initial.JWTID == "" || initial.IssuedAt == 0 || initial.ExpiresAt <= initial.IssuedAt || len(initial.Scopes) != 0 {
+		t.Fatalf("initial access claims = %+v, want identity-only ES256 claims with pwd amr", initial)
+	}
+	if issued.ExpiresIn != 60 || initial.ExpiresAt-initial.IssuedAt != 60 {
+		t.Fatalf("initial access lifetime = expires_in=%d claim_ttl=%d, want 60 seconds", issued.ExpiresIn, initial.ExpiresAt-initial.IssuedAt)
+	}
 	if initial.MemberID != "mem_switch_a" || initial.SpaceID != "spc_01h00000000000000000000000" || len(initial.AMR) != 1 || initial.AMR[0] != "pwd" {
 		t.Fatalf("initial access claims = %+v, want member A, default Space and pwd amr", initial)
 	}
