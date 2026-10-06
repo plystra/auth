@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/spf13/cobra"
@@ -222,12 +223,22 @@ func serve(ctx context.Context) error {
 			return e
 		}
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), c.ShutdownTimeout)
-	defer cancel()
-	for _, srv := range servers {
-		_ = srv.Shutdown(shutdownCtx)
+	if err := shutdownServers(servers, c.ShutdownTimeout); err != nil {
+		slog.Warn("graceful shutdown timed out", "error", err)
 	}
 	return nil
+}
+
+func shutdownServers(servers []*http.Server, timeout time.Duration) error {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	var firstErr error
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 func warnSharedPublicOpsListener(logger *slog.Logger, c config.Config) {

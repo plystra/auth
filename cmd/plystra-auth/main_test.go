@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/security"
@@ -158,5 +159,35 @@ func TestWarnSharedPublicOpsListener(t *testing.T) {
 	warnSharedPublicOpsListener(logger, config.Config{HTTPAddr: ":8080", OpsAddr: ":8082"})
 	if output.Len() != 0 {
 		t.Fatalf("unexpected warning for distinct listeners: %q", output.String())
+	}
+}
+
+func TestShutdownServersHonorsTimeoutForInFlightRequests(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(started)
+		<-release
+	}))
+	defer server.Close()
+	done := make(chan struct{})
+	go func() {
+		_, _ = http.Get(server.URL)
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not start")
+	}
+	err := shutdownServers([]*http.Server{server.Config}, 20*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("in-flight request did not finish after release")
 	}
 }
