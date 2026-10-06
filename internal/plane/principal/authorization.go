@@ -339,7 +339,7 @@ func (a *API) createRole(ctx context.Context, in *createRoleInput) (*authorizati
 }
 
 func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.grants:assign")
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.GranteeMemberID)
 	if err != nil {
 		return nil, err
 	}

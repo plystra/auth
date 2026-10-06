@@ -276,7 +276,10 @@ func TestAgentAuthorizationUsesOwnerEnvelope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, created.ID, []string{"auth.members:manage"}, "space", spaceID); err != nil {
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_owner_envelope', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, created.ID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
 	humanDecision, _, err := svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})

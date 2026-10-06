@@ -929,13 +929,18 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
-			return err
-		}
-		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID}); err != nil {
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
 			}
+			return err
+		}
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
+			return err
+		}
+		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
+		if err != nil {
 			return err
 		}
 		role, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
@@ -949,18 +954,17 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err != nil {
 			return err
 		}
-		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
-		if err != nil {
-			return err
-		}
 		for _, permission := range rolePermissions {
-			if permission.Status != "active" || !actorPermissions[permission.Key] {
-				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The grant exceeds the actor's current authority.", Details: map[string]string{"permission": permission.Key}}
+			if permission.Status != "active" {
+				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The role contains a permission that cannot be newly granted.", Details: map[string]string{"permission": permission.Key}}
 			}
 		}
 		row, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID, RoleID: pgtype.Text{String: roleID, Valid: true}, GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true}, Scope: scope, AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: anchorSpaceID, Valid: true}, GrantedBy: actorMemberID})
 		if err != nil {
 			return normalizeDBError(err)
+		}
+		if err := s.requireEmptyGrantDeltaTx(ctx, q, before, member.ID, spaceID, member.Type); err != nil {
+			return err
 		}
 		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
 			return err
@@ -997,23 +1001,19 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	}
 	var out Grant
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
-			return err
-		}
-		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID}); err != nil {
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
 			}
 			return err
 		}
-		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
-		if err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
 			return err
 		}
-		for _, permission := range permissions {
-			if !actorPermissions[permission] {
-				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The grant exceeds the actor's current authority.", Details: map[string]string{"permission": permission}}
-			}
+		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
+		if err != nil {
+			return err
 		}
 		row, err := q.CreateGrant(ctx, db.CreateGrantParams{
 			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID,
@@ -1022,6 +1022,9 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		})
 		if err != nil {
 			return normalizeDBError(err)
+		}
+		if err := s.requireEmptyGrantDeltaTx(ctx, q, before, member.ID, spaceID, member.Type); err != nil {
+			return err
 		}
 		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
 			return err
@@ -1229,18 +1232,6 @@ func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spac
 		return "", err
 	}
 	return groups[0].ID, nil
-}
-
-func authorityKeysTx(ctx context.Context, q *db.Queries, memberID string) (map[string]bool, error) {
-	set := map[string]bool{}
-	rows, err := q.ListMemberAssignments(ctx, db.ListMemberAssignmentsParams{MemberID: pgtype.Text{String: memberID, Valid: true}})
-	if err != nil {
-		return nil, err
-	}
-	for _, row := range rows {
-		set[row.PermissionKey] = true
-	}
-	return set, nil
 }
 
 func normalizeDBError(err error) error {

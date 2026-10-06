@@ -8,6 +8,7 @@ import (
 
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authz/delta"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 )
 
@@ -20,9 +21,18 @@ func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries,
 		return err
 	}
 	newIdentity := userID + "\x00" + memberID
-	after := delta.Snapshot{Permissions: make([]delta.Permission, 0, len(assignments))}
+	after := permissionSnapshot(assignments, newIdentity, spaceID, "human")
+	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
+	if err != nil {
+		return err
+	}
+	return rejectUncoveredDelta(change, "The binding would transfer authority without assignment-right coverage.")
+}
+
+func permissionSnapshot(assignments []engine.Assignment, subject, spaceID, principalKind string) delta.Snapshot {
+	snapshot := delta.Snapshot{Permissions: make([]delta.Permission, 0, len(assignments))}
 	for _, assignment := range assignments {
-		if len(assignment.PrincipalKinds) > 0 && !slices.Contains(assignment.PrincipalKinds, "human") {
+		if len(assignment.PrincipalKinds) > 0 && !slices.Contains(assignment.PrincipalKinds, principalKind) {
 			continue
 		}
 		scope := delta.Scope{Kind: delta.ScopeKind(assignment.Scope.Kind), Anchor: assignment.Scope.Anchor}
@@ -30,16 +40,48 @@ func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries,
 			scope.Anchor = ""
 		}
 		for _, permission := range assignment.Envelope {
-			after.Permissions = append(after.Permissions, delta.Permission{
-				Subject: newIdentity, Position: delta.Node{Kind: delta.Space, ID: spaceID},
+			snapshot.Permissions = append(snapshot.Permissions, delta.Permission{
+				Subject: subject, Position: delta.Node{Kind: delta.Space, ID: spaceID},
 				Key: permission, Scope: scope,
 			})
 		}
 	}
-	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
+	return snapshot
+}
+
+// G8's complete assignment-right and Agent owner-envelope coverage remains
+// pending (auth-docs/roadmap.md, G8). Until then, ordinary grant writes may
+// commit only when the affected member gains no new authority.
+func (s *Service) requireEmptyGrantDeltaTx(ctx context.Context, q *db.Queries, before delta.Snapshot, memberID, spaceID, principalKind string) error {
+	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, principalKind)
 	if err != nil {
 		return err
 	}
+	change, err := delta.Evaluate(before, after, delta.Graph{})
+	if err != nil {
+		return err
+	}
+	return rejectUncoveredDelta(change, "The grant would increase authority without assignment-right coverage.")
+}
+
+func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, memberID, spaceID, principalKind string) (delta.Snapshot, error) {
+	if principalKind == "human" {
+		bindings, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
+		if err != nil {
+			return delta.Snapshot{}, err
+		}
+		if bindings == 0 {
+			return delta.Snapshot{}, nil
+		}
+	}
+	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
+	if err != nil {
+		return delta.Snapshot{}, err
+	}
+	return permissionSnapshot(assignments, memberID, spaceID, principalKind), nil
+}
+
+func rejectUncoveredDelta(change delta.Result, message string) error {
 	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
 		return nil
 	}
@@ -49,7 +91,7 @@ func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries,
 	}
 	sort.Strings(uncovered)
 	return &apierr.Error{
-		Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The binding would transfer authority without assignment-right coverage.",
+		Code: "AUTHORITY_DELTA_NOT_COVERED", Message: message,
 		Details: map[string]string{"uncovered": strings.Join(uncovered, ", ")},
 	}
 }

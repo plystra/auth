@@ -2,6 +2,7 @@ package principal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -151,9 +153,7 @@ func TestMePermissionsEndpointUsesEffectiveEngineDecisionsForHumanAndAgent(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "self:read")
 	humanTokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -307,14 +307,12 @@ func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
 
 func TestCurrentMemberUsesSelectedBindingWhenUserHasMultipleMembers(t *testing.T) {
 	ctx := context.Background()
-	_, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
 	selected, err := authz.CreateMember(ctx, actor.ID, "usr_principal_actor", spaceID, "second identity", "human", "single")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, selected.ID, []string{"self:read"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, actor.ID, selected.ID, "self:read")
 	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", selected.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -398,6 +396,26 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 	}
 	if insideDecision.Effect != engine.Allow {
 		t.Fatalf("authz.check equivalent target decision = %+v, want allow", insideDecision)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by)
+		VALUES ('grt_scope_assign_target', $1, '["auth.grants:assign"]'::jsonb, $2, 'group_tree', $3, $2)
+	`, spaceID, actor.ID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	insideGrant := &createGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	insideGrant.Body.GranteeMemberID = member.ID
+	insideGrant.Body.Permissions = []string{"auth.members:read"}
+	if _, err := api.createGrant(ctx, insideGrant); err != nil {
+		t.Fatalf("group-scoped grant manager could not make an empty-delta change in its group: %v", err)
+	}
+	outsideGrant := &createGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	outsideGrant.Body.GranteeMemberID = outside.ID
+	outsideGrant.Body.Permissions = []string{"auth.members:read"}
+	if _, err := api.createGrant(ctx, outsideGrant); err == nil {
+		t.Fatal("group-scoped grant manager changed a member outside the group")
+	} else {
+		assertPrincipalError(t, err, "SCOPE_OUT_OF_BOUNDS")
 	}
 	if _, err := api.suspendMember(ctx, &memberPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, MemberID: member.ID}); err != nil {
 		t.Fatalf("management endpoint denied the same target authz.check allows: %v", err)
@@ -572,9 +590,7 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"auth.members:manage"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "auth.members:manage")
 	humanTokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -625,9 +641,7 @@ func TestAgentManagementRequiresVerifiedApprovalFact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"auth.bindings:manage"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "auth.bindings:manage")
 	tokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
 	if err != nil {
 		t.Fatal(err)
@@ -665,9 +679,7 @@ func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
 	} else {
 		assertPrincipalError(t, err, "NO_MATCHING_PERMISSION")
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "self:read")
 	in := &createSpaceInput{Authorization: "Bearer " + agentTokens.AccessToken}
 	in.Body.Name = "Agent Created Space"
 	in.Body.Slug = "agent-created-space"
@@ -723,9 +735,7 @@ func TestAgentCannotAssignNewSpaceToArbitrarySharedOwnerUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "self:read")
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO users (id, email, email_normalized, password_hash, status)
 		VALUES ('usr_shared_owner', 'shared-owner@example.test', 'shared-owner@example.test', 'test-password-hash', 'active')
@@ -784,9 +794,7 @@ func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 	`, spaceID, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"auth.agents:create"}, "space", spaceID); err != nil {
-		t.Fatal(err)
-	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "auth.agents:create")
 	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -879,5 +887,19 @@ func assertPrincipalError(t *testing.T, err error, want string) {
 	var public *apierr.Error
 	if !errors.As(err, &public) || public.Code != want {
 		t.Fatalf("error = %v, want API error %q", err, want)
+	}
+}
+
+func seedTestInlineGrant(t *testing.T, st *store.Store, spaceID, actorID, memberID, permission string) {
+	t.Helper()
+	encoded, err := json.Marshal([]string{permission})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(context.Background(), `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ($1, $2, $3::jsonb, $4, 'space', $2, $5)
+	`, string(ids.New[ids.GrantID]("grt")), spaceID, string(encoded), memberID, actorID); err != nil {
+		t.Fatal(err)
 	}
 }
