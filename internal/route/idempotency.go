@@ -58,7 +58,11 @@ func serveIdempotent(w http.ResponseWriter, r *http.Request, next http.Handler, 
 		writeIdempotencyError(w, r.Context(), "IDEMPOTENCY_KEY_INVALID", "Idempotency-Key must be between 1 and 255 characters and contain no control characters.", http.StatusBadRequest)
 		return
 	}
+	originalBody := r.Body
 	body, err := readRequestBody(r)
+	if originalBody != nil {
+		_ = originalBody.Close()
+	}
 	if err != nil {
 		writeIdempotencyError(w, r.Context(), "REQUEST_BODY_TOO_LARGE", "request body exceeds the idempotency limit.", http.StatusRequestEntityTooLarge)
 		return
