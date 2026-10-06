@@ -28,6 +28,7 @@ const (
 	Public     Subject = "public"
 	Human      Subject = "H"
 	HumanAgent Subject = "H/A"
+	User       Subject = "U"
 )
 
 type Spec struct {
@@ -59,7 +60,7 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	if spec.Name == "" || spec.Method == "" || spec.Path == "" || spec.Plane == "" || len(spec.Subjects) == 0 {
 		panic("route: incomplete route.Spec")
 	}
-	if spec.Permission == "" && !contains(spec.Subjects, Public) {
+	if spec.Permission == "" && !contains(spec.Subjects, Public) && !contains(spec.Subjects, User) {
 		panic("route: non-public route requires permission")
 	}
 	registry.Lock()
