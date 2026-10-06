@@ -6,7 +6,7 @@ else
 WEB_CHECK = if [ -d web ]; then cd web && bun run typecheck && bun run test --run; fi
 endif
 
-.PHONY: gen check web-check test build migrate openapi
+.PHONY: gen check web-check dev test build migrate openapi
 
 gen:
 	$(GO) tool sqlc generate
@@ -24,6 +24,9 @@ check: gen
 
 web-check:
 	@$(WEB_CHECK)
+
+dev:
+	docker compose -f docker-compose.dev.yml up --build
 
 test:
 	$(GO) test ./...

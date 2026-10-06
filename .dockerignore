@@ -1,0 +1,6 @@
+.git
+.github
+schema/schema.sql
+openapi
+testdata
+**/*_test.go

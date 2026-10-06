@@ -1,0 +1,41 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: plystra_auth
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d plystra_auth"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    volumes:
+      - auth-dev-pgdata:/var/lib/postgresql/data
+
+  auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: ["/bin/sh", "-c"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PLYSTRA_AUTH_HTTP_ADDR: ":8080"
+      PLYSTRA_AUTH_SERVER_ADDR: ":8081"
+      PLYSTRA_AUTH_OPS_ADDR: ":8082"
+      PLYSTRA_AUTH_DATABASE_URL: postgres://postgres:postgres@postgres:5432/plystra_auth?sslmode=disable
+      PLYSTRA_AUTH_ISSUER: http://localhost:8080
+      PLYSTRA_AUTH_SESSION_HMAC_KEYS: dev-only-session-hmac-key-change-me-32
+      PLYSTRA_AUTH_DATA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      PLYSTRA_AUTH_ENVIRONMENT: development
+    command: ["plystra-auth migrate && exec plystra-auth serve"]
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+      - "8082:8082"
+      - "8090:8090"
+
+volumes:
+  auth-dev-pgdata:

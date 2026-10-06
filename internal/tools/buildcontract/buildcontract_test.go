@@ -138,6 +138,28 @@ func TestAgentsGuideMapsChangesToSourcesAndVerification(t *testing.T) {
 	}
 }
 
+func TestMakeDevUsesDockerComposeDevelopmentStack(t *testing.T) {
+	root := repositoryRoot(t)
+	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "docker-compose.dev.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"dev:", "docker compose -f docker-compose.dev.yml up --build"} {
+		if !strings.Contains(string(makefile), required) {
+			t.Errorf("Makefile is missing dev entry %q", required)
+		}
+	}
+	for _, required := range []string{"postgres:17-alpine", "condition: service_healthy", "plystra-auth migrate", "PLYSTRA_AUTH_ENVIRONMENT: development"} {
+		if !strings.Contains(string(compose), required) {
+			t.Errorf("development compose file is missing %q", required)
+		}
+	}
+}
+
 func TestTestDBUsesDockerTemplateDatabaseClones(t *testing.T) {
 	root := repositoryRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "internal", "testdb", "testdb.go"))
