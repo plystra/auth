@@ -4,16 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
@@ -72,6 +76,41 @@ func TestIdentityEndpointsUseAuthorizationEngine(t *testing.T) {
 		t.Fatal("/v1/me/agents bypassed the authorization engine")
 	} else {
 		assertPrincipalError(t, err, "PERMISSION_DISABLED")
+	}
+}
+
+func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	api := &API{
+		Accounts:      &account.Service{Store: st},
+		Authorization: authz,
+		Sessions:      sessions,
+		Signer:        signer,
+		Agents:        &agent.Service{Store: st},
+	}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w
+	}
+	me := request("/v1/me")
+	if me.Code != http.StatusOK || !strings.Contains(me.Body.String(), `"email":"principal-actor@example.test"`) {
+		t.Fatalf("GET /v1/me = %d %s, want authorized user data", me.Code, me.Body.String())
+	}
+	members := request("/v1/spaces/" + spaceID + "/members")
+	if members.Code != http.StatusOK || !strings.Contains(members.Body.String(), `"id":"`+actor.ID+`"`) {
+		t.Fatalf("GET /v1/spaces/{id}/members = %d %s, want authorized member data", members.Code, members.Body.String())
 	}
 }
 
