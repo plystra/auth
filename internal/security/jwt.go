@@ -121,7 +121,7 @@ func (s *Signer) Verify(token string, now time.Time, audience string) (Claims, e
 	if json.Unmarshal(raw, &c) != nil {
 		return c, errors.New("invalid claims")
 	}
-	if c.Issuer != s.issuer || c.Audience != audience || c.ExpiresAt <= now.Unix() || c.Subject == "" {
+	if c.Issuer != s.issuer || c.Audience != audience || c.ExpiresAt <= now.Unix() || c.Subject == "" || (c.Type != "user" && c.Type != "agent") {
 		return c, errors.New("token claims rejected")
 	}
 	sig, e := base64.RawURLEncoding.DecodeString(parts[2])
