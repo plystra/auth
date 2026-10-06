@@ -298,6 +298,17 @@ var administratorPermissions = []string{
 }
 
 func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (Space, Member, error) {
+	return s.createSpace(ctx, userID, userID, "human", userID, name, slug)
+}
+
+// CreateSpaceByAgent creates the administrator member as a human member bound
+// to the Agent's owner account. The Agent is the audited actor, while the
+// resulting membership stays within the normal one-Space-per-member model.
+func (s *Service) CreateSpaceByAgent(ctx context.Context, actorMemberID, ownerUserID, name, slug string) (Space, Member, error) {
+	return s.createSpace(ctx, ownerUserID, actorMemberID, "agent", actorMemberID, name, slug)
+}
+
+func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType, actorID, name, slug string) (Space, Member, error) {
 	name = strings.TrimSpace(name)
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if name == "" || len(name) > 128 || !slugPattern.MatchString(slug) {
@@ -330,11 +341,11 @@ func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (S
 			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceRow.ID, RoleID: pgtype.Text{String: role.ID, Valid: true},
 			GranteeMemberID: pgtype.Text{String: memberRow.ID, Valid: true}, Scope: "space",
 			AnchorGroupID: pgtype.Text{},
-			AnchorSpaceID: pgtype.Text{String: spaceRow.ID, Valid: true}, GrantedBy: userID,
+			AnchorSpaceID: pgtype.Text{String: spaceRow.ID, Valid: true}, GrantedBy: grantedBy,
 		}); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "human", userID, "space.create", spaceRow.ID, "success"); err != nil {
+		if err := audit.Write(ctx, q, actorType, actorID, "space.create", spaceRow.ID, "success"); err != nil {
 			return err
 		}
 		outSpace = toSpace(spaceRow)
@@ -407,6 +418,65 @@ func (s *Service) GetMemberAnySpace(ctx context.Context, memberID string) (Membe
 		return Member{}, apierr.New("ACTOR_MEMBER_INACTIVE", "The member is not active.")
 	}
 	return Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status}, nil
+}
+
+// OwnerUserID resolves the active user at the top of a member's Agent
+// ownership chain. It is used only for operations whose result must create a
+// user-bound member, such as creating a new Space on behalf of an Agent.
+func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, error) {
+	current := strings.TrimSpace(memberID)
+	seen := map[string]struct{}{}
+	for depth := 0; depth <= 8; depth++ {
+		if current == "" {
+			return "", apierr.New("OWNER_INACTIVE", "the owner chain is incomplete")
+		}
+		if _, ok := seen[current]; ok {
+			return "", apierr.New("OWNER_INACTIVE", "the owner chain contains a cycle")
+		}
+		seen[current] = struct{}{}
+		member, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: current})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", apierr.New("OWNER_INACTIVE", "the owner member was not found")
+		}
+		if err != nil {
+			return "", err
+		}
+		if member.Status != "active" {
+			return "", apierr.New("OWNER_INACTIVE", "the owner member is not active")
+		}
+		if member.Type == "human" {
+			bindings, err := s.Store.Queries().ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: current})
+			if err != nil {
+				return "", err
+			}
+			for _, binding := range bindings {
+				if binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC())) {
+					continue
+				}
+				user, userErr := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: binding.UserID})
+				if errors.Is(userErr, pgx.ErrNoRows) || userErr != nil || user.Status != "active" {
+					continue
+				}
+				return binding.UserID, nil
+			}
+			return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner has no active user account")
+		}
+		if member.Type != "agent" {
+			return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner chain does not end in a user account")
+		}
+		agent, agentErr := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: current})
+		if errors.Is(agentErr, pgx.ErrNoRows) {
+			return "", apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+		}
+		if agentErr != nil {
+			return "", agentErr
+		}
+		if !agent.OwnerMemberID.Valid || agent.OwnerMemberID.String == "" {
+			return "", apierr.New("OWNER_INACTIVE", "the Agent owner is missing")
+		}
+		current = agent.OwnerMemberID.String
+	}
+	return "", apierr.New("OWNER_INACTIVE", "the owner chain exceeds the maximum depth")
 }
 
 // ResourceGroupForMember resolves the persisted resource node used when a

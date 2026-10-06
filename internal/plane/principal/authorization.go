@@ -133,11 +133,38 @@ func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authoriza
 	if a.Authorization == nil {
 		return nil, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
-	claims, err := a.authenticateHuman(ctx, in.Authorization)
+	claims, err := a.authenticatePrincipal(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
-	space, member, err := a.Authorization.CreateSpace(ctx, claims.Subject, in.Body.Name, in.Body.Slug)
+	var space authorization.Space
+	var member authorization.Member
+	if claims.Type == "agent" {
+		memberID := claims.MemberID
+		if memberID == "" {
+			memberID = claims.Subject
+		}
+		actor, actorErr := a.Authorization.GetMemberAnySpace(ctx, memberID)
+		if actorErr != nil {
+			return nil, actorErr
+		}
+		decision, _, checkErr := a.Authorization.Check(ctx, authorization.CheckRequest{
+			MemberID: actor.ID, Permission: "self:read", ResourceSpace: actor.SpaceID, ResourceOwner: actor.ID,
+		})
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if decision.Effect != engine.Allow {
+			return nil, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "self:read"}}
+		}
+		ownerUserID, ownerErr := a.Authorization.OwnerUserID(ctx, actor.ID)
+		if ownerErr != nil {
+			return nil, ownerErr
+		}
+		space, member, err = a.Authorization.CreateSpaceByAgent(ctx, actor.ID, ownerUserID, in.Body.Name, in.Body.Slug)
+	} else {
+		space, member, err = a.Authorization.CreateSpace(ctx, claims.Subject, in.Body.Name, in.Body.Slug)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -419,17 +446,6 @@ func (a *API) authenticatePrincipal(ctx context.Context, authorizationHeader str
 	}
 	if !active || claims.Subject == "" || (claims.Type != "user" && claims.Type != "agent" && claims.Type != "access") {
 		return security.Claims{}, apierr.New("UNAUTHENTICATED", "The access token is invalid.")
-	}
-	return claims, nil
-}
-
-func (a *API) authenticateHuman(ctx context.Context, authorizationHeader string) (security.Claims, error) {
-	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
-	if err != nil {
-		return security.Claims{}, err
-	}
-	if claims.Type == "agent" {
-		return security.Claims{}, apierr.New("USER_ACCOUNT_REQUIRED", "A user account is required for this operation.")
 	}
 	return claims, nil
 }

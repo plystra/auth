@@ -199,6 +199,46 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	}
 }
 
+func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "space-creator", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	if _, err := api.createSpace(ctx, &createSpaceInput{Authorization: "Bearer " + agentTokens.AccessToken}); err == nil {
+		t.Fatal("Agent without self:read was allowed to create a Space")
+	} else {
+		assertPrincipalError(t, err, "NO_MATCHING_PERMISSION")
+	}
+	if _, err := authz.CreateInlineGrant(ctx, owner.ID, spaceID, created.ID, []string{"self:read"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	in := &createSpaceInput{Authorization: "Bearer " + agentTokens.AccessToken}
+	in.Body.Name = "Agent Created Space"
+	in.Body.Slug = "agent-created-space"
+	out, err := api.createSpace(ctx, in)
+	if err != nil {
+		t.Fatalf("Agent Space creation failed: %v", err)
+	}
+	if out.Body.Data.Member.Kind != "human" {
+		t.Fatalf("created administrator kind = %q, want human owner membership", out.Body.Data.Member.Kind)
+	}
+	bindings, err := authz.ListBindings(ctx, out.Body.Data.Member.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0].UserID != "usr_principal_actor" || bindings[0].Status != "active" {
+		t.Fatalf("created administrator bindings = %+v, want active owner user binding", bindings)
+	}
+}
+
 func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
