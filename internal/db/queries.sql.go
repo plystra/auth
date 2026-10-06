@@ -1256,7 +1256,7 @@ SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS
        p.key AS permission_key, p.status, p.delegable, p.principal_kinds, p.agent_approval, s.policy_version
 FROM authorization_grants ag
 LEFT JOIN roles r ON r.id = ag.role_id
-JOIN permissions p ON p.status = 'active' AND (
+JOIN permissions p ON p.status <> 'disabled' AND (
     (ag.role_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM role_permissions rp
         WHERE rp.role_id = ag.role_id AND rp.permission_id = p.id
@@ -1267,7 +1267,6 @@ JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = $1 OR mg.group_id IS NOT NULL)
   AND ag.revoked_at IS NULL
-  AND p.status = 'active'
 ORDER BY ag.id, p.key
 `
 

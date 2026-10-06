@@ -212,6 +212,18 @@ func TestPermissionDirectoryUsesStatusAndDisablesImmediately(t *testing.T) {
 	if !hasStatus || hasEnabled {
 		t.Fatalf("permission columns status=%v enabled=%v, want status only", hasStatus, hasEnabled)
 	}
+	for _, status := range []string{"active", "deprecated"} {
+		if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = $1 WHERE key = 'auth.members:manage'`, status); err != nil {
+			t.Fatal(err)
+		}
+		decision, _, err := svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Effect != engine.Allow {
+			t.Fatalf("%s permission decision = %+v, want allow", status, decision)
+		}
+	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET status = 'disabled' WHERE key = 'auth.members:manage'`); err != nil {
 		t.Fatal(err)
 	}
