@@ -26,3 +26,14 @@ WHERE holder_member_id = sqlc.arg(holder_member_id)
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > now())
 ORDER BY created_at, id;
+
+-- name: LockActiveAssignRightsForHolder :many
+SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
+    covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
+    expires_at, revoked_at, created_at
+FROM assign_rights
+WHERE holder_member_id = sqlc.arg(holder_member_id)
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now())
+ORDER BY created_at, id
+FOR UPDATE;

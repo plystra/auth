@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/plystra/auth/internal/authz/delta"
 	"github.com/plystra/auth/internal/db"
 )
 
@@ -120,4 +121,59 @@ func (f *envelopeFacts) group(ctx context.Context, groupID, spaceID, permission 
 	}
 	f.groupCache[key] = true
 	return true, nil
+}
+
+func (f *envelopeFacts) grantMode(ctx context.Context, node delta.Node, spaceID, permission string, delegable bool) (int, error) {
+	base := 1
+	if delegable {
+		base = 3
+	}
+	ancestors, err := spaceAncestorsQueries(ctx, f.q, spaceID)
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range append([]string{spaceID}, ancestors...) {
+		mode, err := f.q.GetSpaceEnvelopePermission(ctx, db.GetSpaceEnvelopePermissionParams{SpaceID: id, PermissionKey: permission})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		base = min(base, envelopeModeRank(mode.String))
+	}
+	if node.Kind == delta.Space {
+		return base, nil
+	}
+	if node.Kind != delta.Group {
+		return 0, nil
+	}
+	groupAncestors, err := groupAncestorsQueries(ctx, f.q, node.ID, spaceID)
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range append([]string{node.ID}, groupAncestors...) {
+		mode, err := f.q.GetGroupEnvelopePermission(ctx, db.GetGroupEnvelopePermissionParams{GroupID: id, PermissionKey: permission})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		base = min(base, envelopeModeRank(mode.String))
+	}
+	return base, nil
+}
+
+func envelopeModeRank(mode string) int {
+	switch mode {
+	case "use":
+		return 1
+	case "assign":
+		return 2
+	case "delegate":
+		return 3
+	default:
+		return 0
+	}
 }

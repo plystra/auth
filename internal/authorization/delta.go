@@ -21,7 +21,11 @@ func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries,
 		return err
 	}
 	newIdentity := userID + "\x00" + memberID
-	after := permissionSnapshot(assignments, newIdentity, spaceID, "human")
+	position, err := memberPositionTx(ctx, q, memberID, spaceID)
+	if err != nil {
+		return err
+	}
+	after := permissionSnapshot(assignments, newIdentity, position, "human")
 	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
 	if err != nil {
 		return err
@@ -29,7 +33,7 @@ func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries,
 	return rejectUncoveredDelta(change, "The binding would transfer authority without assignment-right coverage.")
 }
 
-func permissionSnapshot(assignments []engine.Assignment, subject, spaceID, principalKind string) delta.Snapshot {
+func permissionSnapshot(assignments []engine.Assignment, subject string, position delta.Node, principalKind string) delta.Snapshot {
 	snapshot := delta.Snapshot{Permissions: make([]delta.Permission, 0, len(assignments))}
 	for _, assignment := range assignments {
 		if len(assignment.PrincipalKinds) > 0 && !slices.Contains(assignment.PrincipalKinds, principalKind) {
@@ -41,7 +45,7 @@ func permissionSnapshot(assignments []engine.Assignment, subject, spaceID, princ
 		}
 		for _, permission := range assignment.Envelope {
 			snapshot.Permissions = append(snapshot.Permissions, delta.Permission{
-				Subject: subject, Position: delta.Node{Kind: delta.Space, ID: spaceID},
+				Subject: subject, Position: position,
 				Key: permission, Scope: scope,
 			})
 		}
@@ -50,9 +54,9 @@ func permissionSnapshot(assignments []engine.Assignment, subject, spaceID, princ
 }
 
 // G8's complete assignment-right and Agent owner-envelope coverage remains
-// pending (auth-docs/roadmap.md, G8). Until then, ordinary grant writes may
-// commit only when the affected member gains no new authority.
-func (s *Service) requireEmptyGrantDeltaTx(ctx context.Context, q *db.Queries, before delta.Snapshot, memberID, spaceID, principalKind string) error {
+// pending (auth-docs/roadmap.md, G8). Human member grants check the available
+// positive permission delta against the actor's effective assignment rights.
+func (s *Service) coverGrantDeltaTx(ctx context.Context, q *db.Queries, before delta.Snapshot, actorMemberID, memberID, spaceID, principalKind string) error {
 	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, principalKind)
 	if err != nil {
 		return err
@@ -61,7 +65,7 @@ func (s *Service) requireEmptyGrantDeltaTx(ctx context.Context, q *db.Queries, b
 	if err != nil {
 		return err
 	}
-	return rejectUncoveredDelta(change, "The grant would increase authority without assignment-right coverage.")
+	return s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, principalKind, spaceID)
 }
 
 func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, memberID, spaceID, principalKind string) (delta.Snapshot, error) {
@@ -78,7 +82,22 @@ func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, m
 	if err != nil {
 		return delta.Snapshot{}, err
 	}
-	return permissionSnapshot(assignments, memberID, spaceID, principalKind), nil
+	position, err := memberPositionTx(ctx, q, memberID, spaceID)
+	if err != nil {
+		return delta.Snapshot{}, err
+	}
+	return permissionSnapshot(assignments, memberID, position, principalKind), nil
+}
+
+func memberPositionTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (delta.Node, error) {
+	groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
+	if err != nil {
+		return delta.Node{}, err
+	}
+	if groupID != "" {
+		return delta.Node{Kind: delta.Group, ID: groupID}, nil
+	}
+	return delta.Node{Kind: delta.Space, ID: spaceID}, nil
 }
 
 func rejectUncoveredDelta(change delta.Result, message string) error {

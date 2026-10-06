@@ -101,6 +101,39 @@ func TestEvaluateAssignmentRightCoverage(t *testing.T) {
 	}
 }
 
+func TestAssignmentRightCoversGrantPositionAndScope(t *testing.T) {
+	graph := Graph{
+		SpaceParent: map[string]string{"spc_child": "spc_root", "spc_other": ""},
+		GroupParent: map[string]string{"grp_child": "grp_root"},
+		GroupSpace:  map[string]string{"grp_root": "spc_root", "grp_child": "spc_root"},
+	}
+	right := Right{Holder: "mem_admin", Position: Node{Kind: Space, ID: "spc_root"}, Permissions: []string{"document:read"}, Anchor: Node{Kind: Space, ID: "spc_root"}, Descendants: true}
+	permission := Permission{Subject: "mem_target", Position: Node{Kind: Space, ID: "spc_child"}, Key: "document:read", Scope: Scope{Kind: SpaceTree, Anchor: "spc_child"}}
+	tests := []struct {
+		name       string
+		right      Right
+		permission Permission
+		want       bool
+	}{
+		{"ancestor Space covers child subtree", right, permission, true},
+		{"right without subtree cannot cover child", func() Right { r := right; r.Descendants = false; return r }(), permission, false},
+		{"unrelated Space cannot cover scope", right, func() Permission { p := permission; p.Scope.Anchor = "spc_other"; return p }(), false},
+		{"different permission is not covered", right, func() Permission { p := permission; p.Key = "document:write"; return p }(), false},
+		{"global cannot be assigned from a node right", right, func() Permission { p := permission; p.Scope = Scope{Kind: Global}; return p }(), false},
+		{"group right covers member in group for self", Right{Permissions: right.Permissions, Anchor: Node{Kind: Group, ID: "grp_root"}, Descendants: true}, Permission{Subject: "mem_target", Position: Node{Kind: Group, ID: "grp_child"}, Key: "document:read", Scope: Scope{Kind: Self}}, true},
+		{"Space right covers its grouped member without subtree", Right{Permissions: right.Permissions, Anchor: Node{Kind: Space, ID: "spc_root"}}, Permission{Subject: "mem_target", Position: Node{Kind: Group, ID: "grp_root"}, Key: "document:read", Scope: Scope{Kind: SpaceOnly, Anchor: "spc_root"}}, true},
+		{"group right cannot cover Space scope", Right{Permissions: right.Permissions, Anchor: Node{Kind: Group, ID: "grp_root"}, Descendants: true}, Permission{Subject: "mem_target", Position: Node{Kind: Group, ID: "grp_child"}, Key: "document:read", Scope: Scope{Kind: SpaceOnly, Anchor: "spc_root"}}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := CoversGrant(tc.right, tc.permission, graph)
+			if err != nil || got != tc.want {
+				t.Fatalf("coverage = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestEvaluateRejectsInvalidAncestry(t *testing.T) {
 	position := Node{Kind: Space, ID: "spc_root"}
 	permission := func(anchor string) Permission {

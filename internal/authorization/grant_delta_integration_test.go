@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 )
 
@@ -22,6 +23,9 @@ func TestGrantCreationRejectsPositiveDeltaDespiteMatchingActorPermissionKey(t *t
 				t.Fatal(err)
 			}
 			if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_grant_target"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
 				t.Fatal(err)
 			}
 			var versionBefore int64
@@ -67,6 +71,154 @@ func TestGrantCreationRejectsPositiveDeltaDespiteMatchingActorPermissionKey(t *t
 			}
 		})
 	}
+}
+
+func TestGrantCreationCoversPositiveDeltaWithAssignmentRight(t *testing.T) {
+	for _, kind := range []string{"inline", "role"} {
+		t.Run(kind, func(t *testing.T) {
+			ctx := context.Background()
+			st, svc, actor, spaceID := newBindingFixture(t)
+			target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Grant target", "human", "single")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := insertUser(ctx, st, "usr_covered_grant", "covered-grant@example.test"); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_covered_grant"); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "inline" {
+				_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+			} else {
+				var role Role
+				role, err = svc.CreateRole(ctx, actor.ID, spaceID, "Covered role", "", []string{"auth.members:read"})
+				if err == nil {
+					_, err = svc.CreateGrant(ctx, actor.ID, spaceID, target.ID, role.ID, "space", spaceID)
+				}
+			}
+			if err != nil {
+				t.Fatalf("covered positive grant failed: %v", err)
+			}
+			decision, _, err := svc.Check(ctx, CheckRequest{MemberID: target.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+			if err != nil || decision.Effect != "allow" {
+				t.Fatalf("target decision = %+v, %v", decision, err)
+			}
+			if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+				t.Fatal(err)
+			}
+			assertAPIErrorCode(t, func() error {
+				_, grantErr := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.roles:manage"}, "space", spaceID)
+				return grantErr
+			}(), "AUTHORITY_DELTA_NOT_COVERED")
+		})
+	}
+}
+
+func TestGrantCreationRequiresAssignableEnvelopeMode(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Envelope target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_envelope_grant", "envelope-grant@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_envelope_grant"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1)`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO space_envelope_entries (space_id, permission_id, mode)
+		SELECT $1, id, CASE WHEN key = 'auth.members:read' THEN 'use' ELSE 'delegate' END
+		FROM permissions WHERE status = 'active' AND delegable = true
+	`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	if _, err := st.Pool.Exec(ctx, `
+		UPDATE space_envelope_entries SET mode = 'assign'
+		WHERE space_id = $1 AND permission_id = (SELECT id FROM permissions WHERE key = 'auth.members:read')
+	`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
+		t.Fatalf("assign envelope should permit covered grant: %v", err)
+	}
+}
+
+func TestGroupAssignmentRightCoversSelfGrantButNotSpaceGrant(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Group recipient", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_group_right", "group-right@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_group_right"); err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_group_right_scope"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, kind, status) VALUES ($1, $2, 'Right scope', 'standard', 'active')`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_members (group_id, member_id) VALUES ($1, $2)`, groupID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO assign_rights (id, holder_member_id, permission_keys, anchor_group_id, covers_subtree, can_redelegate, source)
+		VALUES ('ar_group_right_scope', $1, '["auth.members:read"]'::jsonb, $2, false, false, 'system')
+	`, actor.ID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "self", spaceID); err != nil {
+		t.Fatalf("group right should cover recipient self grant: %v", err)
+	}
+	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestMemberGrantRejectsScopeAnchorOutsideMemberSpaceTree(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Scope target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSpaceID, _, err := svc.CreateSpace(ctx, "usr_binding_actor", "Other scope", "other-grant-scope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", otherSpaceID.ID)
+	assertAPIErrorCode(t, err, "SCOPE_OUT_OF_BOUNDS")
+	var grants int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1`, target.ID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 0 {
+		t.Fatalf("invalid grant persisted %d rows", grants)
+	}
+}
+
+func TestGrantToAgentStillRejectsPositiveDeltaWithoutOwnerRightCoverage(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	target, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: actor.ID, CreatedByUser: "usr_binding_actor", Name: "Grant target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
 }
 
 func TestGrantCreationForUnboundHumanHasNoActingIdentityDelta(t *testing.T) {

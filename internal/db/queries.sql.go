@@ -992,7 +992,7 @@ func (q *Queries) GetMemberVersion(ctx context.Context, arg GetMemberVersionPara
 }
 
 const getPermissionByKey = `-- name: GetPermissionByKey :one
-SELECT id, key, description, status, created_at FROM permissions WHERE key=$1
+SELECT id, key, description, status, delegable, created_at FROM permissions WHERE key=$1
 `
 
 type GetPermissionByKeyParams struct {
@@ -1004,6 +1004,7 @@ type GetPermissionByKeyRow struct {
 	Key         string             `json:"key"`
 	Description string             `json:"description"`
 	Status      string             `json:"status"`
+	Delegable   bool               `json:"delegable"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -1015,6 +1016,7 @@ func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKey
 		&i.Key,
 		&i.Description,
 		&i.Status,
+		&i.Delegable,
 		&i.CreatedAt,
 	)
 	return i, err

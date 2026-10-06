@@ -150,6 +150,48 @@ func rightContains(a, b Right, graph Graph) (bool, error) {
 	return nodeContains(a.Anchor, a.Descendants, b.Anchor, graph)
 }
 
+// CoversGrant reports whether one assignment right permits a positive
+// permission tuple for a recipient at its current position and grant scope.
+// The caller has already checked the management permission and effective
+// envelope mode at every involved node.
+func CoversGrant(right Right, permission Permission, graph Graph) (bool, error) {
+	if !validNode(right.Anchor) || !validNode(permission.Position) || !validScope(permission.Scope) || permission.Key == "" {
+		return false, errors.New("invalid grant coverage facts")
+	}
+	if !slices.Contains(right.Permissions, permission.Key) {
+		return false, nil
+	}
+	covered, err := nodeContains(right.Anchor, right.Descendants, permission.Position, graph)
+	if err != nil {
+		return false, err
+	}
+	if !covered && permission.Position.Kind == Group && right.Anchor.Kind == Space {
+		spaceID, ok := graph.GroupSpace[permission.Position.ID]
+		if !ok || spaceID == "" {
+			return false, errors.New("recipient group is missing its Space")
+		}
+		covered, err = nodeContains(right.Anchor, right.Descendants, Node{Kind: Space, ID: spaceID}, graph)
+	}
+	if err != nil || !covered {
+		return covered, err
+	}
+	var scopeNode Node
+	switch permission.Scope.Kind {
+	case Self:
+		return true, nil
+	case SpaceOnly, SpaceTree:
+		scopeNode = Node{Kind: Space, ID: permission.Scope.Anchor}
+	case GroupOnly, GroupTree:
+		scopeNode = Node{Kind: Group, ID: permission.Scope.Anchor}
+	case Global:
+		return false, nil
+	}
+	if (permission.Scope.Kind == SpaceTree || permission.Scope.Kind == GroupTree) && !right.Descendants {
+		return false, nil
+	}
+	return nodeContains(right.Anchor, right.Descendants, scopeNode, graph)
+}
+
 func scopeContains(a, b Scope, graph Graph) (bool, error) {
 	if a.Kind == Global {
 		return true, nil

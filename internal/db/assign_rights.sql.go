@@ -147,3 +147,53 @@ func (q *Queries) ListDefaultAssignablePermissionKeys(ctx context.Context) ([]st
 	}
 	return items, nil
 }
+
+const lockActiveAssignRightsForHolder = `-- name: LockActiveAssignRightsForHolder :many
+SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
+    covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
+    expires_at, revoked_at, created_at
+FROM assign_rights
+WHERE holder_member_id = $1
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now())
+ORDER BY created_at, id
+FOR UPDATE
+`
+
+type LockActiveAssignRightsForHolderParams struct {
+	HolderMemberID string `json:"holder_member_id"`
+}
+
+func (q *Queries) LockActiveAssignRightsForHolder(ctx context.Context, arg LockActiveAssignRightsForHolderParams) ([]AssignRight, error) {
+	rows, err := q.db.Query(ctx, lockActiveAssignRightsForHolder, arg.HolderMemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AssignRight{}
+	for rows.Next() {
+		var i AssignRight
+		if err := rows.Scan(
+			&i.ID,
+			&i.HolderMemberID,
+			&i.PermissionKeys,
+			&i.AnchorSpaceID,
+			&i.AnchorGroupID,
+			&i.CoversSubtree,
+			&i.CanRedelegate,
+			&i.Source,
+			&i.ParentID,
+			&i.GrantedByOperatorUserID,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

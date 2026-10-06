@@ -945,6 +945,9 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 			}
 			return err
 		}
+		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
 			return err
 		}
@@ -972,7 +975,7 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if err := s.requireEmptyGrantDeltaTx(ctx, q, before, member.ID, spaceID, member.Type); err != nil {
+		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 			return err
 		}
 		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
@@ -1017,6 +1020,9 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 			}
 			return err
 		}
+		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
 			return err
 		}
@@ -1032,7 +1038,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if err := s.requireEmptyGrantDeltaTx(ctx, q, before, member.ID, spaceID, member.Type); err != nil {
+		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 			return err
 		}
 		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
