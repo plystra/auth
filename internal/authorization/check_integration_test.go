@@ -101,13 +101,22 @@ func TestSubjectHomeSpaceSuspensionDeniesOtherResource(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE members SET space_id = $1 WHERE id = $2`, childID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_subject_child', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $2)
+	`, childID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
 	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: parentID}
 	decision, _, err := svc.Check(ctx, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if decision.Effect != engine.Allow {
-		t.Fatalf("active subject home Space = %+v, want allow", decision)
+	if decision.Effect != engine.Deny || decision.Code != "SCOPE_OUT_OF_BOUNDS" {
+		t.Fatalf("active subject home Space = %+v, want SCOPE_OUT_OF_BOUNDS", decision)
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, childID); err != nil {
 		t.Fatal(err)
