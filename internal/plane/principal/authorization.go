@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
@@ -137,26 +138,17 @@ func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authoriza
 	if err != nil {
 		return nil, err
 	}
+	currentSpace := claims.SpaceID
+	if currentSpace == "" && claims.MemberID == "" && claims.Type != "agent" {
+		currentSpace = account.DefaultSpaceID
+	}
+	actor, err := a.actorForSpaceSelf(ctx, in.Authorization, currentSpace, "self:read")
+	if err != nil {
+		return nil, err
+	}
 	var space authorization.Space
 	var member authorization.Member
 	if claims.Type == "agent" {
-		memberID := claims.MemberID
-		if memberID == "" {
-			memberID = claims.Subject
-		}
-		actor, actorErr := a.Authorization.GetMemberAnySpace(ctx, memberID)
-		if actorErr != nil {
-			return nil, actorErr
-		}
-		decision, _, checkErr := a.Authorization.Check(ctx, authorization.CheckRequest{
-			MemberID: actor.ID, Permission: "self:read", ResourceSpace: actor.SpaceID, ResourceOwner: actor.ID,
-		})
-		if checkErr != nil {
-			return nil, checkErr
-		}
-		if decision.Effect != engine.Allow {
-			return nil, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "self:read"}}
-		}
 		ownerUserID, ownerErr := a.Authorization.OwnerUserID(ctx, actor.ID)
 		if ownerErr != nil {
 			return nil, ownerErr
@@ -385,7 +377,15 @@ func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, p
 	return a.actorForSpaceTarget(ctx, authorizationHeader, spaceID, permission, "")
 }
 
+func (a *API) actorForSpaceSelf(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
+	return a.actorForSpaceTargetWithSelf(ctx, authorizationHeader, spaceID, permission, "", true)
+}
+
 func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string) (authorization.Member, error) {
+	return a.actorForSpaceTargetWithSelf(ctx, authorizationHeader, spaceID, permission, targetMemberID, false)
+}
+
+func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string, self bool) (authorization.Member, error) {
 	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
 		return authorization.Member{}, err
@@ -422,7 +422,11 @@ func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spac
 			return authorization.Member{}, err
 		}
 	}
-	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup})
+	resourceOwner := ""
+	if self {
+		resourceOwner = member.ID
+	}
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup, ResourceOwner: resourceOwner})
 	if err != nil {
 		return authorization.Member{}, err
 	}

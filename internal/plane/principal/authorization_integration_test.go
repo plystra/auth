@@ -239,6 +239,34 @@ func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
 	}
 }
 
+func TestHumanSpaceCreationUsesAuthorizationEngine(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	in := &createSpaceInput{Authorization: "Bearer " + tokens.AccessToken}
+	in.Body.Name = "Denied Human Space"
+	in.Body.Slug = "denied-human-space"
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.createSpace(ctx, in); err == nil {
+		t.Fatal("human created a Space without self:read")
+	} else {
+		assertPrincipalError(t, err, "NO_MATCHING_PERMISSION")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM spaces WHERE slug = $1`, in.Body.Slug).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("Space was created after the authorization engine denied its creator")
+	}
+}
+
 func TestAgentCannotAssignNewSpaceToArbitrarySharedOwnerUser(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
