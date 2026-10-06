@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -57,6 +58,50 @@ func TestEmailNormalizationIsUniqueAndRegistrationDefaultsClosed(t *testing.T) {
 		t.Fatal("registration accepted a duplicate normalized email")
 	} else {
 		assertAccountError(t, err, "conflict")
+	}
+}
+
+func TestConcurrentRegistrationSameEmailHasSingleSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE instance_settings SET registration_mode = 'open'`); err != nil {
+		t.Fatal(err)
+	}
+	settings := &space.Service{Store: st}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: settings}
+
+	const attempts = 8
+	start := make(chan struct{})
+	results := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := accounts.Register(ctx, RegisterInput{
+				Email:    "Concurrent.User@Example.Test",
+				Password: "a sufficiently long password",
+			}, nil, "")
+			results <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	successes := 0
+	conflicts := 0
+	for err := range results {
+		if err == nil {
+			successes++
+			continue
+		}
+		assertAccountError(t, err, "conflict")
+		conflicts++
+	}
+	if successes != 1 || conflicts != attempts-1 {
+		t.Fatalf("concurrent registrations: successes=%d conflicts=%d, want one success and %d conflicts", successes, conflicts, attempts-1)
 	}
 }
 
