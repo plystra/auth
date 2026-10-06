@@ -898,20 +898,14 @@ func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, 
 		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.roles:manage", spaceID); err != nil {
 			return err
 		}
-		actorPermissions, err := authorityKeysTx(ctx, q, actorMemberID)
-		if err != nil {
-			return err
-		}
-		for _, key := range permissions {
-			if !actorPermissions[key] {
-				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The role would grant a permission the actor does not hold.", Details: map[string]string{"permission": key}}
-			}
-		}
 		row, err := q.CreateRole(ctx, db.CreateRoleParams{ID: string(ids.New[ids.RoleID]("rol")), SpaceID: spaceID, Name: name, Description: description, Managed: false})
 		if err != nil {
 			return normalizeDBError(err)
 		}
 		if err := addRolePermissions(ctx, q, row.ID, permissions); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
 			return err
 		}
 		if err := audit.Write(ctx, q, "member", actorMemberID, "role.create", row.ID, "success"); err != nil {

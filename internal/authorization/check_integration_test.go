@@ -44,6 +44,45 @@ func TestAuthorizationCheckRejectsGroupScopedManagementOutsideGroup(t *testing.T
 	}
 }
 
+func TestCreatingUnusedRoleNeedsOnlyRoleManagementPermission(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_role_management_only', $1, '["auth.roles:manage"]'::jsonb, $2, 'space', $1, $2)
+	`, spaceID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	var beforeVersion int64
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&beforeVersion); err != nil {
+		t.Fatal(err)
+	}
+	role, err := svc.CreateRole(ctx, actor.ID, spaceID, "readers", "Read members", []string{"auth.members:read"})
+	if err != nil {
+		t.Fatalf("creating an ungranted role must not require holding its permissions: %v", err)
+	}
+	if len(role.Permissions) != 1 || role.Permissions[0] != "auth.members:read" {
+		t.Fatalf("created role permissions = %v", role.Permissions)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny {
+		t.Fatalf("defining an unused role changed actor authority: %+v", decision)
+	}
+	var afterVersion int64
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&afterVersion); err != nil {
+		t.Fatal(err)
+	}
+	if afterVersion != beforeVersion+1 {
+		t.Fatalf("role catalog change policy version = %d, want %d", afterVersion, beforeVersion+1)
+	}
+}
+
 func TestSpaceSuspensionPropagatesThroughAuthorizationCheck(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, parentID := newBindingFixture(t)
