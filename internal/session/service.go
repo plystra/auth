@@ -262,37 +262,20 @@ func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (
 		return security.Claims{}, false, nil
 	}
 	now := time.Now().UTC()
-	memberID := claims.Subject
-	for depth := 0; depth < 8; depth++ {
-		row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return security.Claims{}, false, nil
-			}
-			return security.Claims{}, false, err
-		}
-		if (claims.SpaceID != "" && claims.SpaceID != row.SpaceID) || row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
+	row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: claims.Subject})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
 			return security.Claims{}, false, nil
 		}
-		if !row.OwnerMemberID.Valid || row.OwnerMemberID.String == "" {
-			return security.Claims{}, false, nil
-		}
-		owner, err := s.Store.Queries().GetMemberForAgentOwner(ctx, db.GetMemberForAgentOwnerParams{MemberID: row.OwnerMemberID.String})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return security.Claims{}, false, nil
-			}
-			return security.Claims{}, false, err
-		}
-		if owner.Status != "active" || (owner.ExpiresAt.Valid && !owner.ExpiresAt.Time.After(now)) {
-			return security.Claims{}, false, nil
-		}
-		if owner.Type != "agent" {
-			return claims, true, nil
-		}
-		memberID = owner.ID
+		return security.Claims{}, false, err
 	}
-	return security.Claims{}, false, nil
+	if (claims.SpaceID != "" && claims.SpaceID != row.SpaceID) || row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
+		return security.Claims{}, false, nil
+	}
+	// Owner-chain validity is an authorization fact. Keeping the token
+	// authenticated lets the shared engine return OWNER_INACTIVE or
+	// OWNER_ENVELOPE_EXCLUDED instead of collapsing the result to UNAUTHENTICATED.
+	return claims, true, nil
 }
 func pgTime(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
 func nullable(v string) pgtype.Text         { return pgtype.Text{String: v, Valid: v != ""} }

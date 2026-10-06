@@ -1374,6 +1374,61 @@ func (q *Queries) ListMemberBindings(ctx context.Context, arg ListMemberBindings
 	return items, nil
 }
 
+const listMemberGroups = `-- name: ListMemberGroups :many
+SELECT g.id, g.space_id, g.name, g.parent_id, g.kind, g.owner_member_id, g.status, g.created_at
+FROM groups g
+JOIN group_members gm ON gm.group_id = g.id
+WHERE gm.member_id = $1
+  AND g.space_id = $2
+  AND g.status = 'active'
+ORDER BY g.id
+`
+
+type ListMemberGroupsParams struct {
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+}
+
+type ListMemberGroupsRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	ParentID      pgtype.Text        `json:"parent_id"`
+	Kind          string             `json:"kind"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListMemberGroups(ctx context.Context, arg ListMemberGroupsParams) ([]ListMemberGroupsRow, error) {
+	rows, err := q.db.Query(ctx, listMemberGroups, arg.MemberID, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMemberGroupsRow{}
+	for rows.Next() {
+		var i ListMemberGroupsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.ParentID,
+			&i.Kind,
+			&i.OwnerMemberID,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembersInSpace = `-- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = $1 AND status <> 'removed'

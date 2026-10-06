@@ -214,7 +214,7 @@ func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authori
 }
 
 func (a *API) updateMember(ctx context.Context, in *memberPatchInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +237,7 @@ func (a *API) removeMember(ctx context.Context, in *memberPathInput) (*authoriza
 }
 
 func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status string) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:manage", in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -248,7 +248,7 @@ func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status s
 }
 
 func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[[]authorization.Binding], error) {
-	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
+	if _, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:read", in.MemberID); err != nil {
 		return nil, err
 	}
 	if _, err := a.Authorization.GetMember(ctx, in.MemberID, in.ID); err != nil {
@@ -264,7 +264,7 @@ func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authoriza
 }
 
 func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +275,7 @@ func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDa
 }
 
 func (a *API) unbindUser(ctx context.Context, in *unbindUserInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.bindings:manage")
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -355,6 +355,10 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 }
 
 func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
+	return a.actorForSpaceTarget(ctx, authorizationHeader, spaceID, permission, "")
+}
+
+func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string) (authorization.Member, error) {
 	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
 		return authorization.Member{}, err
@@ -384,7 +388,14 @@ func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, p
 	if err != nil {
 		return authorization.Member{}, err
 	}
-	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID})
+	resourceGroup := ""
+	if targetMemberID != "" {
+		resourceGroup, err = a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
+		if err != nil {
+			return authorization.Member{}, err
+		}
+	}
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup})
 	if err != nil {
 		return authorization.Member{}, err
 	}

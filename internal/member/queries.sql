@@ -52,6 +52,15 @@ SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members
 WHERE id = sqlc.arg(id);
 
+-- name: ListMemberGroups :many
+SELECT g.id, g.space_id, g.name, g.parent_id, g.kind, g.owner_member_id, g.status, g.created_at
+FROM groups g
+JOIN group_members gm ON gm.group_id = g.id
+WHERE gm.member_id = sqlc.arg(member_id)
+  AND g.space_id = sqlc.arg(space_id)
+  AND g.status = 'active'
+ORDER BY g.id;
+
 -- name: LockMemberInSpace :one
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members
