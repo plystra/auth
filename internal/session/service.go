@@ -84,8 +84,21 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 	now := time.Now().UTC()
 	exp := now.Add(st.RefreshTTL)
 	var sessionID string
+	spaceID := ""
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance))})
+		var persistedMember pgtype.Text
+		if memberID != "" {
+			member, memberErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+			if memberErr != nil {
+				return memberErr
+			}
+			if member.Status != "active" {
+				return apierr.New("PERMISSION_DENIED", "the selected member is not active")
+			}
+			spaceID = member.SpaceID
+			persistedMember = pgtype.Text{String: memberID, Valid: true}
+		}
+		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, MemberID: persistedMember, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance))})
 		if e != nil {
 			return e
 		}
@@ -96,13 +109,17 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, Type: "user"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, AMR: []string{"pwd"}, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
 	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: refresh, SessionID: sessionID}, nil
 }
 func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
+	return s.RefreshForMember(ctx, raw, "")
+}
+
+func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID string) (Tokens, error) {
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
@@ -112,7 +129,7 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 		return Tokens{}, err
 	}
 	now := time.Now().UTC()
-	sid, uid, family := "", "", ""
+	sid, uid, family, memberID, spaceID := "", "", "", "", ""
 	assurance := 1
 	rejected := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -170,6 +187,30 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 			return nil
 		}
 		uid, assurance = sess.UserID, int(sess.AssuranceLevel)
+		memberID = sess.MemberID.String
+		if requestedMemberID != "" {
+			memberID = requestedMemberID
+		}
+		if memberID != "" {
+			binding, bindingErr := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: uid, MemberID: memberID})
+			if bindingErr != nil || binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(now)) {
+				if bindingErr != nil && !errors.Is(bindingErr, pgx.ErrNoRows) {
+					return bindingErr
+				}
+				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
+			}
+			member, memberErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+			if memberErr != nil {
+				return memberErr
+			}
+			if member.Status != "active" {
+				return apierr.New("PERMISSION_DENIED", "the selected member is not active")
+			}
+			spaceID = member.SpaceID
+			if err := q.SetSessionMember(ctx, db.SetSessionMemberParams{ID: sid, UserID: uid, MemberID: pgtype.Text{String: memberID, Valid: true}}); err != nil {
+				return err
+			}
+		}
 		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{ID: string(ids.New[ids.RefreshTokenID]("rft")), SessionID: sid, FamilyID: family, TokenHash: s.hashToken(next), ExpiresAt: pgTime(now.Add(st.RefreshTTL))})
 		if err != nil {
 			return err
@@ -183,7 +224,7 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 		return Tokens{}, apierr.New("invalid_grant", "refresh token has been revoked")
 	}
 	jti, _ := randomToken("jti_")
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, Type: "user"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, AMR: []string{"pwd"}, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -230,7 +271,7 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if strings.TrimSpace(audience) == "" {
 		audience = security.DefaultApplicationAudience
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, Actor: actor, Scopes: scopes, Type: "agent"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: actor, Scopes: scopes, Type: "agent"})
 	if err != nil {
 		return Tokens{}, err
 	}

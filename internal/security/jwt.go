@@ -28,6 +28,7 @@ type Claims struct {
 	JWTID     string   `json:"jti"`
 	SessionID string   `json:"sid"`
 	Assurance int      `json:"aal"`
+	AMR       []string `json:"amr"`
 	Actor     string   `json:"act,omitempty"`
 	Type      string   `json:"typ,omitempty"`
 	Scopes    []string `json:"scp,omitempty"`

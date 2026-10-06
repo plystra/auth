@@ -117,14 +117,15 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (id, user_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level)
-VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, now()), COALESCE($8, 1))
-RETURNING id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($9, 1))
+RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
 `
 
 type CreateSessionParams struct {
 	ID             string             `json:"id"`
 	UserID         string             `json:"user_id"`
+	MemberID       pgtype.Text        `json:"member_id"`
 	TokenHash      []byte             `json:"token_hash"`
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	Ip             pgtype.Text        `json:"ip"`
@@ -133,10 +134,26 @@ type CreateSessionParams struct {
 	AssuranceLevel interface{}        `json:"assurance_level"`
 }
 
-func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
+type CreateSessionRow struct {
+	ID             string             `json:"id"`
+	UserID         string             `json:"user_id"`
+	MemberID       pgtype.Text        `json:"member_id"`
+	TokenHash      []byte             `json:"token_hash"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	Ip             pgtype.Text        `json:"ip"`
+	UserAgent      pgtype.Text        `json:"user_agent"`
+	AuthTime       pgtype.Timestamptz `json:"auth_time"`
+	AssuranceLevel int16              `json:"assurance_level"`
+}
+
+func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (CreateSessionRow, error) {
 	row := q.db.QueryRow(ctx, createSession,
 		arg.ID,
 		arg.UserID,
+		arg.MemberID,
 		arg.TokenHash,
 		arg.ExpiresAt,
 		arg.Ip,
@@ -144,10 +161,11 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.AuthTime,
 		arg.AssuranceLevel,
 	)
-	var i Session
+	var i CreateSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
+		&i.MemberID,
 		&i.TokenHash,
 		&i.CreatedAt,
 		&i.LastSeenAt,
@@ -162,19 +180,35 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level FROM sessions WHERE id = $1
+SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level FROM sessions WHERE id = $1
 `
 
 type GetSessionParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (Session, error) {
+type GetSessionRow struct {
+	ID             string             `json:"id"`
+	UserID         string             `json:"user_id"`
+	MemberID       pgtype.Text        `json:"member_id"`
+	TokenHash      []byte             `json:"token_hash"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	Ip             pgtype.Text        `json:"ip"`
+	UserAgent      pgtype.Text        `json:"user_agent"`
+	AuthTime       pgtype.Timestamptz `json:"auth_time"`
+	AssuranceLevel int16              `json:"assurance_level"`
+}
+
+func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
 	row := q.db.QueryRow(ctx, getSession, arg.ID)
-	var i Session
+	var i GetSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
+		&i.MemberID,
 		&i.TokenHash,
 		&i.CreatedAt,
 		&i.LastSeenAt,
@@ -339,6 +373,22 @@ type RevokeUserSessionsParams struct {
 
 func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessionsParams) error {
 	_, err := q.db.Exec(ctx, revokeUserSessions, arg.UserID)
+	return err
+}
+
+const setSessionMember = `-- name: SetSessionMember :exec
+UPDATE sessions SET member_id = $1, last_seen_at = now()
+WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL
+`
+
+type SetSessionMemberParams struct {
+	MemberID pgtype.Text `json:"member_id"`
+	ID       string      `json:"id"`
+	UserID   string      `json:"user_id"`
+}
+
+func (q *Queries) SetSessionMember(ctx context.Context, arg SetSessionMemberParams) error {
+	_, err := q.db.Exec(ctx, setSessionMember, arg.MemberID, arg.ID, arg.UserID)
 	return err
 }
 

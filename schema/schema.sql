@@ -490,3 +490,9 @@ SET status = CASE WHEN enabled THEN 'active' ELSE 'disabled' END
 WHERE status = 'active' AND enabled = false;
 
 ALTER TABLE permissions DROP COLUMN IF EXISTS enabled;
+
+
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS member_id text REFERENCES members(id);
+
+CREATE INDEX IF NOT EXISTS sessions_member_idx ON sessions(member_id);

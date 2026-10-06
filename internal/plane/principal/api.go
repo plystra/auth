@@ -36,6 +36,7 @@ type AuthOutput struct {
 type RefreshInput struct {
 	Body struct {
 		RefreshToken string `json:"refresh_token"`
+		MemberID     string `json:"member_id,omitempty"`
 	}
 }
 type RefreshOutput struct {
@@ -126,7 +127,7 @@ func (a *API) refresh(ctx context.Context, in *RefreshInput) (*RefreshOutput, er
 	if strings.TrimSpace(in.Body.RefreshToken) == "" {
 		return nil, apierr.New("invalid_request", "refresh_token is required")
 	}
-	tokens, e := a.Sessions.Refresh(ctx, in.Body.RefreshToken)
+	tokens, e := a.Sessions.RefreshForMember(ctx, in.Body.RefreshToken, strings.TrimSpace(in.Body.MemberID))
 	if e != nil {
 		return nil, e
 	}

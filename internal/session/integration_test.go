@@ -189,6 +189,85 @@ func TestRefreshTokenUsesPlystraPrefixEntropyHashingAndHMACKeyRotation(t *testin
 	}
 }
 
+func TestRefreshCanSwitchBoundMemberAndUpdatesAccessClaims(t *testing.T) {
+	ctx := context.Background()
+	database, err := sessionDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_switch_test', 'switch@example.test', 'switch@example.test', 'test-password-hash', 'active');
+		INSERT INTO members (id, space_id, name, kind, type, binding_policy, status)
+		VALUES
+			('mem_switch_a', 'spc_01h00000000000000000000000', 'Switch A', 'user', 'human', 'single', 'active'),
+			('mem_switch_b', 'spc_01h00000000000000000000000', 'Switch B', 'user', 'human', 'single', 'active');
+		INSERT INTO user_members (user_id, member_id, status)
+		VALUES ('usr_switch_test', 'mem_switch_a', 'active'), ('usr_switch_test', 'mem_switch_b', 'active');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &Service{
+		Store:    st,
+		Signer:   signer,
+		HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))},
+		Settings: func(context.Context) (Settings, error) {
+			return Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	issued, err := sessions.CreateForMember(ctx, "usr_switch_test", "mem_switch_a", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := signer.Verify(issued.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initial.MemberID != "mem_switch_a" || initial.SpaceID != "spc_01h00000000000000000000000" || len(initial.AMR) != 1 || initial.AMR[0] != "pwd" {
+		t.Fatalf("initial access claims = %+v, want member A, default Space and pwd amr", initial)
+	}
+	if _, err := sessions.RefreshForMember(ctx, issued.RefreshToken, "mem_switch_missing"); err == nil {
+		t.Fatal("refresh accepted an unbound member")
+	} else {
+		var public *apierr.Error
+		if !errors.As(err, &public) || public.Code != "PERMISSION_DENIED" {
+			t.Fatalf("unbound member error = %v, want PERMISSION_DENIED", err)
+		}
+	}
+	switched, err := sessions.RefreshForMember(ctx, issued.RefreshToken, "mem_switch_b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := signer.Verify(switched.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.MemberID != "mem_switch_b" || claims.SpaceID != "spc_01h00000000000000000000000" {
+		t.Fatalf("switched access claims = %+v, want member B and default Space", claims)
+	}
+	continued, err := sessions.Refresh(ctx, switched.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err = signer.Verify(continued.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.MemberID != "mem_switch_b" || claims.SpaceID != "spc_01h00000000000000000000000" {
+		t.Fatalf("continued access claims = %+v, want member B and default Space", claims)
+	}
+}
+
 func hmacSHA256(key []byte, value string) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))

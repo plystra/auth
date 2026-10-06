@@ -269,6 +269,7 @@ type Session struct {
 	UserAgent      pgtype.Text        `json:"user_agent"`
 	AuthTime       pgtype.Timestamptz `json:"auth_time"`
 	AssuranceLevel int16              `json:"assurance_level"`
+	MemberID       pgtype.Text        `json:"member_id"`
 }
 
 type Space struct {
