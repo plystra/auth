@@ -21,6 +21,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/oauth2 v0.37.0
+	pgregory.net/rapid v1.2.0
 )
 
 require (
