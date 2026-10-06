@@ -98,6 +98,56 @@ func TestTokenIntrospectionRequiresTheApplicationAudience(t *testing.T) {
 	}
 }
 
+func TestTokenIntrospectionRejectsInvalidExpiredAndRevokedTokens(t *testing.T) {
+	ctx := context.Background()
+	st, _, _, _, key, sessions := newServerFixture(t)
+	api := &API{Applications: &application.Service{Store: st}, Sessions: sessions}
+	issued, err := sessions.Create(ctx, "usr_server_actor", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claims := security.Claims{
+		Issuer: sessions.Signer.Issuer(), Subject: "usr_server_actor", Audience: "server-test-client",
+		ExpiresAt: now.Add(time.Minute).Unix(), IssuedAt: now.Unix(), JWTID: "jti_introspection_test",
+		SessionID: issued.SessionID, Type: "user",
+	}
+	valid, err := sessions.Signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(token string) bool {
+		t.Helper()
+		out, checkErr := api.introspect(ctx, &IntrospectInput{Authorization: "Bearer " + key, Body: struct {
+			Token string `json:"token"`
+		}{Token: token}})
+		if checkErr != nil {
+			t.Fatal(checkErr)
+		}
+		return out.Body.Data.Active
+	}
+	if !check(valid) {
+		t.Fatal("live application-audience token was not active")
+	}
+	if check("not-a-token") {
+		t.Fatal("invalid token was active")
+	}
+	claims.ExpiresAt = now.Add(-time.Second).Unix()
+	expired, err := sessions.Signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if check(expired) {
+		t.Fatal("expired token was active")
+	}
+	if err := sessions.Revoke(ctx, issued.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	if check(valid) {
+		t.Fatal("revoked token was active")
+	}
+}
+
 func newServerFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, string, *session.Service) {
 	t.Helper()
 	ctx := context.Background()
