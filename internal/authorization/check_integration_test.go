@@ -275,3 +275,81 @@ func TestPermissionDirectoryUsesStatusAndDisablesImmediately(t *testing.T) {
 		t.Fatalf("disabled permission decision = %+v, want PERMISSION_DISABLED", decision)
 	}
 }
+
+func TestBuiltinGovernancePermissionsMatchAuthorizationModel(t *testing.T) {
+	ctx := context.Background()
+	st, _, _, _ := newBindingFixture(t)
+	type expectedPermission struct {
+		kinds     []string
+		risk      string
+		approval  string
+		delegable bool
+	}
+	want := map[string]expectedPermission{
+		"auth.spaces:manage":        {[]string{"human", "agent"}, "critical", "none", true},
+		"auth.members:read":         {[]string{"human", "agent", "application"}, "low", "none", true},
+		"auth.members:manage":       {[]string{"human", "agent", "application"}, "high", "none", true},
+		"auth.roles:manage":         {[]string{"human", "agent"}, "high", "none", true},
+		"auth.grants:assign":        {[]string{"human", "agent", "application"}, "high", "none", true},
+		"auth.assign_rights:manage": {[]string{"human", "agent"}, "critical", "none", true},
+		"auth.envelopes:manage":     {[]string{"human", "agent"}, "critical", "none", true},
+		"auth.audit:read":           {[]string{"human", "agent"}, "high", "none", true},
+		"auth.authz:check":          {[]string{"application"}, "low", "none", true},
+		"auth.tokens:introspect":    {[]string{"application"}, "high", "none", true},
+		"auth.bindings:manage":      {[]string{"human", "agent"}, "critical", "required", true},
+		"auth.agents:create":        {[]string{"human", "agent", "application"}, "high", "none", true},
+		"auth.groups:manage":        {[]string{"human", "agent", "application"}, "high", "none", true},
+		"auth.applications:manage":  {[]string{"human", "agent"}, "critical", "none", true},
+		"auth.connections:manage":   {[]string{"human", "agent"}, "critical", "required", true},
+		"auth.audit:write":          {[]string{"application"}, "low", "none", true},
+		"auth.authz:explain":        {[]string{"application"}, "high", "none", true},
+		"auth.users:manage":         {[]string{"application"}, "critical", "none", true},
+		"auth.users:impersonate":    {[]string{"human"}, "critical", "none", false},
+		"auth.envelopes:apply":      {[]string{"application"}, "critical", "none", false},
+	}
+	rows, err := st.Pool.Query(ctx, `
+		SELECT key, principal_kinds, risk, agent_approval, delegable
+		FROM permissions
+		WHERE key LIKE 'auth.%'
+		ORDER BY key
+	`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, len(want))
+	for rows.Next() {
+		var key, risk, approval string
+		var rawKinds []byte
+		var delegable bool
+		if err := rows.Scan(&key, &rawKinds, &risk, &approval, &delegable); err != nil {
+			t.Fatal(err)
+		}
+		expected, ok := want[key]
+		if !ok {
+			t.Fatalf("unexpected built-in permission %q", key)
+		}
+		var kinds []string
+		if err := json.Unmarshal(rawKinds, &kinds); err != nil {
+			t.Fatal(err)
+		}
+		if len(kinds) != len(expected.kinds) {
+			t.Fatalf("%s principal_kinds = %v, want %v", key, kinds, expected.kinds)
+		}
+		for i := range kinds {
+			if kinds[i] != expected.kinds[i] {
+				t.Fatalf("%s principal_kinds = %v, want %v", key, kinds, expected.kinds)
+			}
+		}
+		if risk != expected.risk || approval != expected.approval || delegable != expected.delegable {
+			t.Fatalf("%s metadata = risk:%s approval:%s delegable:%v, want risk:%s approval:%s delegable:%v", key, risk, approval, delegable, expected.risk, expected.approval, expected.delegable)
+		}
+		seen[key] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("built-in permission count = %d, want %d", len(seen), len(want))
+	}
+}
