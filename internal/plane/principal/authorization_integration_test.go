@@ -135,22 +135,31 @@ func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := func() *httptest.ResponseRecorder {
+	request := func(path string) *httptest.ResponseRecorder {
 		t.Helper()
-		r := httptest.NewRequest(http.MethodGet, "/v1/me/members", nil)
+		r := httptest.NewRequest(http.MethodGet, path, nil)
 		r.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, r)
 		return w
 	}
-	w := request()
+	w := request("/v1/me/members")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+actor.ID+`"`) || !strings.Contains(w.Body.String(), `"id":"`+second.ID+`"`) {
 		t.Fatalf("active member bindings = %d %s, want both members", w.Code, w.Body.String())
+	}
+	if w = request("/v1/me/members?type=human"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+second.ID+`"`) {
+		t.Fatalf("human member filter = %d %s, want both human members", w.Code, w.Body.String())
+	}
+	if w = request("/v1/me/members?type=agent"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"data":[]`) {
+		t.Fatalf("agent member filter = %d %s, want an empty result", w.Code, w.Body.String())
+	}
+	if w = request("/v1/me/members?type=unknown"); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), `"code":"VALIDATION_FAILED"`) {
+		t.Fatalf("invalid member filter = %d %s, want VALIDATION_FAILED", w.Code, w.Body.String())
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET expires_at = now() - interval '1 minute' WHERE user_id = 'usr_principal_actor' AND member_id = $1`, second.ID); err != nil {
 		t.Fatal(err)
 	}
-	w = request()
+	w = request("/v1/me/members")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"id":"`+actor.ID+`"`) || strings.Contains(w.Body.String(), `"id":"`+second.ID+`"`) {
 		t.Fatalf("revoked member bindings = %d %s, want only the active member", w.Code, w.Body.String())
 	}

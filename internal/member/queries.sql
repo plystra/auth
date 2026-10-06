@@ -49,6 +49,18 @@ WHERE um.user_id = sqlc.arg(user_id)
   AND m.status = 'active'
 ORDER BY m.created_at, m.id;
 
+-- name: ListMembersForUserByType :many
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at
+FROM members m
+JOIN user_members um ON um.member_id = m.id
+WHERE um.user_id = sqlc.arg(user_id)
+  AND um.status = 'active'
+  AND (um.expires_at IS NULL OR um.expires_at > now())
+  AND um.revoked_at IS NULL
+  AND m.status = 'active'
+  AND m.type = sqlc.arg(member_type)
+ORDER BY m.created_at, m.id;
+
 -- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = sqlc.arg(space_id) AND status <> 'removed'

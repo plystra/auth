@@ -392,8 +392,22 @@ func (s *Service) GetMemberForUser(ctx context.Context, userID, spaceID string) 
 // ListMembersForUser returns the user's active, unexpired member bindings
 // across all Spaces. Revoked bindings and inactive members are omitted by the
 // query so callers cannot accidentally expose stale identities.
-func (s *Service) ListMembersForUser(ctx context.Context, userID string) ([]Member, error) {
-	rows, err := s.Store.Queries().ListMembersForUser(ctx, db.ListMembersForUserParams{UserID: userID})
+func (s *Service) ListMembersForUser(ctx context.Context, userID, memberType string) ([]Member, error) {
+	if memberType != "" && memberType != "human" && memberType != "agent" && memberType != "application" {
+		return nil, apierr.New("VALIDATION_FAILED", "type must be human, agent, or application")
+	}
+	if memberType == "" {
+		rows, err := s.Store.Queries().ListMembersForUser(ctx, db.ListMembersForUserParams{UserID: userID})
+		if err != nil {
+			return nil, err
+		}
+		out := make([]Member, 0, len(rows))
+		for _, row := range rows {
+			out = append(out, Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status})
+		}
+		return out, nil
+	}
+	rows, err := s.Store.Queries().ListMembersForUserByType(ctx, db.ListMembersForUserByTypeParams{UserID: userID, MemberType: memberType})
 	if err != nil {
 		return nil, err
 	}

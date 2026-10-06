@@ -1526,6 +1526,62 @@ func (q *Queries) ListMembersForUser(ctx context.Context, arg ListMembersForUser
 	return items, nil
 }
 
+const listMembersForUserByType = `-- name: ListMembersForUserByType :many
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at
+FROM members m
+JOIN user_members um ON um.member_id = m.id
+WHERE um.user_id = $1
+  AND um.status = 'active'
+  AND (um.expires_at IS NULL OR um.expires_at > now())
+  AND um.revoked_at IS NULL
+  AND m.status = 'active'
+  AND m.type = $2
+ORDER BY m.created_at, m.id
+`
+
+type ListMembersForUserByTypeParams struct {
+	UserID     string `json:"user_id"`
+	MemberType string `json:"member_type"`
+}
+
+type ListMembersForUserByTypeRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListMembersForUserByType(ctx context.Context, arg ListMembersForUserByTypeParams) ([]ListMembersForUserByTypeRow, error) {
+	rows, err := q.db.Query(ctx, listMembersForUserByType, arg.UserID, arg.MemberType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMembersForUserByTypeRow{}
+	for rows.Next() {
+		var i ListMembersForUserByTypeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.Type,
+			&i.BindingPolicy,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembersInSpace = `-- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = $1 AND status <> 'removed'

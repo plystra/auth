@@ -47,6 +47,10 @@ type RefreshOutput struct {
 type BearerInput struct {
 	Authorization string `header:"Authorization"`
 }
+type MembersInput struct {
+	Authorization string `header:"Authorization"`
+	Type          string `query:"type"`
+}
 type MeOutput struct {
 	Body struct {
 		Data any `json:"data"`
@@ -179,7 +183,7 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	return out, nil
 }
 
-func (a *API) meMembers(ctx context.Context, in *BearerInput) (*MembersOutput, error) {
+func (a *API) meMembers(ctx context.Context, in *MembersInput) (*MembersOutput, error) {
 	parts := strings.Fields(in.Authorization)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
@@ -197,7 +201,7 @@ func (a *API) meMembers(ctx context.Context, in *BearerInput) (*MembersOutput, e
 	if claims.Type != "user" {
 		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
 	}
-	members, err := a.Authorization.ListMembersForUser(ctx, claims.Subject)
+	members, err := a.Authorization.ListMembersForUser(ctx, claims.Subject, strings.TrimSpace(in.Type))
 	if err != nil {
 		return nil, err
 	}
