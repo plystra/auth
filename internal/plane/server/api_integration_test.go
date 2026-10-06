@@ -211,12 +211,12 @@ func TestAuthzExplainHTTPUsesGoldenTraceAndAuditsDenials(t *testing.T) {
 		t.Fatalf("explain deny response = %+v", denyResponse.Data)
 	}
 	assertExplainGolden(t, "explain_deny.golden", denyResponse.Data)
-	var action string
-	if err := st.Pool.QueryRow(ctx, `SELECT action FROM audit_logs WHERE action = 'authz.explain' ORDER BY occurred_at DESC LIMIT 1`).Scan(&action); err != nil {
+	var action, outcome, resourceID string
+	if err := st.Pool.QueryRow(ctx, `SELECT action, outcome, resource_id FROM audit_logs WHERE action = 'authz.explain' ORDER BY occurred_at DESC LIMIT 1`).Scan(&action, &outcome, &resourceID); err != nil {
 		t.Fatal(err)
 	}
-	if action != "authz.explain" {
-		t.Fatalf("explain deny audit action = %q", action)
+	if action != "authz.explain" || outcome != "deny" || resourceID != member.ID {
+		t.Fatalf("explain deny audit = action=%q outcome=%q resource=%q", action, outcome, resourceID)
 	}
 
 	apps := &application.Service{Store: st}
