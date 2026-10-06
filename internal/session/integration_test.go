@@ -1,0 +1,109 @@
+package session
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/store"
+	"github.com/plystra/auth/internal/testdb"
+)
+
+var sessionDB *testdb.Harness
+
+func TestMain(m *testing.M) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var err error
+	sessionDB, err = testdb.Start(ctx)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	code := m.Run()
+	if err := sessionDB.Close(context.Background()); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+func TestRefreshTokenUsesPlystraPrefixEntropyHashingAndHMACKeyRotation(t *testing.T) {
+	ctx := context.Background()
+	database, err := sessionDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_refresh_test', 'refresh@example.test', 'refresh@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := func(context.Context) (Settings, error) {
+		return Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+	}
+	oldKey := []byte(strings.Repeat("o", 32))
+	newKey := []byte(strings.Repeat("n", 32))
+	legacy := &Service{Store: st, Signer: signer, HMACKeys: [][]byte{oldKey}, Settings: settings}
+	rotating := &Service{Store: st, Signer: signer, HMACKeys: [][]byte{newKey, oldKey}, Settings: settings}
+	issued, err := legacy.Create(ctx, "usr_refresh_test", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(issued.RefreshToken, "ply_rt_") {
+		t.Fatalf("refresh token prefix = %q, want ply_rt_", issued.RefreshToken)
+	}
+	rawEntropy, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(issued.RefreshToken, "ply_rt_"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rawEntropy) != 32 {
+		t.Fatalf("refresh token entropy = %d bytes, want 32", len(rawEntropy))
+	}
+	var stored []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT token_hash FROM refresh_tokens WHERE session_id = $1`, issued.SessionID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(stored, []byte(issued.RefreshToken)) || !bytes.Equal(stored, hmacSHA256(oldKey, issued.RefreshToken)) {
+		t.Fatal("refresh token was not stored as an HMAC hash")
+	}
+	rotated, err := rotating.Refresh(ctx, issued.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(rotated.RefreshToken, "ply_rt_") {
+		t.Fatalf("rotated refresh token prefix = %q, want ply_rt_", rotated.RefreshToken)
+	}
+	var rotatedHash []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT token_hash FROM refresh_tokens WHERE session_id = $1 AND used_at IS NULL`, issued.SessionID).Scan(&rotatedHash); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(rotatedHash, hmacSHA256(newKey, rotated.RefreshToken)) {
+		t.Fatal("rotated refresh token was not hashed with the current HMAC key")
+	}
+}
+
+func hmacSHA256(key []byte, value string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil)
+}

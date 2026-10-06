@@ -73,7 +73,7 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 	if e != nil {
 		return Tokens{}, e
 	}
-	refresh, e := randomToken("rfr_")
+	refresh, e := randomToken("ply_rt_")
 	if e != nil {
 		return Tokens{}, e
 	}
@@ -106,7 +106,7 @@ func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 	if err != nil {
 		return Tokens{}, err
 	}
-	next, err := randomToken("rfr_")
+	next, err := randomToken("ply_rt_")
 	if err != nil {
 		return Tokens{}, err
 	}
