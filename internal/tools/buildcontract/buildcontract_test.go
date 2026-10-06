@@ -18,6 +18,7 @@ func TestMakeCheckContainsRequiredGates(t *testing.T) {
 	for _, required := range []string{
 		"check: gen",
 		"git diff --exit-code",
+		"$(MAKE) web-check",
 		"$(GO) tool golangci-lint run",
 		"$(GO) test -race ./...",
 		"$(GO) tool govulncheck ./...",
@@ -25,6 +26,9 @@ func TestMakeCheckContainsRequiredGates(t *testing.T) {
 		if !strings.Contains(makefile, required) {
 			t.Errorf("Makefile is missing check gate %q", required)
 		}
+	}
+	if !strings.Contains(makefile, "web-check:") || !strings.Contains(makefile, "bun run typecheck") || !strings.Contains(makefile, "bun test --run") {
+		t.Error("Makefile is missing the frontend typecheck and test gate")
 	}
 }
 
