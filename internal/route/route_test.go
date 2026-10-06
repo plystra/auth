@@ -31,6 +31,43 @@ func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
 	}
 }
 
+func TestPrincipalCORSUsesExplicitOriginPolicy(t *testing.T) {
+	nextCalled := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		nextCalled = true
+		w.WriteHeader(http.StatusNoContent)
+	})
+	policy := func(_ context.Context, origin string) (bool, error) { return origin == "https://app.test", nil }
+	handler := MiddlewareWithOriginPolicy(Principal, next, policy)
+
+	denied := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	denied.Header.Set("Origin", "https://evil.test")
+	deniedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(deniedResponse, denied)
+	if deniedResponse.Code != http.StatusForbidden || !strings.Contains(deniedResponse.Body.String(), "CORS_ORIGIN_REJECTED") {
+		t.Fatalf("denied CORS response = (%d, %s), want 403 CORS_ORIGIN_REJECTED", deniedResponse.Code, deniedResponse.Body.String())
+	}
+	if nextCalled {
+		t.Fatal("principal handler ran for a disallowed origin")
+	}
+
+	preflight := httptest.NewRequest(http.MethodOptions, "http://auth.test/v1/me", nil)
+	preflight.Header.Set("Origin", "https://app.test")
+	preflightResponse := httptest.NewRecorder()
+	handler.ServeHTTP(preflightResponse, preflight)
+	if preflightResponse.Code != http.StatusNoContent || preflightResponse.Header().Get("Access-Control-Allow-Origin") != "https://app.test" || preflightResponse.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Fatalf("allowed preflight = (%d, %v), want explicit CORS headers", preflightResponse.Code, preflightResponse.Header())
+	}
+
+	allowed := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	allowed.Header.Set("Origin", "https://app.test")
+	allowedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(allowedResponse, allowed)
+	if allowedResponse.Code != http.StatusNoContent || allowedResponse.Header().Get("Access-Control-Allow-Origin") != "https://app.test" {
+		t.Fatalf("allowed CORS response = (%d, %v), want explicit origin", allowedResponse.Code, allowedResponse.Header())
+	}
+}
+
 func TestMiddlewarePreservesValidRequestIDAndReplacesOversizedID(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	valid := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)

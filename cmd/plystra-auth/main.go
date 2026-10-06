@@ -193,7 +193,19 @@ func serve(ctx context.Context) error {
 			return err
 		})
 	})
-	servers := []*http.Server{{Addr: c.HTTPAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Principal, principalMux), "principal")}, {Addr: c.ServerAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server")}, {Addr: c.OpsAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops")}, {Addr: ":8090", Handler: health}}
+	principalOriginPolicy := func(ctx context.Context, origin string) (bool, error) {
+		v, err := settings.Get(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, allowed := range v.AllowedOrigins {
+			if origin == allowed {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	servers := []*http.Server{{Addr: c.HTTPAddr, Handler: otelhttp.NewHandler(route.MiddlewareWithOriginPolicy(route.Principal, principalMux, principalOriginPolicy), "principal")}, {Addr: c.ServerAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server")}, {Addr: c.OpsAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops")}, {Addr: ":8090", Handler: health}}
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)

@@ -44,6 +44,7 @@ type Spec struct {
 	NonJSON            bool
 }
 type Handler func(http.ResponseWriter, *http.Request)
+type OriginPolicy func(context.Context, string) (bool, error)
 
 var registry struct {
 	sync.RWMutex
@@ -115,6 +116,14 @@ func WithPlane(ctx context.Context, p Plane) context.Context {
 	return context.WithValue(ctx, planeKey{}, p)
 }
 func Middleware(p Plane, next http.Handler) http.Handler {
+	return middleware(p, next, nil)
+}
+
+func MiddlewareWithOriginPolicy(p Plane, next http.Handler, policy OriginPolicy) http.Handler {
+	return middleware(p, next, policy)
+}
+
+func middleware(p Plane, next http.Handler, originPolicy OriginPolicy) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if id == "" || len(id) > 128 {
@@ -128,6 +137,32 @@ func Middleware(p Plane, next http.Handler) http.Handler {
 		if p == Server && r.Header.Get("Origin") != "" {
 			apierr.Write(w, apierr.WithRequestID(apierr.New("BROWSER_ORIGIN_REJECTED", "service endpoints do not accept browser origins"), id))
 			return
+		}
+		if p == Principal && r.Header.Get("Origin") != "" {
+			origin := r.Header.Get("Origin")
+			allowed := false
+			var err error
+			if originPolicy != nil {
+				allowed, err = originPolicy(ctx, origin)
+			}
+			if err != nil {
+				apierr.Write(w, apierr.WithRequestID(apierr.New("UNAVAILABLE", "origin policy is temporarily unavailable"), id))
+				return
+			}
+			if !allowed {
+				apierr.Write(w, apierr.WithRequestID(apierr.New("CORS_ORIGIN_REJECTED", "the origin is not allowed"), id))
+				return
+			}
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-Request-Id")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Expose-Headers", "X-Request-Id")
+			w.Header().Add("Vary", "Origin")
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
