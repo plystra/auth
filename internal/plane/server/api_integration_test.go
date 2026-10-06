@@ -72,6 +72,48 @@ func TestAuthzCheckSubjectAssertionAndKeyScope(t *testing.T) {
 	}
 }
 
+func TestAuthzCheckTokenUsesSelectedMemberWhenUserHasMultipleMembers(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, key, sessions := newServerFixture(t)
+	selected, err := authz.CreateMember(ctx, actor.ID, "usr_server_actor", spaceID, "second identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := sessions.CreateForMember(ctx, "usr_server_actor", selected.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sessions.Signer.Verify(issued.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims.Audience = "server-test-client"
+	token, err := sessions.Signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	resolved, err := api.resolveSubject(ctx, application.Key{SpaceID: spaceID, ClientID: "server-test-client"}, CheckSubject{Token: token}, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ID != selected.ID {
+		t.Fatalf("authz.check token resolved %q, want selected member %q", resolved.ID, selected.ID)
+	}
+	out, err := api.check(ctx, &CheckInput{
+		Authorization: "Bearer " + key,
+		Body: CheckBody{Subject: CheckSubject{Token: token}, Action: "self:read", Resource: CheckResource{
+			Type: "member", ID: selected.ID, SpaceID: spaceID, OwnerMemberID: selected.ID,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Body.Data.Decision != "deny" || out.Body.Data.DenyCode != "NO_MATCHING_PERMISSION" {
+		t.Fatalf("authz.check evaluated %+v, want selected member without a grant", out.Body.Data)
+	}
+}
+
 func TestTokenIntrospectionRequiresTheApplicationAudience(t *testing.T) {
 	ctx := context.Background()
 	st, _, _, spaceID, key, sessions := newServerFixture(t)

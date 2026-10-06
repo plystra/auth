@@ -270,8 +270,11 @@ func (a *API) currentMember(ctx context.Context, authorization string) (string, 
 		if err != nil {
 			return "", "", err
 		}
-		binding, bindErr := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
-		if bindErr != nil || binding.ID != member.ID {
+		bound, bindErr := a.Authorization.UserBoundToMember(ctx, claims.Subject, member.ID)
+		if bindErr != nil {
+			return "", "", bindErr
+		}
+		if !bound {
 			return "", "", apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
 		}
 		return member.ID, claims.Subject, nil

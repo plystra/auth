@@ -189,7 +189,15 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		if a.Authorization == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 		}
-		member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+		if claims.MemberID != "" && subject.MemberID != "" && subject.MemberID != claims.MemberID {
+			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
+		}
+		var member authorization.Member
+		if claims.MemberID != "" {
+			member, err = a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
+		} else {
+			member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+		}
 		if err != nil {
 			return resolvedSubject{}, err
 		}

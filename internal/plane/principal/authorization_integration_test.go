@@ -75,6 +75,33 @@ func TestIdentityEndpointsUseAuthorizationEngine(t *testing.T) {
 	}
 }
 
+func TestCurrentMemberUsesSelectedBindingWhenUserHasMultipleMembers(t *testing.T) {
+	ctx := context.Background()
+	_, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	selected, err := authz.CreateMember(ctx, actor.ID, "usr_principal_actor", spaceID, "second identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, selected.ID, []string{"self:read"}, "space", spaceID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", selected.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: authz.Store}}
+	memberID, userID, err := api.currentMember(ctx, "Bearer "+tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if memberID != selected.ID || userID != "usr_principal_actor" {
+		t.Fatalf("current member = %q, user = %q; want selected member", memberID, userID)
+	}
+	if _, err := api.listAgents(ctx, &agentsListInput{Authorization: "Bearer " + tokens.AccessToken}); err != nil {
+		t.Fatalf("selected member could not use a permitted endpoint: %v", err)
+	}
+}
+
 func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
