@@ -191,6 +191,35 @@ func TestSameUserCanBindMultipleMembersInOneSpace(t *testing.T) {
 	}
 }
 
+func TestExpiredMemberBindingIsNotEligibleForCurrentMember(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	if err := insertUser(ctx, st, "usr_expiring_binding", "expiring-binding@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Expiring identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_expiring_binding"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET expires_at = now() - interval '1 minute' WHERE user_id = 'usr_expiring_binding' AND member_id = $1`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.GetMemberForUser(ctx, "usr_expiring_binding", spaceID); err == nil {
+		t.Fatal("expired binding was accepted as the current member")
+	} else {
+		assertAPIErrorCode(t, err, "PERMISSION_DENIED")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET expires_at = now() + interval '1 hour' WHERE user_id = 'usr_expiring_binding' AND member_id = $1`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := svc.GetMemberForUser(ctx, "usr_expiring_binding", spaceID); err != nil || got.ID != target.ID {
+		t.Fatalf("future binding lookup = (%+v, %v), want target member", got, err)
+	}
+}
+
 func TestBindingPolicyChangeRequiresPermission(t *testing.T) {
 	ctx := context.Background()
 	_, svc, actor, spaceID := newBindingFixture(t)
