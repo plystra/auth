@@ -15,6 +15,7 @@ import (
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/security"
 )
 
 func opaqueToken(prefix string) (string, []byte, error) {
@@ -75,6 +76,9 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (strin
 func (s *Service) ResetPassword(ctx context.Context, raw, password string) error {
 	if len(password) < 12 {
 		return apierr.New("invalid_request", "password does not meet the configured minimum length")
+	}
+	if len(password) > security.MaxPasswordBytes {
+		return apierr.New("invalid_request", "password exceeds the maximum length")
 	}
 	hash, e := s.Passwords.Hash(password)
 	if e != nil {

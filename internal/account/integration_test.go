@@ -172,6 +172,73 @@ func TestRegistrationCreatesDefaultMemberBindingAndGrant(t *testing.T) {
 	}
 }
 
+func TestLoginRehashesLegacyPasswordAndRejectsOverlongInput(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	legacy := security.PasswordHasher{Time: 1, Memory: 8 * 1024, Threads: 1, KeyLen: 32, SaltLen: 16}
+	const password = "a sufficiently long password"
+	legacyHash, err := legacy.Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ($1, $2, $2, $3, 'active')
+	`, "usr_rehash_user", "rehash@example.test", legacyHash); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store:    st,
+		Signer:   signer,
+		HMACKeys: [][]byte{[]byte(strings.Repeat("h", 32))},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessions, Settings: &space.Service{Store: st}}
+	result, err := accounts.Login(ctx, LoginInput{Email: "REHASH@example.test", Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Tokens == nil || result.Tokens.AccessToken == "" {
+		t.Fatal("successful login did not issue an access token")
+	}
+	var upgraded string
+	if err := st.Pool.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, "usr_rehash_user").Scan(&upgraded); err != nil {
+		t.Fatal(err)
+	}
+	if upgraded == legacyHash || accounts.Passwords.NeedsRehash(upgraded) || !accounts.Passwords.Verify(password, upgraded) {
+		t.Fatal("legacy password hash was not upgraded to the current parameters")
+	}
+	var audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE actor_id = $1 AND action = 'auth.password.rehash'`, "usr_rehash_user").Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("password rehash audit count = %d, want 1", audits)
+	}
+	var sessionsBefore int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id = $1`, "usr_rehash_user").Scan(&sessionsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "rehash@example.test", Password: strings.Repeat("x", security.MaxPasswordBytes+1)}); err == nil {
+		t.Fatal("overlong login password was accepted")
+	} else {
+		assertAccountError(t, err, "invalid_credentials")
+	}
+	var sessionsAfter int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id = $1`, "usr_rehash_user").Scan(&sessionsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if sessionsAfter != sessionsBefore {
+		t.Fatalf("overlong login created a session: before=%d after=%d", sessionsBefore, sessionsAfter)
+	}
+}
+
 func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)

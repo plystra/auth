@@ -75,6 +75,9 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 	if len(in.Password) < settings.PasswordMinLength {
 		return AuthResult{}, apierr.New("invalid_request", "password does not meet the configured minimum length")
 	}
+	if len(in.Password) > security.MaxPasswordBytes {
+		return AuthResult{}, apierr.New("invalid_request", "password exceeds the maximum length")
+	}
 	hash, e := s.Passwords.Hash(in.Password)
 	if e != nil {
 		return AuthResult{}, e
@@ -161,8 +164,22 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 		}
 		return AuthResult{}, e
 	}
-	if u.DisabledAt.Valid || !s.Passwords.Verify(in.Password, u.PasswordHash) {
+	if len(in.Password) > security.MaxPasswordBytes || u.DisabledAt.Valid || !s.Passwords.Verify(in.Password, u.PasswordHash) {
 		return AuthResult{}, apierr.New("invalid_credentials", "email or password is incorrect")
+	}
+	if s.Passwords.NeedsRehash(u.PasswordHash) {
+		upgraded, hashErr := s.Passwords.Hash(in.Password)
+		if hashErr != nil {
+			return AuthResult{}, hashErr
+		}
+		if hashErr = s.Store.InTx(ctx, func(q *db.Queries) error {
+			if err := q.UpdatePassword(ctx, db.UpdatePasswordParams{ID: u.ID, PasswordHash: upgraded}); err != nil {
+				return err
+			}
+			return audit.Write(ctx, q, "public", u.ID, "auth.password.rehash", u.ID, "success")
+		}); hashErr != nil {
+			return AuthResult{}, hashErr
+		}
 	}
 	if u.Status == "pending" && settings.RequireEmailVerification {
 		return AuthResult{}, apierr.New("EMAIL_VERIFICATION_REQUIRED", "verify your email before signing in")
