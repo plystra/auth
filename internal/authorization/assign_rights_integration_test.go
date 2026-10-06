@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+	"time"
 
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/store"
 )
 
 func TestTopLevelSpaceCreatorReceivesDefaultAssignmentRight(t *testing.T) {
@@ -127,5 +130,242 @@ func TestAssignmentRightConstraintsAndActiveLookup(t *testing.T) {
 	rights, err := st.Queries().ListActiveAssignRightsForHolder(ctx, db.ListActiveAssignRightsForHolderParams{HolderMemberID: actor.ID})
 	if err != nil || len(rights) != 0 {
 		t.Fatalf("revoked assignment right remains active: %v, %v", rights, err)
+	}
+}
+
+func TestHumanCanDelegateCoveredAssignmentRightAndRevokeItWithoutRemovingGrants(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	if err != nil {
+		t.Fatalf("covered delegation failed: %v", err)
+	}
+	if right.Source != "delegated" || right.ParentID == "" || right.HolderMemberID != target.ID {
+		t.Fatalf("delegated right = %+v", right)
+	}
+	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, "space", spaceID); err != nil {
+		t.Fatalf("grant before revocation: %v", err)
+	}
+	if err := svc.RevokeAssignmentRight(ctx, actor.ID, spaceID, right.ID); err != nil {
+		t.Fatalf("revoke delegated right: %v", err)
+	}
+	var revoked bool
+	if err := st.Pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM assign_rights WHERE id = $1`, right.ID).Scan(&revoked); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Fatal("delegated right was not revoked")
+	}
+	var grants int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, target.ID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 1 {
+		t.Fatalf("revoking assignment right removed %d existing grants", grants)
+	}
+}
+
+func TestHumanCanDelegateAssignmentRightAnchoredAtGroup(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Group administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_delegated_assignment"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, kind, status) VALUES ($1, $2, 'Delegated group', 'standard', 'active')`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	right, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, "", groupID, true, false, nil)
+	if err != nil {
+		t.Fatalf("group anchored delegation failed: %v", err)
+	}
+	if right.AnchorGroupID != groupID || right.AnchorSpaceID != "" || !right.CoversSubtree {
+		t.Fatalf("group anchored right = %+v", right)
+	}
+}
+
+func TestAssignmentRightDelegationRejectsUncoveredPermissionAndSubtreeExpansion(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name   string
+		mutate func(*store.Store, string) error
+		want   string
+	}{
+		{
+			name: "permission outside parent set",
+			mutate: func(st *store.Store, actorID string) error {
+				_, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET permission_keys = '["auth.members:manage"]'::jsonb WHERE holder_member_id = $1`, actorID)
+				return err
+			},
+			want: "AUTHORITY_DELTA_NOT_COVERED",
+		},
+		{
+			name: "parent cannot cover subtree",
+			mutate: func(st *store.Store, actorID string) error {
+				_, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = false WHERE holder_member_id = $1`, actorID)
+				return err
+			},
+			want: "AUTHORITY_DELTA_NOT_COVERED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, svc, actor, spaceID := newBindingFixture(t)
+			target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.mutate(st, actor.ID); err != nil {
+				t.Fatal(err)
+			}
+			coversSubtree := tc.name == "parent cannot cover subtree"
+			permissions := []string{"auth.members:manage"}
+			if tc.name == "permission outside parent set" {
+				permissions = []string{"auth.members:manage", "auth.roles:manage"}
+			}
+			_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, permissions, spaceID, "", coversSubtree, false, nil)
+			assertAPIErrorCode(t, err, tc.want)
+		})
+	}
+}
+
+func TestAssignmentRightDelegationRequiresRedelegationAndDelegateEnvelope(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		setup func(*store.Store, string, string) error
+	}{
+		{
+			name: "parent cannot redelegate",
+			setup: func(st *store.Store, actorID, _ string) error {
+				_, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET can_redelegate = false WHERE holder_member_id = $1`, actorID)
+				return err
+			},
+		},
+		{
+			name: "envelope only assign",
+			setup: func(st *store.Store, _, spaceID string) error {
+				if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1) ON CONFLICT DO NOTHING`, spaceID); err != nil {
+					return err
+				}
+				_, err := st.Pool.Exec(ctx, `
+					INSERT INTO space_envelope_entries (space_id, permission_id, mode)
+					SELECT $1, id, CASE key WHEN 'auth.members:manage' THEN 'assign' ELSE 'delegate' END
+					FROM permissions WHERE key IN ('auth.members:manage', 'auth.assign_rights:manage')
+					ON CONFLICT (space_id, permission_id) DO UPDATE SET mode = EXCLUDED.mode
+				`, spaceID)
+				return err
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, svc, actor, spaceID := newBindingFixture(t)
+			target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := tc.setup(st, actor.ID, spaceID); err != nil {
+				t.Fatal(err)
+			}
+			_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+			assertAPIErrorCode(t, err, map[string]string{"parent cannot redelegate": "AUTHORITY_DELTA_NOT_COVERED", "envelope only assign": "PERMISSION_OUTSIDE_ENVELOPE"}[tc.name])
+		})
+	}
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1) ON CONFLICT DO NOTHING`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO space_envelope_entries (space_id, permission_id, mode)
+		SELECT $1, id, 'delegate' FROM permissions WHERE key IN ('auth.members:manage', 'auth.assign_rights:manage')
+		ON CONFLICT (space_id, permission_id) DO UPDATE SET mode = EXCLUDED.mode
+	`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil); err != nil {
+		t.Fatalf("delegate envelope should allow delegation: %v", err)
+	}
+}
+
+func TestAssignmentRightDelegationRejectsOutOfSpaceHolderExpiredChildAndAgentActor(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherMember, err := svc.CreateSpace(ctx, "usr_binding_actor", "Other Space", "other-assignment-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, otherMember.SpaceID, "", false, false, nil)
+	assertAPIErrorCode(t, err, "SCOPE_OUT_OF_BOUNDS")
+
+	parentExpiry := time.Now().UTC().Add(time.Hour)
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET expires_at = $1 WHERE holder_member_id = $2`, parentExpiry, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	assertAPIErrorCode(t, err, "VALIDATION_FAILED")
+	childExpiry := parentExpiry.Add(-time.Minute)
+	_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, &childExpiry)
+	if err != nil {
+		t.Fatalf("child expiry within parent should be accepted: %v", err)
+	}
+
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: actor.ID, CreatedByUser: "usr_binding_actor", Name: "delegating-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateAssignmentRight(ctx, created.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestAssignmentRightAuditFailureRollsBackAndBumpsNoPolicyVersion(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Delegated administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_assignment_right_create_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF NEW.action = 'assign_right.create' THEN
+				RAISE EXCEPTION 'injected assignment right audit failure';
+			END IF;
+			RETURN NEW;
+		END $$;
+		CREATE TRIGGER reject_assignment_right_create_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_assignment_right_create_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	var before int64
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	if err == nil {
+		t.Fatal("assignment right creation succeeded despite audit failure")
+	}
+	var rights, after int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM assign_rights WHERE holder_member_id = $1 AND source = 'delegated'`, target.ID).Scan(&rights); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if rights != 0 || int64(after) != before {
+		t.Fatalf("audit failure left rights=%d policy_version=%d (before %d)", rights, after, before)
 	}
 }

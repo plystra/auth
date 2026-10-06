@@ -73,6 +73,39 @@ func (q *Queries) CreateAssignRight(ctx context.Context, arg CreateAssignRightPa
 	return i, err
 }
 
+const getAssignRight = `-- name: GetAssignRight :one
+SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
+    covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
+    expires_at, revoked_at, created_at
+FROM assign_rights
+WHERE id = $1
+`
+
+type GetAssignRightParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) GetAssignRight(ctx context.Context, arg GetAssignRightParams) (AssignRight, error) {
+	row := q.db.QueryRow(ctx, getAssignRight, arg.ID)
+	var i AssignRight
+	err := row.Scan(
+		&i.ID,
+		&i.HolderMemberID,
+		&i.PermissionKeys,
+		&i.AnchorSpaceID,
+		&i.AnchorGroupID,
+		&i.CoversSubtree,
+		&i.CanRedelegate,
+		&i.Source,
+		&i.ParentID,
+		&i.GrantedByOperatorUserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listActiveAssignRightsForHolder = `-- name: ListActiveAssignRightsForHolder :many
 SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
     covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
@@ -196,4 +229,18 @@ func (q *Queries) LockActiveAssignRightsForHolder(ctx context.Context, arg LockA
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeAssignRight = `-- name: RevokeAssignRight :exec
+UPDATE assign_rights SET revoked_at = now()
+WHERE id = $1 AND revoked_at IS NULL
+`
+
+type RevokeAssignRightParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) RevokeAssignRight(ctx context.Context, arg RevokeAssignRightParams) error {
+	_, err := q.db.Exec(ctx, revokeAssignRight, arg.ID)
+	return err
 }

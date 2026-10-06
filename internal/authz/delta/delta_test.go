@@ -134,6 +134,39 @@ func TestAssignmentRightCoversGrantPositionAndScope(t *testing.T) {
 	}
 }
 
+func TestAssignmentRightDownDelegationRequiresSubsetAndCoveredAnchor(t *testing.T) {
+	graph := Graph{
+		SpaceParent: map[string]string{"spc_child": "spc_root", "spc_other": ""},
+		GroupSpace:  map[string]string{"grp_child": "spc_child"},
+	}
+	parent := Right{Holder: "mem_parent", Position: Node{Kind: Space, ID: "spc_root"}, Permissions: []string{"document:read", "document:write"}, Anchor: Node{Kind: Space, ID: "spc_root"}, Descendants: true, Delegate: true}
+	covered := Right{Holder: "mem_child", Position: Node{Kind: Space, ID: "spc_child"}, Permissions: []string{"document:read"}, Anchor: Node{Kind: Space, ID: "spc_child"}, Descendants: false}
+	if ok, err := CoversAssignmentRight(parent, covered, graph); err != nil || !ok {
+		t.Fatalf("covered delegated right = %v, %v", ok, err)
+	}
+	for _, mutate := range []func(*Right){
+		func(r *Right) { r.Permissions = []string{"document:delete"} },
+		func(r *Right) { r.Anchor = Node{Kind: Space, ID: "spc_other"} },
+	} {
+		candidate := covered
+		mutate(&candidate)
+		if ok, err := CoversAssignmentRight(parent, candidate, graph); err != nil || ok {
+			t.Fatalf("invalid delegated right = %v, %v", ok, err)
+		}
+	}
+	parentWithoutSubtree := parent
+	parentWithoutSubtree.Descendants = false
+	coveredSubtree := covered
+	coveredSubtree.Descendants = true
+	if ok, err := CoversAssignmentRight(parentWithoutSubtree, coveredSubtree, graph); err != nil || ok {
+		t.Fatalf("parent without subtree coverage = %v, %v", ok, err)
+	}
+	parent.Delegate = false
+	if ok, err := CoversAssignmentRight(parent, covered, graph); err != nil || ok {
+		t.Fatalf("non-delegable parent = %v, %v", ok, err)
+	}
+}
+
 func TestEvaluateRejectsInvalidAncestry(t *testing.T) {
 	position := Node{Kind: Space, ID: "spc_root"}
 	permission := func(anchor string) Permission {

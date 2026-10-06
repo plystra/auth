@@ -192,6 +192,31 @@ func CoversGrant(right Right, permission Permission, graph Graph) (bool, error) 
 	return nodeContains(right.Anchor, right.Descendants, scopeNode, graph)
 }
 
+// CoversAssignmentRight reports whether an existing, delegable assignment
+// right can authorize a new right. The holder may differ: this is the
+// down-delegation relation, rather than effective-authority containment for a
+// single member.
+func CoversAssignmentRight(right, candidate Right, graph Graph) (bool, error) {
+	if !validNode(right.Anchor) || !validNode(candidate.Anchor) || !validNode(candidate.Position) || len(candidate.Permissions) == 0 {
+		return false, errors.New("invalid assignment-right coverage facts")
+	}
+	if !right.Delegate || candidate.Descendants && !right.Descendants {
+		return false, nil
+	}
+	for _, permission := range candidate.Permissions {
+		if !slices.Contains(right.Permissions, permission) {
+			return false, nil
+		}
+	}
+	if covered, err := nodeContains(right.Anchor, right.Descendants, candidate.Anchor, graph); err != nil || !covered {
+		return covered, err
+	}
+	// The candidate holder's Space is validated separately by the domain layer:
+	// it must be the anchor Space or one of its ancestors. Assignment-right
+	// coverage itself only concerns the delegated anchor and permission set.
+	return true, nil
+}
+
 func scopeContains(a, b Scope, graph Graph) (bool, error) {
 	if a.Kind == Global {
 		return true, nil
