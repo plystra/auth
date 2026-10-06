@@ -189,6 +189,14 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	if err := store.Migrate(ctx, database.URL); err != nil {
 		t.Fatalf("reapplying migrations: %v", err)
 	}
+	verificationStore, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verificationStore.Close()
+	if err := store.CheckMigrationVersion(ctx, verificationStore.Pool); err != nil {
+		t.Fatalf("migration readiness check: %v", err)
+	}
 }
 
 func TestPermissionDirectoryUsesStatusAndDisablesImmediately(t *testing.T) {

@@ -6,6 +6,8 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -71,4 +73,48 @@ func Migrate(ctx context.Context, databaseURL string) error {
 	}
 	_, err = provider.Up(ctx)
 	return err
+}
+
+// CheckMigrationVersion verifies that the database has applied the newest
+// forward-only migration embedded in this binary.
+func CheckMigrationVersion(ctx context.Context, pool *pgxpool.Pool) error {
+	expected, err := LatestMigrationVersion()
+	if err != nil {
+		return err
+	}
+	var actual int64
+	var applied bool
+	if err := pool.QueryRow(ctx, `SELECT version_id, is_applied FROM goose_db_version ORDER BY id DESC LIMIT 1`).Scan(&actual, &applied); err != nil {
+		return fmt.Errorf("read migration version: %w", err)
+	}
+	if !applied || actual != expected {
+		return fmt.Errorf("database migration version %d is not current (want %d)", actual, expected)
+	}
+	return nil
+}
+
+func LatestMigrationVersion() (int64, error) {
+	entries, err := fs.ReadDir(migrationFS, "migrations")
+	if err != nil {
+		return 0, fmt.Errorf("read embedded migrations: %w", err)
+	}
+	var latest int64
+	for _, entry := range entries {
+		name := entry.Name()
+		prefix, _, ok := strings.Cut(name, "_")
+		if !ok {
+			continue
+		}
+		version, parseErr := strconv.ParseInt(prefix, 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse migration %q: %w", name, parseErr)
+		}
+		if version > latest {
+			latest = version
+		}
+	}
+	if latest == 0 {
+		return 0, fmt.Errorf("no embedded migrations found")
+	}
+	return latest, nil
 }

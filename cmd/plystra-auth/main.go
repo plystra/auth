@@ -186,7 +186,14 @@ func serve(ctx context.Context) error {
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, signer)
 	health := http.NewServeMux()
-	registerHealth(health, st.Pool.Ping)
+	registerHealth(health, func(ctx context.Context) error {
+		return checkReadiness(ctx, st.Pool.Ping, func(ctx context.Context) error {
+			return store.CheckMigrationVersion(ctx, st.Pool)
+		}, func() error {
+			_, err := signer.JWKS()
+			return err
+		})
+	})
 	servers := []*http.Server{{Addr: c.HTTPAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Principal, principalMux), "principal")}, {Addr: c.ServerAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server")}, {Addr: c.OpsAddr, Handler: otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops")}, {Addr: ":8090", Handler: health}}
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
@@ -225,6 +232,16 @@ func registerHealth(mux *http.ServeMux, ping func(context.Context) error) {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
+}
+
+func checkReadiness(ctx context.Context, ping, migrations func(context.Context) error, signingKey func() error) error {
+	if err := ping(ctx); err != nil {
+		return err
+	}
+	if err := migrations(ctx); err != nil {
+		return err
+	}
+	return signingKey()
 }
 
 func registerJWKS(mux *http.ServeMux, signer *security.Signer) {

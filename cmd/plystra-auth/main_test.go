@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/plystra/auth/internal/security"
@@ -60,5 +61,47 @@ func TestReadyEndpointReportsDependencyFailure(t *testing.T) {
 	mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if res.Code != http.StatusServiceUnavailable || res.Body.String() != `{"status":"not_ready"}`+"\n" {
 		t.Fatalf("readyz failure = (%d, %q), want (503, not_ready)", res.Code, res.Body.String())
+	}
+}
+
+func TestReadinessChecksDatabaseMigrationsAndSigningKey(t *testing.T) {
+	ctx := context.Background()
+	calls := make([]string, 0, 3)
+	err := checkReadiness(ctx,
+		func(context.Context) error { calls = append(calls, "database"); return nil },
+		func(context.Context) error { calls = append(calls, "migrations"); return nil },
+		func() error { calls = append(calls, "signing_key"); return nil },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(calls, ","), "database,migrations,signing_key"; got != want {
+		t.Fatalf("readiness checks = %q, want %q", got, want)
+	}
+}
+
+func TestReadinessRejectsMigrationFailure(t *testing.T) {
+	calledSigningKey := false
+	err := checkReadiness(context.Background(),
+		func(context.Context) error { return nil },
+		func(context.Context) error { return errors.New("migration is behind") },
+		func() error { calledSigningKey = true; return nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "migration is behind") {
+		t.Fatalf("readiness error = %v, want migration failure", err)
+	}
+	if calledSigningKey {
+		t.Fatal("signing key check ran after migration failure")
+	}
+}
+
+func TestReadinessRejectsSigningKeyFailure(t *testing.T) {
+	err := checkReadiness(context.Background(),
+		func(context.Context) error { return nil },
+		func(context.Context) error { return nil },
+		func() error { return errors.New("signing key unavailable") },
+	)
+	if err == nil || !strings.Contains(err.Error(), "signing key unavailable") {
+		t.Fatalf("readiness error = %v, want signing key failure", err)
 	}
 }
