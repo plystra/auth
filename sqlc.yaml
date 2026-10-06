@@ -12,6 +12,7 @@ sql:
       - "internal/factor"
       - "internal/member"
       - "internal/grant"
+      - "internal/authorization/queries"
       - "internal/store"
       - "internal/operator/queries"
     database:

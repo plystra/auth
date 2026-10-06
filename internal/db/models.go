@@ -54,6 +54,22 @@ type Application struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
+type AssignRight struct {
+	ID                      string             `json:"id"`
+	HolderMemberID          string             `json:"holder_member_id"`
+	PermissionKeys          []byte             `json:"permission_keys"`
+	AnchorSpaceID           pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID           pgtype.Text        `json:"anchor_group_id"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CanRedelegate           bool               `json:"can_redelegate"`
+	Source                  string             `json:"source"`
+	ParentID                pgtype.Text        `json:"parent_id"`
+	GrantedByOperatorUserID pgtype.Text        `json:"granted_by_operator_user_id"`
+	ExpiresAt               pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+}
+
 type AuditLog struct {
 	ID           string             `json:"id"`
 	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`

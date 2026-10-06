@@ -403,6 +403,15 @@ func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType,
 		}); err != nil {
 			return err
 		}
+		rightID, err := createTopLevelCreatorRightTx(ctx, q, memberRow.ID, spaceRow.ID)
+		if err != nil {
+			return err
+		}
+		if rightID != "" {
+			if err := audit.Write(ctx, q, actorType, actorID, "assign_right.system_create", rightID, "success"); err != nil {
+				return err
+			}
+		}
 		if err := audit.Write(ctx, q, actorType, actorID, "space.create", spaceRow.ID, "success"); err != nil {
 			return err
 		}
