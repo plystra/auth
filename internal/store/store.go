@@ -43,7 +43,7 @@ func (s *Store) Close() {
 func (s *Store) Queries() *db.Queries { return db.New(s.Pool) }
 func (s *Store) InTx(ctx context.Context, fn func(*db.Queries) error) error {
 	// The store is the single permitted transaction boundary.
-	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted}) //nolint:forbidigo
+	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return err
 	}

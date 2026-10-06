@@ -9,8 +9,8 @@ linters:
       rules:
         authz_pure:
           files:
-            - internal/authz/engine/**/*.go
-            - internal/authz/delta/**/*.go
+            - '**/internal/authz/engine/*.go'
+            - '**/internal/authz/delta/*.go'
           list-mode: lax
           deny:
             - pkg: database
@@ -27,7 +27,7 @@ linters:
               desc: authorization logic must not depend on persistence
         principal_plane:
           files:
-            - internal/plane/principal/**/*.go
+            - '**/internal/plane/principal/*.go'
           list-mode: lax
           deny:
             - pkg: github.com/plystra/auth/internal/plane/server
@@ -36,7 +36,7 @@ linters:
               desc: interaction planes must not depend on one another
         server_plane:
           files:
-            - internal/plane/server/**/*.go
+            - '**/internal/plane/server/*.go'
           list-mode: lax
           deny:
             - pkg: github.com/plystra/auth/internal/plane/principal
@@ -45,7 +45,7 @@ linters:
               desc: interaction planes must not depend on one another
         ops_plane:
           files:
-            - internal/plane/ops/**/*.go
+            - '**/internal/plane/ops/*.go'
           list-mode: lax
           deny:
             - pkg: github.com/plystra/auth/internal/plane/principal
@@ -68,6 +68,11 @@ linters:
     warn-unused: true
     rules:
       - path: ^internal/route/
+        text: huma\.Register
+        linters:
+          - forbidigo
+      - path: ^internal/store/
+        text: Begin(Tx)?
         linters:
           - forbidigo
       - path-except: ^internal/authz/(engine|delta)/
