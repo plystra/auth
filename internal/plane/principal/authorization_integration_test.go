@@ -1030,6 +1030,13 @@ func TestCreateAgentEndpointReturnsOneTimeAgentCredential(t *testing.T) {
 	if credential.MemberID != out.Body.Data.Agent.ID || credential.SpaceID != spaceID {
 		t.Fatalf("credential = %+v, want created Agent %s in Space %s", credential, out.Body.Data.Agent.ID, spaceID)
 	}
+	var grants int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, out.Body.Data.Agent.ID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 0 {
+		t.Fatalf("new Agent has %d grants, want no initial grants", grants)
+	}
 	var stored []byte
 	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE member_id = $1`, out.Body.Data.Agent.ID).Scan(&stored); err != nil {
 		t.Fatal(err)
