@@ -56,6 +56,9 @@ func (s *Service) assignmentRightsSnapshotTx(ctx context.Context, q *db.Queries,
 			Holder: memberID, Position: position, Permissions: permissions,
 			Descendants: row.CoversSubtree, Delegate: row.CanRedelegate,
 		}
+		if row.ExpiresAt.Valid {
+			right.ExpiresAt = row.ExpiresAt.Time.UTC()
+		}
 		if row.AnchorSpaceID.Valid {
 			right.Anchor = delta.Node{Kind: delta.Space, ID: row.AnchorSpaceID.String}
 		} else if row.AnchorGroupID.Valid {
@@ -88,9 +91,9 @@ func permissionSnapshot(assignments []engine.Assignment, subject string, positio
 	return snapshot
 }
 
-// G8 applies the same positive-delta evaluator to human and Agent grants.
-// Binding and application-recipient coverage remain explicitly tracked as
-// unfinished G8 work in auth-docs/roadmap.md.
+// G8 applies the same positive-delta evaluator to human and Agent grants and
+// binding authority. Application-recipient coverage remains explicitly
+// tracked as unfinished G8 work in auth-docs/roadmap.md.
 func (s *Service) coverGrantDeltaTx(ctx context.Context, q *db.Queries, before delta.Snapshot, actorMemberID, memberID, spaceID, principalKind string) error {
 	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, principalKind)
 	if err != nil {
@@ -159,6 +162,9 @@ func rejectUncoveredDelta(change delta.Result, message string) error {
 	uncovered := make([]string, 0, len(change.Permissions))
 	for _, permission := range change.Permissions {
 		uncovered = append(uncovered, permission.Key+"@"+string(permission.Scope.Kind)+":"+permission.Scope.Anchor)
+	}
+	for _, right := range change.Rights {
+		uncovered = append(uncovered, delta.FormatRight(right))
 	}
 	sort.Strings(uncovered)
 	return &apierr.Error{

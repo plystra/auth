@@ -364,6 +364,9 @@ func TestBindingWithAssignmentRightDeltaIsRejectedWithoutDelegationCoverage(t *t
 	`, target.ID, spaceID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_assignment_binding"); err == nil {
 		t.Fatal("binding transferred an assignment right without delegation coverage")
 	} else {
@@ -375,6 +378,34 @@ func TestBindingWithAssignmentRightDeltaIsRejectedWithoutDelegationCoverage(t *t
 	}
 	if count != 0 {
 		t.Fatalf("denied assignment-right binding persisted %d rows", count)
+	}
+}
+
+func TestBindingWithAssignmentRightDeltaUsesDelegationCoverage(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Covered assignment identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_assignment_covered", "assignment-covered@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO assign_rights (id, holder_member_id, permission_keys, anchor_space_id, covers_subtree, can_redelegate, source)
+		VALUES ('ar_binding_covered', $1, '["auth.members:read"]'::jsonb, $2, true, false, 'system')
+	`, target.ID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_assignment_covered"); err != nil {
+		t.Fatalf("delegation-covered assignment binding failed: %v", err)
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = 'usr_assignment_covered' AND member_id = $1 AND status = 'active'`, target.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("delegation-covered binding rows = %d, want 1", count)
 	}
 }
 

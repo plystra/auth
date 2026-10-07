@@ -31,11 +31,21 @@ func validateMemberGrantAnchorTx(ctx context.Context, q *db.Queries, memberSpace
 }
 
 func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string) error {
-	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, principalKind, spaceID, map[string]struct{}{})
+	if len(change.Permissions) != 0 {
+		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, delta.Result{Permissions: change.Permissions}, actorMemberID, memberID, principalKind, spaceID, map[string]struct{}{}); err != nil {
+			return err
+		}
+	}
+	if len(change.Rights) != 0 {
+		if err := s.coverPositiveAssignmentDeltaForActorTx(ctx, q, delta.Result{Rights: change.Rights}, actorMemberID, memberID, spaceID, map[string]struct{}{}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string, seen map[string]struct{}) error {
-	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+	if len(change.Permissions) == 0 {
 		return nil
 	}
 	actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
@@ -53,10 +63,10 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 			return err
 		}
 	}
-	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+	if len(change.Permissions) == 0 {
 		return nil
 	}
-	if actor.Type == "application" || principalKind == "application" || len(change.Rights) != 0 {
+	if actor.Type == "application" || principalKind == "application" {
 		return rejectUncoveredDelta(change, "The grant would increase authority without owner-envelope coverage.")
 	}
 	if actor.Type == "agent" {
@@ -185,6 +195,111 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 		}
 	}
 	return rejectUncoveredDelta(delta.Result{Permissions: uncovered}, "The grant exceeds the administrator's assignment rights.")
+}
+
+func (s *Service) coverPositiveAssignmentDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, targetMemberID, spaceID string, seen map[string]struct{}) error {
+	if len(change.Rights) == 0 {
+		return nil
+	}
+	actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
+	if err != nil {
+		return err
+	}
+	if _, ok := seen[actorMemberID]; ok {
+		return apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
+	}
+	seen[actorMemberID] = struct{}{}
+	defer delete(seen, actorMemberID)
+	if actor.Type == "application" {
+		return rejectUncoveredDelta(change, "The assignment-right delta requires human or Agent delegation coverage.")
+	}
+	target, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: targetMemberID})
+	if err != nil {
+		return err
+	}
+	if target.Type == "application" {
+		return rejectUncoveredDelta(change, "Application assignment-right deltas are not yet supported.")
+	}
+	if actor.Type == "agent" {
+		agent, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: actorMemberID})
+		if ownerErr != nil {
+			if errors.Is(ownerErr, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+			}
+			return ownerErr
+		}
+		if !agent.OwnerMemberID.Valid || agent.OwnerMemberID.String == "" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+		}
+		owner, ownerErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+		if ownerErr != nil {
+			if errors.Is(ownerErr, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+			}
+			return ownerErr
+		}
+		if owner.Status != "active" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		if err := s.authorizeTargetTx(ctx, q, owner.ID, "auth.assign_rights:manage", spaceID, targetMemberID); err != nil {
+			return err
+		}
+		if err := s.coverPositiveAssignmentDeltaForActorTx(ctx, q, change, owner.ID, targetMemberID, spaceID, seen); err != nil {
+			return err
+		}
+	}
+	rows, err := q.LockActiveAssignRightsForHolder(ctx, db.LockActiveAssignRightsForHolderParams{HolderMemberID: actorMemberID})
+	if err != nil {
+		return err
+	}
+	graph := delta.Graph{SpaceParent: map[string]string{}, GroupParent: map[string]string{}, GroupSpace: map[string]string{}}
+	if err := addCoverageSpaceTx(ctx, q, actor.SpaceID, &graph); err != nil {
+		return err
+	}
+	for _, candidate := range change.Rights {
+		if candidate.Position.Kind == delta.Space {
+			if err := addCoverageSpaceTx(ctx, q, candidate.Position.ID, &graph); err != nil {
+				return err
+			}
+		} else if err := addCoverageGroupTx(ctx, q, candidate.Position.ID, spaceID, &graph); err != nil {
+			return err
+		}
+		if candidate.Anchor.Kind == delta.Space {
+			if err := addCoverageSpaceTx(ctx, q, candidate.Anchor.ID, &graph); err != nil {
+				return err
+			}
+		} else if err := addCoverageGroupTx(ctx, q, candidate.Anchor.ID, spaceID, &graph); err != nil {
+			return err
+		}
+	}
+	for _, row := range rows {
+		if row.AnchorSpaceID.Valid {
+			if err := addCoverageSpaceTx(ctx, q, row.AnchorSpaceID.String, &graph); err != nil {
+				if errors.Is(err, errSpaceInactive) {
+					continue
+				}
+				return err
+			}
+		} else if row.AnchorGroupID.Valid {
+			if err := addCoverageGroupTx(ctx, q, row.AnchorGroupID.String, spaceID, &graph); err != nil {
+				if errors.Is(err, errGroupInactive) {
+					continue
+				}
+				return err
+			}
+		}
+	}
+	uncovered := make([]delta.Right, 0, len(change.Rights))
+	for _, candidate := range change.Rights {
+		_, _, covered, err := coveringAssignmentRight(rows, actorMemberID, actor.SpaceID, candidate, graph)
+		if err != nil {
+			return err
+		}
+		if !covered {
+			uncovered = append(uncovered, candidate)
+		}
+	}
+	return rejectUncoveredDelta(delta.Result{Rights: uncovered}, "The assignment-right delta exceeds the administrator's delegation authority.")
 }
 
 func (s *Service) filterAgentOwnerPermissionsTx(ctx context.Context, q *db.Queries, permissions []delta.Permission, agentMemberID, spaceID string) ([]delta.Permission, error) {

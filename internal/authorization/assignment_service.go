@@ -105,6 +105,9 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 			return err
 		}
 		candidate := delta.Right{Holder: holderMemberID, Position: delta.Node{Kind: delta.Space, ID: holder.SpaceID}, Permissions: permissions, Anchor: assignmentAnchorNode(anchorSpace, anchorGroup), Descendants: coversSubtree, Delegate: canRedelegate}
+		if expiresAt != nil {
+			candidate.ExpiresAt = expiresAt.UTC()
+		}
 		parentID, parentExpiry, err := findCoveringAssignmentRight(parentRows, actorMemberID, actor.SpaceID, candidate, graph)
 		if err != nil {
 			return err
@@ -401,6 +404,9 @@ func coveringAssignmentRight(rows []db.AssignRight, actorID, actorSpaceID string
 			return "", pgtype.Timestamptz{}, false, err
 		}
 		parent := delta.Right{Holder: actorID, Position: delta.Node{Kind: delta.Space, ID: actorSpaceID}, Permissions: keys, Descendants: row.CoversSubtree, Delegate: row.CanRedelegate}
+		if row.ExpiresAt.Valid {
+			parent.ExpiresAt = row.ExpiresAt.Time.UTC()
+		}
 		if row.AnchorSpaceID.Valid {
 			parent.Anchor = delta.Node{Kind: delta.Space, ID: row.AnchorSpaceID.String}
 		} else if row.AnchorGroupID.Valid {

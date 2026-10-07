@@ -837,8 +837,15 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 			return err
 		}
 		if len(change.Permissions) != 0 || len(change.Rights) != 0 {
-			if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID); err != nil {
-				return err
+			if len(change.Permissions) != 0 {
+				if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID); err != nil {
+					return err
+				}
+			}
+			if len(change.Rights) != 0 {
+				if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.assign_rights:manage", spaceID, memberID); err != nil {
+					return err
+				}
 			}
 			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, member.ID, member.Type, spaceID); err != nil {
 				return err

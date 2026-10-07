@@ -2,8 +2,10 @@ package delta
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type NodeKind string
@@ -50,6 +52,7 @@ type Right struct {
 	Anchor      Node
 	Descendants bool
 	Delegate    bool
+	ExpiresAt   time.Time
 }
 
 type Snapshot struct {
@@ -140,6 +143,9 @@ func rightCovered(candidate Right, previous []Right, graph Graph) (bool, error) 
 
 func rightContains(a, b Right, graph Graph) (bool, error) {
 	if a.Holder != b.Holder || a.Position != b.Position || b.Delegate && !a.Delegate || b.Descendants && !a.Descendants {
+		return false, nil
+	}
+	if !a.ExpiresAt.IsZero() && (b.ExpiresAt.IsZero() || b.ExpiresAt.After(a.ExpiresAt)) {
 		return false, nil
 	}
 	for _, permission := range b.Permissions {
@@ -400,5 +406,19 @@ func rightKey(item Right) string {
 	if item.Delegate {
 		flags = flags[:1] + "1"
 	}
-	return strings.Join([]string{item.Holder, string(item.Position.Kind), item.Position.ID, string(item.Anchor.Kind), item.Anchor.ID, flags, strings.Join(item.Permissions, "\x00")}, "\x00")
+	expires := ""
+	if !item.ExpiresAt.IsZero() {
+		expires = item.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return strings.Join([]string{item.Holder, string(item.Position.Kind), item.Position.ID, string(item.Anchor.Kind), item.Anchor.ID, flags, expires, strings.Join(item.Permissions, "\x00")}, "\x00")
+}
+
+// FormatRight makes an uncovered assignment-right delta stable and actionable
+// in API error details without exposing an internal database identifier.
+func FormatRight(item Right) string {
+	expires := "never"
+	if !item.ExpiresAt.IsZero() {
+		expires = item.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	return fmt.Sprintf("assignment@%s:%s permissions=%s descendants=%t delegate=%t expires=%s", item.Anchor.Kind, item.Anchor.ID, strings.Join(item.Permissions, ","), item.Descendants, item.Delegate, expires)
 }

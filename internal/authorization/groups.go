@@ -77,8 +77,15 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 			return err
 		}
 		if len(change.Permissions) != 0 || len(change.Rights) != 0 {
-			if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, groupID); err != nil {
-				return err
+			if len(change.Permissions) != 0 {
+				if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, groupID); err != nil {
+					return err
+				}
+			}
+			if len(change.Rights) != 0 {
+				if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.assign_rights:manage", spaceID, groupID); err != nil {
+					return err
+				}
 			}
 			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, member.ID, member.Type, spaceID); err != nil {
 				return err
