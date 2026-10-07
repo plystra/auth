@@ -352,6 +352,10 @@ func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: created.ID, Name: "nested-self-scope-agent", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO permissions (id, key, description)
 		VALUES ('prm_owner_self_scope', 'resource:self', 'Owner self scope test permission')
@@ -370,6 +374,13 @@ func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
 	}
 	if owned.Effect != engine.Allow {
 		t.Fatalf("owner self scope over Agent resource = %+v, want allow", owned)
+	}
+	nested, _, err := svc.Check(ctx, CheckRequest{MemberID: owner.ID, Permission: "resource:self", ResourceSpace: spaceID, ResourceOwner: child.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nested.Effect != engine.Allow {
+		t.Fatalf("owner self scope over nested Agent resource = %+v, want allow", nested)
 	}
 	unowned, _, err := svc.Check(ctx, CheckRequest{MemberID: owner.ID, Permission: "resource:self", ResourceSpace: spaceID, ResourceOwner: "mem_unowned_resource"})
 	if err != nil {
