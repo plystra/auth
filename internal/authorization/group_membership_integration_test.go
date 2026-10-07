@@ -153,13 +153,21 @@ func TestGroupMoveUsesUnifiedDeltaCoverage(t *testing.T) {
 	st, svc, actor, spaceID := newBindingFixture(t)
 	const sourceID = "grp_move_source_allowed"
 	const parentID = "grp_move_parent_allowed"
+	const childID = "grp_move_child_allowed"
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO groups (id, space_id, name, kind, status)
-		VALUES ($1, $3, 'Move source', 'standard', 'active'), ($2, $3, 'Move parent', 'standard', 'active')
-	`, sourceID, parentID, spaceID); err != nil {
+		VALUES ($1, $4, 'Move source', 'standard', 'active'), ($2, $4, 'Move parent', 'standard', 'active'), ($3, $4, 'Move child', 'standard', 'active')
+	`, sourceID, parentID, childID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET parent_id = $1 WHERE id = $2`, sourceID, childID); err != nil {
 		t.Fatal(err)
 	}
 	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Move target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "External grant target", "human", "single")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +187,12 @@ func TestGroupMoveUsesUnifiedDeltaCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by)
+		VALUES ('grt_move_source_id_stable', $1, '["auth.members:read"]'::jsonb, $2, 'group_tree', $3, $4)
+	`, spaceID, external.ID, sourceID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
 		VALUES ('grt_move_manage_allowed', $1, '["auth.groups:manage"]'::jsonb, $2, 'space', $1, $2)
 	`, spaceID, actor.ID); err != nil {
@@ -186,6 +200,20 @@ func TestGroupMoveUsesUnifiedDeltaCoverage(t *testing.T) {
 	}
 	if err := svc.MoveGroup(ctx, actor.ID, spaceID, sourceID, parentID); err != nil {
 		t.Fatalf("covered group move failed: %v", err)
+	}
+	var childParent string
+	if err := st.Pool.QueryRow(ctx, `SELECT parent_id FROM groups WHERE id = $1`, childID).Scan(&childParent); err != nil {
+		t.Fatal(err)
+	}
+	if childParent != sourceID {
+		t.Fatalf("moved subtree child parent = %q, want stable source ID %q", childParent, sourceID)
+	}
+	var anchorGroup string
+	if err := st.Pool.QueryRow(ctx, `SELECT anchor_group_id FROM authorization_grants WHERE id = 'grt_move_source_id_stable'`).Scan(&anchorGroup); err != nil {
+		t.Fatal(err)
+	}
+	if anchorGroup != sourceID {
+		t.Fatalf("grant anchor after move = %q, want stable source ID %q", anchorGroup, sourceID)
 	}
 	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: target.ID, Permission: "auth.members:read", ResourceSpace: spaceID, ResourceGroup: sourceID})
 	if err != nil {
