@@ -117,6 +117,39 @@ func (q *Queries) CanManageAgent(ctx context.Context, arg CanManageAgentParams) 
 	return can_manage, err
 }
 
+const canResolveAgentOwnership = `-- name: CanResolveAgentOwnership :one
+WITH RECURSIVE agent_groups AS (
+    SELECT g.id
+    FROM groups g
+    WHERE g.owner_member_id = $2
+      AND g.kind = 'agents'
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN agent_groups parent ON child.parent_id = parent.id
+    WHERE child.kind = 'agents'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM members target
+    WHERE target.id = $1
+      AND target.type = 'agent'
+      AND (target.id = $2 OR target.home_group_id IN (SELECT id FROM agent_groups))
+) AS can_resolve
+`
+
+type CanResolveAgentOwnershipParams struct {
+	TargetMemberID string `json:"target_member_id"`
+	OwnerMemberID  string `json:"owner_member_id"`
+}
+
+func (q *Queries) CanResolveAgentOwnership(ctx context.Context, arg CanResolveAgentOwnershipParams) (bool, error) {
+	row := q.db.QueryRow(ctx, canResolveAgentOwnership, arg.TargetMemberID, arg.OwnerMemberID)
+	var can_resolve bool
+	err := row.Scan(&can_resolve)
+	return can_resolve, err
+}
+
 const claimStaleIdempotencyKey = `-- name: ClaimStaleIdempotencyKey :one
 UPDATE idempotency_keys
 SET state = 'pending', status_code = NULL, response_headers = '{}'::jsonb,
@@ -1807,12 +1840,13 @@ const listMemberAssignments = `-- name: ListMemberAssignments :many
 WITH RECURSIVE member_groups AS (
     SELECT gm.group_id
     FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
     WHERE gm.member_id = $1
     UNION
     SELECT g.parent_id
     FROM groups g
     JOIN member_groups mg ON mg.group_id = g.id
-    WHERE g.parent_id IS NOT NULL
+    WHERE g.parent_id IS NOT NULL AND g.status = 'active'
 )
 SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
        ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id, ag.grantee_group_id,
@@ -1828,7 +1862,9 @@ JOIN permissions p ON p.status <> 'disabled' AND (
 )
 JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
+LEFT JOIN groups grant_group ON grant_group.id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = $1 OR mg.group_id IS NOT NULL)
+  AND (ag.grantee_group_id IS NULL OR grant_group.status = 'active')
   AND ag.revoked_at IS NULL
 ORDER BY ag.id, p.key
 `
@@ -2508,6 +2544,31 @@ func (q *Queries) RevokeAgentCredentialsInGroupSubtree(ctx context.Context, arg 
 	return err
 }
 
+const revokeAgentGrantsInGroupSubtree = `-- name: RevokeAgentGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = $1
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+FROM group_members gm
+JOIN tree t ON t.id = gm.group_id
+JOIN members m ON m.id = gm.member_id
+WHERE ag.grantee_member_id = m.id
+  AND m.type = 'agent'
+  AND ag.revoked_at IS NULL
+`
+
+type RevokeAgentGrantsInGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) RevokeAgentGrantsInGroupSubtree(ctx context.Context, arg RevokeAgentGrantsInGroupSubtreeParams) error {
+	_, err := q.db.Exec(ctx, revokeAgentGrantsInGroupSubtree, arg.GroupID)
+	return err
+}
+
 const revokeGrant = `-- name: RevokeGrant :exec
 UPDATE authorization_grants SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL
@@ -2519,6 +2580,27 @@ type RevokeGrantParams struct {
 
 func (q *Queries) RevokeGrant(ctx context.Context, arg RevokeGrantParams) error {
 	_, err := q.db.Exec(ctx, revokeGrant, arg.ID)
+	return err
+}
+
+const revokeGroupGrantsInGroupSubtree = `-- name: RevokeGroupGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = $1
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+WHERE ag.grantee_group_id IN (SELECT id FROM tree)
+  AND ag.revoked_at IS NULL
+`
+
+type RevokeGroupGrantsInGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) RevokeGroupGrantsInGroupSubtree(ctx context.Context, arg RevokeGroupGrantsInGroupSubtreeParams) error {
+	_, err := q.db.Exec(ctx, revokeGroupGrantsInGroupSubtree, arg.GroupID)
 	return err
 }
 

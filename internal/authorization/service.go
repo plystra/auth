@@ -181,7 +181,7 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	// G12 must load a verified, single-use approval from Auth state before
 	// setting ApprovalValid. Callers cannot assert approval as a request fact.
 	if in.ResourceOwner != "" && in.ResourceOwner != in.MemberID {
-		owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner})
+		owned, ownerErr := q.CanResolveAgentOwnership(ctx, db.CanResolveAgentOwnershipParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner})
 		if ownerErr != nil {
 			return engine.Decision{}, 0, ownerErr
 		}
@@ -286,7 +286,7 @@ func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, member
 	}
 	request := &engine.Request{MemberID: memberID, PrincipalType: member.Type, Permission: in.Permission, ResourceSpace: in.ResourceSpace, ResourceSpaceAncestors: spaceAncestors, ResourceGroup: in.ResourceGroup, ResourceGroupAncestors: groupAncestors, ResourceOwner: in.ResourceOwner, Assignments: assignments, SkipApproval: true}
 	if in.ResourceOwner != "" && in.ResourceOwner != memberID {
-		owned, ownerErr := q.CanManageAgent(ctx, db.CanManageAgentParams{OwnerMemberID: memberID, TargetMemberID: in.ResourceOwner})
+		owned, ownerErr := q.CanResolveAgentOwnership(ctx, db.CanResolveAgentOwnershipParams{OwnerMemberID: memberID, TargetMemberID: in.ResourceOwner})
 		if ownerErr != nil {
 			return nil, ownerErr
 		}

@@ -423,12 +423,13 @@ const listMemberAssignments = `-- name: ListMemberAssignments :many
 WITH RECURSIVE member_groups AS (
     SELECT gm.group_id
     FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
     WHERE gm.member_id = $1
     UNION
     SELECT g.parent_id
     FROM groups g
     JOIN member_groups mg ON mg.group_id = g.id
-    WHERE g.parent_id IS NOT NULL
+    WHERE g.parent_id IS NOT NULL AND g.status = 'active'
 )
 SELECT ag.id AS grant_id, ag.space_id, ag.role_id, COALESCE(r.name, 'inline') AS role_name,
        ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.grantee_member_id, ag.grantee_group_id,
@@ -444,7 +445,9 @@ JOIN permissions p ON p.status <> 'disabled' AND (
 )
 JOIN spaces s ON s.id = ag.space_id
 LEFT JOIN member_groups mg ON mg.group_id = ag.grantee_group_id
+LEFT JOIN groups grant_group ON grant_group.id = ag.grantee_group_id
 WHERE (ag.grantee_member_id = $1 OR mg.group_id IS NOT NULL)
+  AND (ag.grantee_group_id IS NULL OR grant_group.status = 'active')
   AND ag.revoked_at IS NULL
 ORDER BY ag.id, p.key
 `

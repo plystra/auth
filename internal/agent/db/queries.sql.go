@@ -62,6 +62,39 @@ func (q *Queries) CanManageAgent(ctx context.Context, arg CanManageAgentParams) 
 	return can_manage, err
 }
 
+const canResolveAgentOwnership = `-- name: CanResolveAgentOwnership :one
+WITH RECURSIVE agent_groups AS (
+    SELECT g.id
+    FROM groups g
+    WHERE g.owner_member_id = $2
+      AND g.kind = 'agents'
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN agent_groups parent ON child.parent_id = parent.id
+    WHERE child.kind = 'agents'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM members target
+    WHERE target.id = $1
+      AND target.type = 'agent'
+      AND (target.id = $2 OR target.home_group_id IN (SELECT id FROM agent_groups))
+) AS can_resolve
+`
+
+type CanResolveAgentOwnershipParams struct {
+	TargetMemberID string `json:"target_member_id"`
+	OwnerMemberID  string `json:"owner_member_id"`
+}
+
+func (q *Queries) CanResolveAgentOwnership(ctx context.Context, arg CanResolveAgentOwnershipParams) (bool, error) {
+	row := q.db.QueryRow(ctx, canResolveAgentOwnership, arg.TargetMemberID, arg.OwnerMemberID)
+	var can_resolve bool
+	err := row.Scan(&can_resolve)
+	return can_resolve, err
+}
+
 const createAgentCredential = `-- name: CreateAgentCredential :one
 INSERT INTO agent_credentials (id, member_id, kind, prefix, secret_hash, family_id, expires_at)
 VALUES ($1, $2, 'key', $3, $4, $5, $6)
@@ -671,6 +704,52 @@ type RevokeAgentCredentialsInGroupSubtreeParams struct {
 
 func (q *Queries) RevokeAgentCredentialsInGroupSubtree(ctx context.Context, arg RevokeAgentCredentialsInGroupSubtreeParams) error {
 	_, err := q.db.Exec(ctx, revokeAgentCredentialsInGroupSubtree, arg.GroupID)
+	return err
+}
+
+const revokeAgentGrantsInGroupSubtree = `-- name: RevokeAgentGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = $1
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+FROM group_members gm
+JOIN tree t ON t.id = gm.group_id
+JOIN members m ON m.id = gm.member_id
+WHERE ag.grantee_member_id = m.id
+  AND m.type = 'agent'
+  AND ag.revoked_at IS NULL
+`
+
+type RevokeAgentGrantsInGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) RevokeAgentGrantsInGroupSubtree(ctx context.Context, arg RevokeAgentGrantsInGroupSubtreeParams) error {
+	_, err := q.db.Exec(ctx, revokeAgentGrantsInGroupSubtree, arg.GroupID)
+	return err
+}
+
+const revokeGroupGrantsInGroupSubtree = `-- name: RevokeGroupGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = $1
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+WHERE ag.grantee_group_id IN (SELECT id FROM tree)
+  AND ag.revoked_at IS NULL
+`
+
+type RevokeGroupGrantsInGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) RevokeGroupGrantsInGroupSubtree(ctx context.Context, arg RevokeGroupGrantsInGroupSubtreeParams) error {
+	_, err := q.db.Exec(ctx, revokeGroupGrantsInGroupSubtree, arg.GroupID)
 	return err
 }
 

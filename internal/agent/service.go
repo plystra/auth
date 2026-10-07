@@ -271,6 +271,12 @@ func (s *Service) Delete(ctx context.Context, ownerMemberID, memberID string) er
 		if err := q.DeleteAgentSubtree(ctx, db.DeleteAgentSubtreeParams{GroupID: groupID}); err != nil {
 			return err
 		}
+		if err := q.RevokeAgentGrantsInGroupSubtree(ctx, db.RevokeAgentGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
+			return err
+		}
+		if err := q.RevokeGroupGrantsInGroupSubtree(ctx, db.RevokeGroupGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
+			return err
+		}
 		return q.RemoveAgentGroupSubtree(ctx, db.RemoveAgentGroupSubtreeParams{GroupID: groupID})
 	})
 }
@@ -302,6 +308,12 @@ func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 			}
 			groupID := member.HomeGroupID.String
 			if err := q.DeleteAgentSubtree(ctx, db.DeleteAgentSubtreeParams{GroupID: groupID}); err != nil {
+				return err
+			}
+			if err := q.RevokeAgentGrantsInGroupSubtree(ctx, db.RevokeAgentGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
+				return err
+			}
+			if err := q.RevokeGroupGrantsInGroupSubtree(ctx, db.RevokeGroupGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
 				return err
 			}
 			if err := q.RemoveAgentGroupSubtree(ctx, db.RemoveAgentGroupSubtreeParams{GroupID: groupID}); err != nil {

@@ -351,6 +351,82 @@ func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
 	}
 }
 
+func TestDeletedAgentIsGrantlessButRemainsResolvableForOwnerSelfScope(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "tombstone-self-scope-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description)
+		VALUES ('prm_tombstone_self_scope', 'resource:tombstone-self', 'Tombstone self scope test permission')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_tombstone_agent', $1, '["resource:tombstone-self"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, created.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_tombstone_owner', $1, '["resource:tombstone-self"]'::jsonb, $2, 'self', $1, $2)
+	`, spaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	var agentGroupID string
+	if err := st.Pool.QueryRow(ctx, `SELECT home_group_id FROM members WHERE id = $1`, created.ID).Scan(&agentGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_group_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_tombstone_group', $1, '["resource:tombstone-self"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, agentGroupID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := agents.Delete(ctx, owner.ID, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	var activeGrants int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM authorization_grants
+		WHERE grantee_member_id = $1 AND revoked_at IS NULL
+	`, created.ID).Scan(&activeGrants); err != nil {
+		t.Fatal(err)
+	}
+	if activeGrants != 0 {
+		t.Fatalf("deleted Agent retained %d active grants", activeGrants)
+	}
+	var activeGroupGrants int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM authorization_grants
+		WHERE grantee_group_id = $1 AND revoked_at IS NULL
+	`, agentGroupID).Scan(&activeGroupGrants); err != nil {
+		t.Fatal(err)
+	}
+	if activeGroupGrants != 0 {
+		t.Fatalf("deleted Agent group retained %d active grants", activeGroupGrants)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{
+		MemberID: owner.ID, Permission: "resource:tombstone-self", ResourceSpace: spaceID, ResourceOwner: created.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("owner self scope over deleted Agent = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_tombstone_regrant', $1, '["self:read"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, created.ID, owner.ID); err == nil {
+		t.Fatal("database accepted a grant to a tombstoned Agent")
+	}
+}
+
 func TestAgentGroupGrantStillRequiresOwnerEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st, svc, owner, spaceID := newBindingFixture(t)

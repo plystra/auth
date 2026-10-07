@@ -134,6 +134,52 @@ JOIN group_members gm ON gm.member_id = m.id
 JOIN tree t ON t.id = gm.group_id
 WHERE c.member_id = m.id AND c.revoked_at IS NULL;
 
+-- name: RevokeAgentGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = sqlc.arg(group_id)
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+FROM group_members gm
+JOIN tree t ON t.id = gm.group_id
+JOIN members m ON m.id = gm.member_id
+WHERE ag.grantee_member_id = m.id
+  AND m.type = 'agent'
+  AND ag.revoked_at IS NULL;
+
+-- name: RevokeGroupGrantsInGroupSubtree :exec
+WITH RECURSIVE tree AS (
+    SELECT groups.id FROM groups WHERE groups.id = sqlc.arg(group_id)
+    UNION ALL
+    SELECT g.id FROM groups g JOIN tree t ON g.parent_id = t.id
+)
+UPDATE authorization_grants ag
+SET revoked_at = now()
+WHERE ag.grantee_group_id IN (SELECT id FROM tree)
+  AND ag.revoked_at IS NULL;
+
+-- name: CanResolveAgentOwnership :one
+WITH RECURSIVE agent_groups AS (
+    SELECT g.id
+    FROM groups g
+    WHERE g.owner_member_id = sqlc.arg(owner_member_id)
+      AND g.kind = 'agents'
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN agent_groups parent ON child.parent_id = parent.id
+    WHERE child.kind = 'agents'
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM members target
+    WHERE target.id = sqlc.arg(target_member_id)
+      AND target.type = 'agent'
+      AND (target.id = sqlc.arg(owner_member_id) OR target.home_group_id IN (SELECT id FROM agent_groups))
+) AS can_resolve;
+
 -- name: ListActiveAgentCredentials :many
 SELECT id, member_id, kind, prefix, family_id, expires_at, revoked_at, last_used_at, created_at
 FROM agent_credentials
