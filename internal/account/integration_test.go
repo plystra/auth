@@ -62,6 +62,109 @@ func TestEmailNormalizationIsUniqueAndRegistrationDefaultsClosed(t *testing.T) {
 	}
 }
 
+func TestSetUserStatusRevokesSessionsAndRefreshTokensAtomically(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_status_target", "status-target@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, token_hash, expires_at)
+		VALUES ('ses_status_target', 'usr_status_target', decode(repeat('11', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
+		VALUES ('rft_status_target', 'ses_status_target', 'rtf_status_target', decode(repeat('22', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st}
+	if err := accounts.SetUserStatus(ctx, "operator", "usr_operator", "usr_status_target", "suspended"); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM users WHERE id = 'usr_status_target'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suspended" {
+		t.Fatalf("user status = %q, want suspended", status)
+	}
+	var sessions, refreshTokens int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id = 'ses_status_target' AND revoked_at IS NULL`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = 'rft_status_target' AND revoked_at IS NULL`).Scan(&refreshTokens); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 || refreshTokens != 0 {
+		t.Fatalf("active credentials after suspension: sessions=%d refresh_tokens=%d", sessions, refreshTokens)
+	}
+	assertAuditAction(t, st, "user.status.update", "usr_operator")
+}
+
+func TestSetUserStatusAcceptsAllDocumentedStatesAndRejectsUnknownState(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_status_states", "status-states@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st}
+	for _, status := range []string{"pending", "active", "suspended", "disabled"} {
+		if err := accounts.SetUserStatus(ctx, "operator", "usr_operator", "usr_status_states", status); err != nil {
+			t.Fatalf("SetUserStatus(%q): %v", status, err)
+		}
+	}
+	if err := accounts.SetUserStatus(ctx, "operator", "usr_operator", "usr_status_states", "unknown"); err == nil {
+		t.Fatal("unknown user status was accepted")
+	} else {
+		assertAccountError(t, err, "VALIDATION_FAILED")
+	}
+}
+
+func TestSetUserStatusAuditFailureRollsBackStateAndCredentialRevocation(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_status_rollback", "status-rollback@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, token_hash, expires_at)
+		VALUES ('ses_status_rollback', 'usr_status_rollback', decode(repeat('33', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
+		VALUES ('rft_status_rollback', 'ses_status_rollback', 'rtf_status_rollback', decode(repeat('44', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	rejectAuditInserts(t, st, "injected user status audit failure")
+	accounts := &Service{Store: st}
+	if err := accounts.SetUserStatus(ctx, "operator", "usr_operator", "usr_status_rollback", "disabled"); err == nil {
+		t.Fatal("status change succeeded despite audit failure")
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM users WHERE id = 'usr_status_rollback'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "active" {
+		t.Fatalf("user status after audit failure = %q, want active", status)
+	}
+	var activeSessions, activeRefreshTokens int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id = 'ses_status_rollback' AND revoked_at IS NULL`).Scan(&activeSessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = 'rft_status_rollback' AND revoked_at IS NULL`).Scan(&activeRefreshTokens); err != nil {
+		t.Fatal(err)
+	}
+	if activeSessions != 1 || activeRefreshTokens != 1 {
+		t.Fatalf("credentials after audit failure: sessions=%d refresh_tokens=%d", activeSessions, activeRefreshTokens)
+	}
+}
+
 func TestConcurrentRegistrationSameEmailHasSingleSuccess(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)

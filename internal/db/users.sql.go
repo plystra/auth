@@ -136,6 +136,44 @@ func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUs
 	return i, err
 }
 
+const lockUserForStatus = `-- name: LockUserForStatus :one
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
+FROM users WHERE id = $1 FOR UPDATE
+`
+
+type LockUserForStatusParams struct {
+	ID string `json:"id"`
+}
+
+type LockUserForStatusRow struct {
+	ID              string             `json:"id"`
+	Email           string             `json:"email"`
+	EmailNormalized string             `json:"email_normalized"`
+	PasswordHash    string             `json:"password_hash"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) LockUserForStatus(ctx context.Context, arg LockUserForStatusParams) (LockUserForStatusRow, error) {
+	row := q.db.QueryRow(ctx, lockUserForStatus, arg.ID)
+	var i LockUserForStatusRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.EmailNormalized,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.DisabledAt,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const markEmailVerified = `-- name: MarkEmailVerified :one
 UPDATE users SET email_verified_at = now(), status = 'active', updated_at = now()
 WHERE id = $1 AND status = 'pending'

@@ -214,6 +214,38 @@ func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) 
 	}
 	return toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), nil
 }
+
+// SetUserStatus changes an account state and revokes all online credentials
+// whenever the account is suspended or disabled. The user row, credentials,
+// and audit record share one transaction so no session survives a committed
+// state change.
+func (s *Service) SetUserStatus(ctx context.Context, actorType, actorID, userID, status string) error {
+	if status != "pending" && status != "active" && status != "suspended" && status != "disabled" {
+		return apierr.New("VALIDATION_FAILED", "user status is invalid")
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "user was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if err := q.SetUserStatus(ctx, db.SetUserStatusParams{ID: user.ID, Status: status}); err != nil {
+			return err
+		}
+		if status == "suspended" || status == "disabled" {
+			if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: user.ID}); err != nil {
+				return err
+			}
+			if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: user.ID}); err != nil {
+				return err
+			}
+		}
+		return audit.Write(ctx, q, actorType, actorID, "user.status.update", user.ID, "success")
+	})
+}
+
 func toPublicUser(id, email string, verified bool, status string, createdAt time.Time) User {
 	return User{ID: id, Email: email, EmailVerified: verified, Status: status, CreatedAt: createdAt}
 }
