@@ -205,7 +205,7 @@ func TestShutdownServersWaitsForInFlightRequestsBeforeTimeout(t *testing.T) {
 	go func() {
 		response, err := http.Get(server.URL)
 		if err == nil {
-			response.Body.Close()
+			_ = response.Body.Close()
 		}
 		requestDone <- err
 	}()
