@@ -371,6 +371,14 @@ func TestBindingWithAssignmentRightDeltaIsRejectedWithoutDelegationCoverage(t *t
 		t.Fatal("binding transferred an assignment right without delegation coverage")
 	} else {
 		assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+		var public *apierr.Error
+		if !errors.As(err, &public) {
+			t.Fatalf("denied assignment-right binding error = %v", err)
+		}
+		details, ok := public.Details.(map[string]string)
+		if !ok || !strings.Contains(details["uncovered"], "permissions=auth.members:read") {
+			t.Fatalf("denied assignment-right binding did not list the uncovered right: %v", err)
+		}
 	}
 	var count int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = 'usr_assignment_binding'`).Scan(&count); err != nil {
