@@ -154,6 +154,42 @@ func TestGroupMembershipManagementEndpointUsesTargetGroupFacts(t *testing.T) {
 	}
 }
 
+func TestGroupMoveManagementEndpointUsesTargetFacts(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	const sourceID = "grp_endpoint_move_source"
+	const parentID = "grp_endpoint_move_parent"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status)
+		VALUES ($1, $3, 'Endpoint move source', 'standard', 'active'), ($2, $3, 'Endpoint move parent', 'standard', 'active')
+	`, sourceID, parentID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "auth.groups:manage")
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/groups/"+sourceID+"/move", strings.NewReader(`{"parent_group_id":"`+parentID+`"}`))
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	route.Middleware(route.Principal, mux).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST group move = %d %s, want 200", w.Code, w.Body.String())
+	}
+	var parent string
+	if err := st.Pool.QueryRow(ctx, `SELECT coalesce(parent_id, '') FROM groups WHERE id = $1`, sourceID).Scan(&parent); err != nil {
+		t.Fatal(err)
+	}
+	if parent != parentID {
+		t.Fatalf("endpoint group parent = %q, want %q", parent, parentID)
+	}
+}
+
 func TestSuspendedSpaceDeniesManagementLikeAuthorizationCheck(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

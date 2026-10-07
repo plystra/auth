@@ -1830,6 +1830,69 @@ func (q *Queries) ListMembersForUserByType(ctx context.Context, arg ListMembersF
 	return items, nil
 }
 
+const listMembersInGroupSubtree = `-- name: ListMembersInGroupSubtree :many
+WITH RECURSIVE tree AS (
+    SELECT groups.id
+    FROM groups
+    WHERE groups.id = $2 AND groups.space_id = $1
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN tree parent ON child.parent_id = parent.id
+    WHERE child.space_id = $1
+)
+SELECT DISTINCT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id
+JOIN tree ON tree.id = gm.group_id
+WHERE m.space_id = $1
+  AND m.status <> 'removed'
+ORDER BY m.id
+`
+
+type ListMembersInGroupSubtreeParams struct {
+	SpaceID string `json:"space_id"`
+	GroupID string `json:"group_id"`
+}
+
+type ListMembersInGroupSubtreeRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListMembersInGroupSubtree(ctx context.Context, arg ListMembersInGroupSubtreeParams) ([]ListMembersInGroupSubtreeRow, error) {
+	rows, err := q.db.Query(ctx, listMembersInGroupSubtree, arg.SpaceID, arg.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMembersInGroupSubtreeRow{}
+	for rows.Next() {
+		var i ListMembersInGroupSubtreeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.Type,
+			&i.BindingPolicy,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMembersInSpace = `-- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = $1 AND status <> 'removed'
@@ -1940,6 +2003,68 @@ func (q *Queries) ListRolesInSpace(ctx context.Context, arg ListRolesInSpacePara
 			&i.Name,
 			&i.Description,
 			&i.Managed,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockGroupSubtree = `-- name: LockGroupSubtree :many
+WITH RECURSIVE tree AS (
+    SELECT groups.id, groups.space_id, groups.name, groups.parent_id, groups.kind, groups.owner_member_id, groups.status, groups.created_at
+    FROM groups
+    WHERE groups.id = $1 AND groups.space_id = $2
+    UNION ALL
+    SELECT child.id, child.space_id, child.name, child.parent_id, child.kind, child.owner_member_id, child.status, child.created_at
+    FROM groups child
+    JOIN tree parent ON child.parent_id = parent.id
+    WHERE child.space_id = $2
+)
+SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
+FROM tree
+ORDER BY id
+FOR UPDATE
+`
+
+type LockGroupSubtreeParams struct {
+	GroupID string `json:"group_id"`
+	SpaceID string `json:"space_id"`
+}
+
+type LockGroupSubtreeRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	ParentID      pgtype.Text        `json:"parent_id"`
+	Kind          string             `json:"kind"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) LockGroupSubtree(ctx context.Context, arg LockGroupSubtreeParams) ([]LockGroupSubtreeRow, error) {
+	rows, err := q.db.Query(ctx, lockGroupSubtree, arg.GroupID, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LockGroupSubtreeRow{}
+	for rows.Next() {
+		var i LockGroupSubtreeRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.ParentID,
+			&i.Kind,
+			&i.OwnerMemberID,
+			&i.Status,
 			&i.CreatedAt,
 		); err != nil {
 			return nil, err
@@ -2239,5 +2364,22 @@ type TouchFactorParams struct {
 
 func (q *Queries) TouchFactor(ctx context.Context, arg TouchFactorParams) error {
 	_, err := q.db.Exec(ctx, touchFactor, arg.Counter, arg.ID, arg.UserID)
+	return err
+}
+
+const updateGroupParent = `-- name: UpdateGroupParent :exec
+UPDATE groups
+SET parent_id = $1
+WHERE id = $2 AND space_id = $3
+`
+
+type UpdateGroupParentParams struct {
+	ParentID pgtype.Text `json:"parent_id"`
+	GroupID  string      `json:"group_id"`
+	SpaceID  string      `json:"space_id"`
+}
+
+func (q *Queries) UpdateGroupParent(ctx context.Context, arg UpdateGroupParentParams) error {
+	_, err := q.db.Exec(ctx, updateGroupParent, arg.ParentID, arg.GroupID, arg.SpaceID)
 	return err
 }

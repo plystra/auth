@@ -94,6 +94,46 @@ INSERT INTO group_members (group_id, member_id, space_id, source)
 VALUES (sqlc.arg(group_id), sqlc.arg(member_id), sqlc.arg(space_id), sqlc.arg(source))
 ON CONFLICT (group_id, member_id) DO NOTHING;
 
+-- name: LockGroupSubtree :many
+WITH RECURSIVE tree AS (
+    SELECT groups.id, groups.space_id, groups.name, groups.parent_id, groups.kind, groups.owner_member_id, groups.status, groups.created_at
+    FROM groups
+    WHERE groups.id = sqlc.arg(group_id) AND groups.space_id = sqlc.arg(space_id)
+    UNION ALL
+    SELECT child.id, child.space_id, child.name, child.parent_id, child.kind, child.owner_member_id, child.status, child.created_at
+    FROM groups child
+    JOIN tree parent ON child.parent_id = parent.id
+    WHERE child.space_id = sqlc.arg(space_id)
+)
+SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
+FROM tree
+ORDER BY id
+FOR UPDATE;
+
+-- name: ListMembersInGroupSubtree :many
+WITH RECURSIVE tree AS (
+    SELECT groups.id
+    FROM groups
+    WHERE groups.id = sqlc.arg(group_id) AND groups.space_id = sqlc.arg(space_id)
+    UNION ALL
+    SELECT child.id
+    FROM groups child
+    JOIN tree parent ON child.parent_id = parent.id
+    WHERE child.space_id = sqlc.arg(space_id)
+)
+SELECT DISTINCT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id
+JOIN tree ON tree.id = gm.group_id
+WHERE m.space_id = sqlc.arg(space_id)
+  AND m.status <> 'removed'
+ORDER BY m.id;
+
+-- name: UpdateGroupParent :exec
+UPDATE groups
+SET parent_id = sqlc.narg(parent_id)
+WHERE id = sqlc.arg(group_id) AND space_id = sqlc.arg(space_id);
+
 -- name: LockMemberInSpace :one
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members

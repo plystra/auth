@@ -129,6 +129,15 @@ type groupMemberPathInput struct {
 	MemberID      string `path:"mid"`
 }
 
+type groupMoveInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	GroupID       string `path:"group_id"`
+	Body          struct {
+		ParentGroupID string `json:"parent_group_id,omitempty"`
+	}
+}
+
 type authorizationDataOutput[T any] struct {
 	Body struct {
 		Data T `json:"data"`
@@ -165,6 +174,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
+	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
 
 func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authorizationDataOutput[createdSpaceData], error) {
@@ -353,6 +363,17 @@ func (a *API) addGroupMember(ctx context.Context, in *groupMemberPathInput) (*au
 		return nil, err
 	}
 	if err := a.Authorization.AddMemberToGroup(ctx, actor.ID, in.ID, in.GroupID, in.MemberID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func (a *API) moveGroup(ctx context.Context, in *groupMoveInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.MoveGroup(ctx, actor.ID, in.ID, in.GroupID, in.Body.ParentGroupID); err != nil {
 		return nil, err
 	}
 	return acceptedResponse(), nil

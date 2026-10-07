@@ -3,14 +3,18 @@ package authorization
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authz/delta"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 )
+
+const maxGroupDepth = 16
 
 // AddMemberToGroup applies the group-membership change and its authority
 // delta in one transaction. The target group is a resource fact for both
@@ -93,6 +97,183 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 		}
 		return auditGroupMembership(ctx, q, actorMemberID, memberID, groupID)
 	})
+}
+
+// MoveGroup changes a standard group's parent while evaluating every member
+// in the moved subtree against the same before/after authorization snapshot.
+// A positive permission delta must be covered before the transaction commits.
+func (s *Service) MoveGroup(ctx context.Context, actorMemberID, spaceID, groupID, parentGroupID string) error {
+	if strings.TrimSpace(actorMemberID) == "" || strings.TrimSpace(spaceID) == "" || strings.TrimSpace(groupID) == "" {
+		return apierr.New("VALIDATION_FAILED", "group move fields are required")
+	}
+	parentGroupID = strings.TrimSpace(parentGroupID)
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		members, err := q.ListMembersInGroupSubtree(ctx, db.ListMembersInGroupSubtreeParams{GroupID: groupID, SpaceID: spaceID})
+		if err != nil {
+			return err
+		}
+		memberIDs := make([]string, 0, len(members)+1)
+		memberIDs = append(memberIDs, actorMemberID)
+		for _, member := range members {
+			memberIDs = append(memberIDs, member.ID)
+		}
+		if err := lockAuthorizationMembersTx(ctx, q, memberIDs...); err != nil {
+			return err
+		}
+		groups, err := q.LockGroupSubtree(ctx, db.LockGroupSubtreeParams{GroupID: groupID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "group was not found in this Space")
+			}
+			return err
+		}
+		if len(groups) == 0 {
+			return apierr.New("NOT_FOUND", "group was not found in this Space")
+		}
+		target := groups[0]
+		if target.Kind == "agents" {
+			return apierr.New("PERMISSION_DENIED", "Agent-owned groups cannot be moved manually")
+		}
+		if target.Status != "active" {
+			return apierr.New("GROUP_INACTIVE", "group is not active")
+		}
+		inSubtree := make(map[string]struct{}, len(groups))
+		for _, group := range groups {
+			inSubtree[group.ID] = struct{}{}
+		}
+		if _, ok := inSubtree[parentGroupID]; ok {
+			return apierr.New("VALIDATION_FAILED", "group cannot be moved below itself")
+		}
+		var parent db.LockGroupInSpaceForAuthorizationRow
+		if parentGroupID != "" {
+			parent, err = q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: parentGroupID, SpaceID: spaceID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "new parent group was not found in this Space")
+			}
+			if err != nil {
+				return err
+			}
+			if parent.Kind == "agents" {
+				return apierr.New("PERMISSION_DENIED", "Agent-owned groups cannot be used as a manual parent")
+			}
+			if parent.Status != "active" {
+				return apierr.New("GROUP_INACTIVE", "new parent group is not active")
+			}
+		}
+		if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.groups:manage", spaceID, groupID); err != nil {
+			return err
+		}
+		if parentGroupID != "" {
+			if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.groups:manage", spaceID, parentGroupID); err != nil {
+				return err
+			}
+		}
+		if currentParent := nullableID(target.ParentID); currentParent == parentGroupID {
+			return nil
+		}
+		height := 1
+		for _, group := range groups {
+			depth := 1
+			for current := nullableID(group.ParentID); current != ""; {
+				if _, ok := inSubtree[current]; !ok {
+					break
+				}
+				depth++
+				current = nullableParent(groups, current)
+			}
+			if depth > height {
+				height = depth
+			}
+		}
+		parentDepth := 0
+		if parentGroupID != "" {
+			parentDepth, err = groupDepthTx(ctx, q, parentGroupID, spaceID)
+			if err != nil {
+				return err
+			}
+		}
+		if parentDepth+height > maxGroupDepth {
+			return apierr.New("VALIDATION_FAILED", "group tree exceeds the maximum depth")
+		}
+		before := make(map[string]struct {
+			typeName string
+			snapshot delta.Snapshot
+		}, len(members))
+		for _, member := range members {
+			snapshot, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
+			if err != nil {
+				return err
+			}
+			before[member.ID] = struct {
+				typeName string
+				snapshot delta.Snapshot
+			}{typeName: member.Type, snapshot: snapshot}
+		}
+		if err := q.UpdateGroupParent(ctx, db.UpdateGroupParentParams{GroupID: groupID, SpaceID: spaceID, ParentID: pgtype.Text{String: parentGroupID, Valid: parentGroupID != ""}}); err != nil {
+			return err
+		}
+		for _, member := range members {
+			after, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
+			if err != nil {
+				return err
+			}
+			prior := before[member.ID]
+			change, err := delta.Evaluate(prior.snapshot, after, delta.Graph{})
+			if err != nil {
+				return err
+			}
+			if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+				continue
+			}
+			if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
+				return err
+			}
+			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, member.ID, prior.typeName, spaceID); err != nil {
+				return err
+			}
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", actorMemberID, "group.move", groupID, "success")
+	})
+}
+
+func nullableID(value pgtype.Text) string {
+	if value.Valid {
+		return value.String
+	}
+	return ""
+}
+
+func nullableParent(groups []db.LockGroupSubtreeRow, id string) string {
+	for _, group := range groups {
+		if group.ID == id {
+			return nullableID(group.ParentID)
+		}
+	}
+	return ""
+}
+
+func groupDepthTx(ctx context.Context, q *db.Queries, groupID, spaceID string) (int, error) {
+	depth := 0
+	seen := map[string]struct{}{}
+	for current := groupID; current != ""; {
+		if _, ok := seen[current]; ok {
+			return 0, apierr.New("INVALID_RESOURCE", "group hierarchy contains a cycle")
+		}
+		seen[current] = struct{}{}
+		group, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: current, SpaceID: spaceID})
+		if err != nil {
+			return 0, err
+		}
+		depth++
+		current = nullableID(group.ParentID)
+		if depth > maxGroupDepth {
+			return 0, apierr.New("VALIDATION_FAILED", "group tree exceeds the maximum depth")
+		}
+	}
+	return depth, nil
 }
 
 func (s *Service) authorizeGroupTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, groupID string) error {
