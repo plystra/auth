@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/exaring/otelpgx"
@@ -25,6 +26,9 @@ type Store struct {
 	Pool           *pgxpool.Pool
 	Jobs           *jobs.Client
 	PolicyListener *PolicyListener
+
+	policyInvalidatorsMu sync.RWMutex
+	policyInvalidators   []func()
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
@@ -50,11 +54,33 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{
-		Pool:           pool,
-		Jobs:           jobClient,
-		PolicyListener: NewPolicyListener(context.Background(), pool, nil),
-	}, nil
+	st := &Store{
+		Pool: pool,
+		Jobs: jobClient,
+	}
+	st.PolicyListener = NewPolicyListener(context.Background(), pool, st.invalidatePolicyCaches)
+	return st, nil
+}
+
+// RegisterPolicyInvalidator attaches a process-local cache invalidator to the
+// store. The callback is invoked after a committed policy notification and
+// after a listener reconnect, when notifications may have been missed.
+func (s *Store) RegisterPolicyInvalidator(invalidator func()) {
+	if s == nil || invalidator == nil {
+		return
+	}
+	s.policyInvalidatorsMu.Lock()
+	s.policyInvalidators = append(s.policyInvalidators, invalidator)
+	s.policyInvalidatorsMu.Unlock()
+}
+
+func (s *Store) invalidatePolicyCaches() {
+	s.policyInvalidatorsMu.RLock()
+	callbacks := append([]func(){}, s.policyInvalidators...)
+	s.policyInvalidatorsMu.RUnlock()
+	for _, callback := range callbacks {
+		callback()
+	}
 }
 func (s *Store) Close() {
 	if s == nil {

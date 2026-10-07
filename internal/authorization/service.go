@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -24,7 +25,12 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$`)
 var errSpaceInactive = errors.New("Space or ancestor is inactive")
 var errGroupInactive = errors.New("group or ancestor is inactive")
 
-type Service struct{ Store *store.Store }
+type Service struct {
+	Store *store.Store
+
+	cacheOnce sync.Once
+	cache     *decisionCache
+}
 
 // CheckRequest describes the persisted facts needed by the authorization
 // engine. Callers provide only the subject and resource identity; the service
@@ -41,17 +47,28 @@ type CheckRequest struct {
 // Check is the single authorization decision entry point shared by all
 // interaction planes and state-changing services.
 func (s *Service) Check(ctx context.Context, in CheckRequest) (engine.Decision, int64, error) {
-	return s.checkQueries(ctx, s.Store.Queries(), in, 0)
+	s.initializeCache()
+	return s.checkQueries(ctx, s.Store.Queries(), in, 0, true)
 }
 
 // CheckTx evaluates the same decision using an existing business transaction.
 // It keeps authorization and the mutation on the same database snapshot.
 func (s *Service) CheckTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
-	decision, _, err := s.checkQueries(ctx, q, in, 0)
+	decision, _, err := s.checkQueries(ctx, q, in, 0, false)
 	return decision, err
 }
 
-func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckRequest, depth int) (engine.Decision, int64, error) {
+func (s *Service) initializeCache() {
+	if s == nil || s.Store == nil {
+		return
+	}
+	s.cacheOnce.Do(func() {
+		s.cache = newDecisionCache()
+		s.Store.RegisterPolicyInvalidator(s.cache.clear)
+	})
+}
+
+func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckRequest, depth int, useCache bool) (engine.Decision, int64, error) {
 	if strings.TrimSpace(in.MemberID) == "" || strings.TrimSpace(in.Permission) == "" {
 		return engine.Decision{Effect: engine.Deny, Code: "INVALID_SUBJECT"}, 0, nil
 	}
@@ -121,6 +138,16 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 			return engine.Decision{}, 0, err
 		}
 	}
+	var cacheKey string
+	if useCache {
+		cacheKey, err = s.buildCacheKey(ctx, q, in, member.ID, space, spaceAncestors)
+		if err != nil {
+			return engine.Decision{}, 0, err
+		}
+		if decision, policyVersion, ok := s.cache.get(cacheKey); ok {
+			return decision, policyVersion, nil
+		}
+	}
 	assignments, _, err := s.assignmentsQueries(ctx, q, in.MemberID)
 	if err != nil {
 		return engine.Decision{}, 0, err
@@ -163,7 +190,48 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 			request.Owner = ownerRequest
 		}
 	}
-	return engine.Check(request), space.PolicyVersion, nil
+	decision := engine.Check(request)
+	if useCache {
+		s.cache.put(cacheKey, decision, space.PolicyVersion)
+	}
+	return decision, space.PolicyVersion, nil
+}
+
+func (s *Service) buildCacheKey(ctx context.Context, q *db.Queries, in CheckRequest, memberID string, resourceSpace db.Space, spaceAncestors []string) (string, error) {
+	catalogVersion, err := q.GetAuthorizationCatalogVersion(ctx)
+	if err != nil {
+		return "", err
+	}
+	spaceVersions := make([]versionFact, 0, len(spaceAncestors)+1)
+	spaceVersions = append(spaceVersions, versionFact{id: resourceSpace.ID, version: resourceSpace.PolicyVersion})
+	for _, ancestorID := range spaceAncestors {
+		ancestor, ancestorErr := q.GetSpace(ctx, db.GetSpaceParams{ID: ancestorID})
+		if ancestorErr != nil {
+			return "", ancestorErr
+		}
+		spaceVersions = append(spaceVersions, versionFact{id: ancestor.ID, version: ancestor.PolicyVersion})
+	}
+	memberVersions := make([]versionFact, 0, 4)
+	currentID := memberID
+	for depth := 0; depth <= 8 && currentID != ""; depth++ {
+		version, versionErr := q.GetMemberVersion(ctx, db.GetMemberVersionParams{MemberID: currentID})
+		if versionErr != nil {
+			return "", versionErr
+		}
+		memberVersions = append(memberVersions, versionFact{id: currentID, version: version})
+		agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: currentID})
+		if errors.Is(agentErr, pgx.ErrNoRows) {
+			break
+		}
+		if agentErr != nil {
+			return "", agentErr
+		}
+		if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
+			break
+		}
+		currentID = agent.OwnerMemberID.String
+	}
+	return authorizationCacheKey(in, catalogVersion, spaceVersions, memberVersions), nil
 }
 
 func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, memberID string, in CheckRequest, depth int) (*engine.Request, error) {
@@ -869,9 +937,6 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 				}
 			}
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
-			return err
-		}
 		return audit.Write(ctx, q, "member", actorMemberID, "member.status.update", memberID, "success")
 	})
 }
@@ -984,9 +1049,6 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
-			return err
-		}
 		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.create", row.ID, "success"); err != nil {
 			return err
 		}
@@ -1053,9 +1115,6 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
-			return err
-		}
 		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.inline.create", row.ID, "success"); err != nil {
 			return err
 		}
@@ -1114,9 +1173,6 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.grants:assign"}}
 		}
 		if err := q.RevokeGrant(ctx, db.RevokeGrantParams{ID: grantID}); err != nil {
-			return err
-		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
 			return err
 		}
 		return audit.Write(ctx, q, "member", actorMemberID, "grant.revoke", row.ID, "success")

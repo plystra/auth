@@ -161,6 +161,11 @@ type AuthorizationGrant struct {
 	PermissionKeys  []byte             `json:"permission_keys"`
 }
 
+type AuthorizationPolicyState struct {
+	ID      bool  `json:"id"`
+	Version int64 `json:"version"`
+}
+
 type EmailVerificationToken struct {
 	ID         string             `json:"id"`
 	UserID     string             `json:"user_id"`
