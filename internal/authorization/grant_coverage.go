@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authz/delta"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 )
 
@@ -29,18 +30,62 @@ func validateMemberGrantAnchorTx(ctx context.Context, q *db.Queries, memberSpace
 	return nil
 }
 
-func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, principalKind, spaceID string) error {
+func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string) error {
+	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, principalKind, spaceID, map[string]struct{}{})
+}
+
+func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string, seen map[string]struct{}) error {
 	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
 		return nil
 	}
-	// G8 still needs owner-chain filtering for Agent recipients and Agent
-	// administrators. Until then, neither path may accept a positive delta.
 	actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
 	if err != nil {
 		return err
 	}
-	if actor.Type != "human" || principalKind != "human" || len(change.Rights) != 0 {
+	if _, ok := seen[actorMemberID]; ok {
+		return apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
+	}
+	seen[actorMemberID] = struct{}{}
+	defer delete(seen, actorMemberID)
+	if principalKind == "agent" {
+		change.Permissions, err = s.filterAgentOwnerPermissionsTx(ctx, q, change.Permissions, memberID, spaceID)
+		if err != nil {
+			return err
+		}
+	}
+	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+		return nil
+	}
+	if actor.Type == "application" || principalKind == "application" || len(change.Rights) != 0 {
 		return rejectUncoveredDelta(change, "The grant would increase authority without owner-envelope coverage.")
+	}
+	if actor.Type == "agent" {
+		agent, ownerErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: actorMemberID})
+		if ownerErr != nil {
+			if errors.Is(ownerErr, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+			}
+			return ownerErr
+		}
+		if !agent.OwnerMemberID.Valid || agent.OwnerMemberID.String == "" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+		}
+		owner, ownerErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+		if ownerErr != nil {
+			if errors.Is(ownerErr, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+			}
+			return ownerErr
+		}
+		if owner.Status != "active" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		if err := s.authorizeTargetTx(ctx, q, owner.ID, "auth.grants:assign", spaceID, memberID); err != nil {
+			return err
+		}
+		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, change, owner.ID, memberID, principalKind, spaceID, seen); err != nil {
+			return err
+		}
 	}
 	rights, err := q.LockActiveAssignRightsForHolder(ctx, db.LockActiveAssignRightsForHolderParams{HolderMemberID: actorMemberID})
 	if err != nil {
@@ -140,6 +185,60 @@ func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, 
 		}
 	}
 	return rejectUncoveredDelta(delta.Result{Permissions: uncovered}, "The grant exceeds the administrator's assignment rights.")
+}
+
+func (s *Service) filterAgentOwnerPermissionsTx(ctx context.Context, q *db.Queries, permissions []delta.Permission, agentMemberID, spaceID string) ([]delta.Permission, error) {
+	agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: agentMemberID})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+		}
+		return nil, err
+	}
+	if !agent.OwnerMemberID.Valid || agent.OwnerMemberID.String == "" {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+	}
+	owner, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		return nil, err
+	}
+	if owner.Status != "active" {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+	}
+	out := make([]delta.Permission, 0, len(permissions))
+	for _, permission := range permissions {
+		request := CheckRequest{MemberID: owner.ID, Permission: permission.Key, ResourceSpace: spaceID}
+		switch permission.Position.Kind {
+		case delta.Group:
+			request.ResourceGroup = permission.Position.ID
+		case delta.Space:
+			request.ResourceSpace = permission.Position.ID
+		}
+		switch permission.Scope.Kind {
+		case delta.Self:
+			request.ResourceOwner = agentMemberID
+		case delta.SpaceOnly, delta.SpaceTree:
+			if permission.Scope.Anchor != "" {
+				request.ResourceSpace = permission.Scope.Anchor
+			}
+		case delta.GroupOnly, delta.GroupTree:
+			request.ResourceGroup = permission.Scope.Anchor
+		}
+		decision, err := s.CheckTx(ctx, q, request)
+		if err != nil {
+			return nil, err
+		}
+		if decision.Code == "OWNER_INACTIVE" {
+			return nil, apierr.New("OWNER_INACTIVE", "the Agent owner chain is not active")
+		}
+		if decision.Effect == engine.Allow {
+			out = append(out, permission)
+		}
+	}
+	return out, nil
 }
 
 func addCoverageSpaceTx(ctx context.Context, q *db.Queries, spaceID string, graph *delta.Graph) error {

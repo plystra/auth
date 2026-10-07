@@ -8,6 +8,7 @@ import (
 
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authz/engine"
 )
 
 func TestGrantCreationRejectsPositiveDeltaDespiteMatchingActorPermissionKey(t *testing.T) {
@@ -255,7 +256,7 @@ func TestMemberGrantRejectsScopeAnchorOutsideMemberSpaceTree(t *testing.T) {
 	}
 }
 
-func TestGrantToAgentStillRejectsPositiveDeltaWithoutOwnerRightCoverage(t *testing.T) {
+func TestGrantToAgentUsesOwnerEnvelopeAndAssignmentCoverage(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
 	agents := &agent.Service{Store: st}
@@ -263,8 +264,54 @@ func TestGrantToAgentStillRejectsPositiveDeltaWithoutOwnerRightCoverage(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+	if _, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
+		t.Fatalf("owner-covered Agent grant failed: %v", err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: target.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("owner-covered Agent grant decision = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.roles:manage"}, "space", spaceID)
 	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestAgentCanGrantWithOwnerCoveredAssignmentRight(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	actor, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_binding_actor", Name: "granting-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := svc.CreateMember(ctx, owner.ID, "", spaceID, "Agent grant target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_grants_assign', $1, '["auth.grants:assign"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, actor.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAssignmentRight(ctx, owner.ID, spaceID, actor.ID, []string{"auth.grants:assign", "auth.members:read"}, spaceID, "", true, true, nil); err != nil {
+		t.Fatalf("owner could not delegate grant coverage to Agent: %v", err)
+	}
+	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
+		t.Fatalf("owner-covered Agent grant failed: %v", err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: target.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("Agent-created grant decision = %+v, want allow", decision)
+	}
 }
 
 func TestGrantCreationForUnboundHumanHasNoActingIdentityDelta(t *testing.T) {

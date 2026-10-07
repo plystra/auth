@@ -53,9 +53,9 @@ func permissionSnapshot(assignments []engine.Assignment, subject string, positio
 	return snapshot
 }
 
-// G8's complete assignment-right and Agent owner-envelope coverage remains
-// pending (auth-docs/roadmap.md, G8). Human member grants check the available
-// positive permission delta against the actor's effective assignment rights.
+// G8 applies the same positive-delta evaluator to human and Agent grants.
+// Binding and application-recipient coverage remain explicitly tracked as
+// unfinished G8 work in auth-docs/roadmap.md.
 func (s *Service) coverGrantDeltaTx(ctx context.Context, q *db.Queries, before delta.Snapshot, actorMemberID, memberID, spaceID, principalKind string) error {
 	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, principalKind)
 	if err != nil {
@@ -65,7 +65,7 @@ func (s *Service) coverGrantDeltaTx(ctx context.Context, q *db.Queries, before d
 	if err != nil {
 		return err
 	}
-	return s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, principalKind, spaceID)
+	return s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, memberID, principalKind, spaceID)
 }
 
 func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, memberID, spaceID, principalKind string) (delta.Snapshot, error) {
