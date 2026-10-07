@@ -5,9 +5,11 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/db"
 )
 
 func TestRoleUpdateRejectsUncoveredPositiveDeltaAndRollsBack(t *testing.T) {
@@ -90,5 +92,56 @@ func TestRoleUpdateCoversPositiveDeltaForExistingRoleGrant(t *testing.T) {
 	}
 	if decision.Effect != engine.Allow {
 		t.Fatalf("target audit permission = %+v, want allow", decision)
+	}
+}
+
+func TestRoleGrantCreationSerializesWithRoleUpdate(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Role lock target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	role, err := svc.CreateRole(ctx, actor.ID, spaceID, "readers", "Readers", []string{"auth.members:read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: role.ID, SpaceID: spaceID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("role lock transaction ended before contender started: %v", err)
+	case <-locked:
+	}
+
+	grantErr := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateGrant(ctx, actor.ID, spaceID, target.ID, role.ID, "space", spaceID)
+		grantErr <- err
+	}()
+	select {
+	case err := <-grantErr:
+		t.Fatalf("grant creation bypassed the role lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantErr; err != nil {
+		t.Fatalf("grant failed after role lock release: %v", err)
 	}
 }

@@ -1120,6 +1120,13 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "role was not found in this Space")
+		}
+		if err != nil {
+			return err
+		}
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
@@ -1141,13 +1148,6 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		}
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
-			return err
-		}
-		role, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "role was not found in this Space")
-			}
 			return err
 		}
 		rolePermissions, err := q.ListRolePermissions(ctx, db.ListRolePermissionsParams{RoleID: role.ID})
