@@ -684,3 +684,7 @@ CREATE INDEX assign_rights_anchor_space_idx
 CREATE INDEX assign_rights_anchor_group_idx
     ON assign_rights(anchor_group_id)
     WHERE anchor_group_id IS NOT NULL AND revoked_at IS NULL;
+
+
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS password_reset_required_at timestamptz;

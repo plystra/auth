@@ -256,6 +256,168 @@ func TestOperatorCanSuspendUserAndRevokeAllCredentials(t *testing.T) {
 	}
 }
 
+func TestOperatorCanRequirePasswordResetAndRevokeAllCredentials(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	insertOperator(t, st, "usr_reset_operator", "reset-operator", `["ops:users:manage"]`)
+	if err := insertAccountUserForOperator(ctx, st, "usr_reset_target", "reset-target@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_reset_required_at = NULL WHERE id = 'usr_reset_target'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, token_hash, expires_at)
+		VALUES ('ses_operator_reset', 'usr_reset_target', decode(repeat('77', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
+		VALUES ('rft_operator_reset', 'ses_operator_reset', 'rtf_operator_reset', decode(repeat('88', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte(strings.Repeat("h", 32))
+	raw := insertOperatorSession(t, st, "usr_reset_operator", key, nil)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RequirePasswordReset(ctx, raw, "usr_reset_target", nil); err != nil {
+		t.Fatal(err)
+	}
+	var required bool
+	if err := st.Pool.QueryRow(ctx, `SELECT password_reset_required_at IS NOT NULL FROM users WHERE id = 'usr_reset_target'`).Scan(&required); err != nil {
+		t.Fatal(err)
+	}
+	if !required {
+		t.Fatal("operator action did not require a password reset")
+	}
+	var sessions, refreshTokens int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id = 'ses_operator_reset' AND revoked_at IS NULL`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = 'rft_operator_reset' AND revoked_at IS NULL`).Scan(&refreshTokens); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 0 || refreshTokens != 0 {
+		t.Fatalf("credentials after password reset requirement: sessions=%d refresh_tokens=%d", sessions, refreshTokens)
+	}
+	var audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = $1 AND actor_id = $2`, "user.password_reset.require", "usr_reset_operator").Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("password reset requirement audit count = %d, want 1", audits)
+	}
+}
+
+func TestOperatorRequirePasswordResetRequiresCapabilityAndStepUp(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	insertOperator(t, st, "usr_reset_no_cap", "reset-no-cap", `["ops:operators:manage"]`)
+	if err := insertAccountUserForOperator(ctx, st, "usr_reset_no_cap_target", "reset-no-cap-target@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte(strings.Repeat("h", 32))
+	raw := insertOperatorSession(t, st, "usr_reset_no_cap", key, nil)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RequirePasswordReset(ctx, raw, "usr_reset_no_cap_target", nil); err == nil {
+		t.Fatal("password reset requirement bypassed capability check")
+	} else {
+		assertOperatorError(t, err, "PERMISSION_DENIED")
+	}
+
+	st2 := newOperatorStore(t)
+	insertOperator(t, st2, "usr_reset_stepup", "reset-stepup", `["ops:users:manage"]`)
+	if err := insertAccountUserForOperator(ctx, st2, "usr_reset_stepup_target", "reset-stepup-target@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	raw2 := insertOperatorSession(t, st2, "usr_reset_stepup", key, nil)
+	svc2, err := New(st2, &factor.Service{Store: st2, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(`{"id":"usr_reset_stepup_target"}`))
+	if err := svc2.RequirePasswordReset(ctx, raw2, "usr_reset_stepup_target", digest[:]); err == nil {
+		t.Fatal("password reset requirement bypassed step-up check")
+	} else {
+		assertOperatorError(t, err, "STEP_UP_REQUIRED")
+	}
+}
+
+func TestOperatorRequirePasswordResetRollsBackOnAuditFailure(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	insertOperator(t, st, "usr_reset_audit_operator", "reset-audit-operator", `["ops:users:manage"]`)
+	if err := insertAccountUserForOperator(ctx, st, "usr_reset_audit_target", "reset-audit-target@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, token_hash, expires_at)
+		VALUES ('ses_reset_audit', 'usr_reset_audit_target', decode(repeat('99', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
+		VALUES ('rft_reset_audit', 'ses_reset_audit', 'rtf_reset_audit', decode(repeat('aa', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_password_reset_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'password reset audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_password_reset_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_password_reset_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte(strings.Repeat("h", 32))
+	raw := insertOperatorSession(t, st, "usr_reset_audit_operator", key, nil)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.RequirePasswordReset(ctx, raw, "usr_reset_audit_target", nil); err == nil {
+		t.Fatal("password reset requirement succeeded despite audit failure")
+	}
+	var required bool
+	if err := st.Pool.QueryRow(ctx, `SELECT password_reset_required_at IS NOT NULL FROM users WHERE id = 'usr_reset_audit_target'`).Scan(&required); err != nil {
+		t.Fatal(err)
+	}
+	if required {
+		t.Fatal("password reset flag changed after audit failure")
+	}
+	var sessions, refreshTokens int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id = 'ses_reset_audit' AND revoked_at IS NULL`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = 'rft_reset_audit' AND revoked_at IS NULL`).Scan(&refreshTokens); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 || refreshTokens != 1 {
+		t.Fatalf("credentials changed after audit failure: sessions=%d refresh_tokens=%d", sessions, refreshTokens)
+	}
+}
+
+func insertAccountUserForOperator(ctx context.Context, st *store.Store, id, email, status string) error {
+	hash, err := security.DefaultPasswordHasher().Hash("account-password")
+	if err != nil {
+		return err
+	}
+	_, err = st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ($1, $2, $2, $3, $4)
+	`, id, email, hash, status)
+	return err
+}
+
 func newOperatorStore(t *testing.T) *store.Store {
 	t.Helper()
 	database, err := operatorDB.Clone(context.Background())

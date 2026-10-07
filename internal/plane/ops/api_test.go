@@ -15,8 +15,9 @@ func TestUserDispositionRoutesDeclareHumanOperatorStepUpAndCapability(t *testing
 		method string
 		path   string
 	}{
-		"ops.users.suspend":      {"POST", "/ops/v1/users/{id}/suspend"},
-		"ops.users.sign_out_all": {"POST", "/ops/v1/users/{id}/sign-out-all"},
+		"ops.users.suspend":                {"POST", "/ops/v1/users/{id}/suspend"},
+		"ops.users.sign_out_all":           {"POST", "/ops/v1/users/{id}/sign-out-all"},
+		"ops.users.require_password_reset": {"POST", "/ops/v1/users/{id}/require-password-reset"},
 	}
 	for _, spec := range route.Specs() {
 		expected, ok := want[spec.Name]

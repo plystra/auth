@@ -367,7 +367,10 @@
               "ops.settings.update",
               "ops.operators.create",
               "ops.operators.update",
-              "ops.operators.disable"
+              "ops.operators.disable",
+              "ops.users.suspend",
+              "ops.users.sign_out_all",
+              "ops.users.require_password_reset"
             ],
             "type": "string"
           },
@@ -784,6 +787,51 @@
           }
         },
         "summary": "ops.settings.update"
+      }
+    },
+    "/ops/v1/users/{id}/require-password-reset": {
+      "post": {
+        "operationId": "ops.users.require_password_reset",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.users.require_password_reset"
       }
     },
     "/ops/v1/users/{id}/sign-out-all": {

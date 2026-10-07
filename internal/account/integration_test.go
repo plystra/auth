@@ -342,6 +342,54 @@ func TestLoginRehashesLegacyPasswordAndRejectsOverlongInput(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsPasswordResetRequiredAccounts(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	passwords := security.DefaultPasswordHasher()
+	hash, err := passwords.Hash("a sufficiently long password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status, password_reset_required_at)
+		VALUES ('usr_reset_required', 'reset-required@example.test', 'reset-required@example.test', $1, 'active', now())
+	`, hash); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st, Passwords: passwords, Settings: &space.Service{Store: st}}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "reset-required@example.test", Password: "a sufficiently long password"}); err == nil {
+		t.Fatal("login succeeded while password reset was required")
+	} else {
+		assertAccountError(t, err, "PASSWORD_RESET_REQUIRED")
+	}
+}
+
+func TestPasswordResetClearsRequiredFlag(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_reset_clear", "reset-clear@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_reset_required_at = now() WHERE id = 'usr_reset_clear'`); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}}
+	token, err := accounts.RequestPasswordReset(ctx, "reset-clear@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.ResetPassword(ctx, token, "a newly secure password"); err != nil {
+		t.Fatal(err)
+	}
+	var required bool
+	if err := st.Pool.QueryRow(ctx, `SELECT password_reset_required_at IS NOT NULL FROM users WHERE id = 'usr_reset_clear'`).Scan(&required); err != nil {
+		t.Fatal(err)
+	}
+	if required {
+		t.Fatal("password reset required flag was not cleared")
+	}
+}
+
 func TestVerificationAndResetTokensAreHashedSingleUseAndRevokeSessions(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)

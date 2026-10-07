@@ -336,15 +336,16 @@ type SpaceEnvelopeEntry struct {
 }
 
 type User struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	EmailNormalized string             `json:"email_normalized"`
-	PasswordHash    string             `json:"password_hash"`
-	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
-	Status          string             `json:"status"`
+	ID                      string             `json:"id"`
+	Email                   string             `json:"email"`
+	EmailNormalized         string             `json:"email_normalized"`
+	PasswordHash            string             `json:"password_hash"`
+	EmailVerifiedAt         pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt              pgtype.Timestamptz `json:"disabled_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	Status                  string             `json:"status"`
+	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
 }
 
 type UserMember struct {

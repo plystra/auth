@@ -11,10 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const clearPasswordResetRequired = `-- name: ClearPasswordResetRequired :exec
+UPDATE users SET password_reset_required_at = NULL, updated_at = now()
+WHERE id = $1
+`
+
+type ClearPasswordResetRequiredParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) ClearPasswordResetRequired(ctx context.Context, arg ClearPasswordResetRequiredParams) error {
+	_, err := q.db.Exec(ctx, clearPasswordResetRequired, arg.ID)
+	return err
+}
+
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (id, email, email_normalized, password_hash, status)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
+RETURNING id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 `
 
 type CreateUserParams struct {
@@ -26,15 +40,16 @@ type CreateUserParams struct {
 }
 
 type CreateUserRow struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	EmailNormalized string             `json:"email_normalized"`
-	PasswordHash    string             `json:"password_hash"`
-	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	Status          string             `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	Email                   string             `json:"email"`
+	EmailNormalized         string             `json:"email_normalized"`
+	PasswordHash            string             `json:"password_hash"`
+	EmailVerifiedAt         pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt              pgtype.Timestamptz `json:"disabled_at"`
+	Status                  string             `json:"status"`
+	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error) {
@@ -54,6 +69,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
 		&i.Status,
+		&i.PasswordResetRequiredAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -61,7 +77,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 FROM users WHERE email_normalized = $1 LIMIT 1
 `
 
@@ -70,15 +86,16 @@ type GetUserByEmailParams struct {
 }
 
 type GetUserByEmailRow struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	EmailNormalized string             `json:"email_normalized"`
-	PasswordHash    string             `json:"password_hash"`
-	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	Status          string             `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	Email                   string             `json:"email"`
+	EmailNormalized         string             `json:"email_normalized"`
+	PasswordHash            string             `json:"password_hash"`
+	EmailVerifiedAt         pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt              pgtype.Timestamptz `json:"disabled_at"`
+	Status                  string             `json:"status"`
+	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) (GetUserByEmailRow, error) {
@@ -92,6 +109,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) 
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
 		&i.Status,
+		&i.PasswordResetRequiredAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -99,7 +117,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, arg GetUserByEmailParams) 
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 FROM users WHERE id = $1 LIMIT 1
 `
 
@@ -108,15 +126,16 @@ type GetUserByIDParams struct {
 }
 
 type GetUserByIDRow struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	EmailNormalized string             `json:"email_normalized"`
-	PasswordHash    string             `json:"password_hash"`
-	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	Status          string             `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	Email                   string             `json:"email"`
+	EmailNormalized         string             `json:"email_normalized"`
+	PasswordHash            string             `json:"password_hash"`
+	EmailVerifiedAt         pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt              pgtype.Timestamptz `json:"disabled_at"`
+	Status                  string             `json:"status"`
+	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUserByIDRow, error) {
@@ -130,6 +149,7 @@ func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUs
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
 		&i.Status,
+		&i.PasswordResetRequiredAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -137,7 +157,7 @@ func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUs
 }
 
 const lockUserForStatus = `-- name: LockUserForStatus :one
-SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, created_at, updated_at
+SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 FROM users WHERE id = $1 FOR UPDATE
 `
 
@@ -146,15 +166,16 @@ type LockUserForStatusParams struct {
 }
 
 type LockUserForStatusRow struct {
-	ID              string             `json:"id"`
-	Email           string             `json:"email"`
-	EmailNormalized string             `json:"email_normalized"`
-	PasswordHash    string             `json:"password_hash"`
-	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
-	DisabledAt      pgtype.Timestamptz `json:"disabled_at"`
-	Status          string             `json:"status"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	Email                   string             `json:"email"`
+	EmailNormalized         string             `json:"email_normalized"`
+	PasswordHash            string             `json:"password_hash"`
+	EmailVerifiedAt         pgtype.Timestamptz `json:"email_verified_at"`
+	DisabledAt              pgtype.Timestamptz `json:"disabled_at"`
+	Status                  string             `json:"status"`
+	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) LockUserForStatus(ctx context.Context, arg LockUserForStatusParams) (LockUserForStatusRow, error) {
@@ -168,6 +189,7 @@ func (q *Queries) LockUserForStatus(ctx context.Context, arg LockUserForStatusPa
 		&i.EmailVerifiedAt,
 		&i.DisabledAt,
 		&i.Status,
+		&i.PasswordResetRequiredAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -189,6 +211,20 @@ func (q *Queries) MarkEmailVerified(ctx context.Context, arg MarkEmailVerifiedPa
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const requirePasswordReset = `-- name: RequirePasswordReset :exec
+UPDATE users SET password_reset_required_at = COALESCE(password_reset_required_at, now()), updated_at = now()
+WHERE id = $1
+`
+
+type RequirePasswordResetParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) RequirePasswordReset(ctx context.Context, arg RequirePasswordResetParams) error {
+	_, err := q.db.Exec(ctx, requirePasswordReset, arg.ID)
+	return err
 }
 
 const setUserStatus = `-- name: SetUserStatus :exec

@@ -308,7 +308,7 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 
 func (s *Service) StepUp(ctx context.Context, raw, code, operation string, digest []byte) error {
 	switch operation {
-	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.users.suspend", "ops.users.sign_out_all":
+	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.users.suspend", "ops.users.sign_out_all", "ops.users.require_password_reset":
 	default:
 		return s.failure(ctx, "", "ops.auth.step_up", apierr.New("VALIDATION_FAILED", "An implemented operation and its request digest are required."))
 	}
@@ -350,6 +350,12 @@ func (s *Service) SignOutAllUserSessions(ctx context.Context, raw, userID string
 			return err
 		}
 		return audit.Write(ctx, q, "operator", current.UserID, "user.sessions.revoke", userID, "success")
+	})
+}
+
+func (s *Service) RequirePasswordReset(ctx context.Context, raw, userID string, digest []byte) error {
+	return s.Run(ctx, raw, "ops.users.require_password_reset", "ops:users:manage", digest, func(q *db.Queries, current Session) error {
+		return account.RequirePasswordResetTx(ctx, q, "operator", current.UserID, userID)
 	})
 }
 

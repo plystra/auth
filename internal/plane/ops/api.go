@@ -45,7 +45,7 @@ type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
 		Code      secret.String   `json:"mfa_code" minLength:"6" maxLength:"6"`
-		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable"`
+		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
 }
@@ -118,6 +118,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "ops.operators.disable", Method: "POST", Path: "/ops/v1/operators/{id}/disable", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.disableOperator)
 	route.Register(api, route.Spec{Name: "ops.users.suspend", Method: "POST", Path: "/ops/v1/users/{id}/suspend", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.suspendUser)
 	route.Register(api, route.Spec{Name: "ops.users.sign_out_all", Method: "POST", Path: "/ops/v1/users/{id}/sign-out-all", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.signOutAllUserSessions)
+	route.Register(api, route.Spec{Name: "ops.users.require_password_reset", Method: "POST", Path: "/ops/v1/users/{id}/require-password-reset", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.requirePasswordReset)
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)
@@ -240,6 +241,22 @@ func (a *API) signOutAllUserSessions(ctx context.Context, in *UserActionInput) (
 		return nil, err
 	}
 	if err := a.Operators.SignOutAllUserSessions(ctx, token, in.ID, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+func (a *API) requirePasswordReset(ctx context.Context, in *UserActionInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(struct {
+		ID string `json:"id"`
+	}{ID: in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Operators.RequirePasswordReset(ctx, token, in.ID, digest); err != nil {
 		return nil, err
 	}
 	return accepted(), nil

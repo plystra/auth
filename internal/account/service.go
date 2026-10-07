@@ -187,6 +187,9 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 	if u.Status != "active" {
 		return AuthResult{}, apierr.New("UNAUTHENTICATED", "this account is not active")
 	}
+	if u.PasswordResetRequiredAt.Valid {
+		return AuthResult{}, apierr.New("PASSWORD_RESET_REQUIRED", "reset your password before signing in")
+	}
 	memberID := ""
 	if s.Authorization != nil {
 		if member, memberErr := s.Authorization.GetMemberForUser(ctx, u.ID, DefaultSpaceID); memberErr == nil {
@@ -250,6 +253,32 @@ func SetUserStatusTx(ctx context.Context, q *db.Queries, actorType, actorID, use
 		}
 	}
 	return audit.Write(ctx, q, actorType, actorID, "user.status.update", user.ID, "success")
+}
+
+func (s *Service) RequirePasswordReset(ctx context.Context, actorType, actorID, userID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		return RequirePasswordResetTx(ctx, q, actorType, actorID, userID)
+	})
+}
+
+func RequirePasswordResetTx(ctx context.Context, q *db.Queries, actorType, actorID, userID string) error {
+	user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("NOT_FOUND", "user was not found")
+	}
+	if err != nil {
+		return err
+	}
+	if err := q.RequirePasswordReset(ctx, db.RequirePasswordResetParams{ID: user.ID}); err != nil {
+		return err
+	}
+	if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: user.ID}); err != nil {
+		return err
+	}
+	if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: user.ID}); err != nil {
+		return err
+	}
+	return audit.Write(ctx, q, actorType, actorID, "user.password_reset.require", user.ID, "success")
 }
 
 func toPublicUser(id, email string, verified bool, status string, createdAt time.Time) User {

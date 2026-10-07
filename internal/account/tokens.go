@@ -95,6 +95,9 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 		if e = q.UpdatePassword(ctx, db.UpdatePasswordParams{ID: v, PasswordHash: hash}); e != nil {
 			return e
 		}
+		if e = q.ClearPasswordResetRequired(ctx, db.ClearPasswordResetRequiredParams{ID: v}); e != nil {
+			return e
+		}
 		if e = q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: v}); e != nil {
 			return e
 		}
