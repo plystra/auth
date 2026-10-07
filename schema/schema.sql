@@ -837,3 +837,24 @@ CREATE UNLOGGED TABLE river_leader (
     CONSTRAINT river_leader_name CHECK (name = 'default'),
     CONSTRAINT river_leader_id_length CHECK (char_length(leader_id) > 0 AND char_length(leader_id) < 128)
 );
+
+
+-- Policy versions are bumped in the same transaction as authorization writes.
+-- PostgreSQL delivers this notification only after that transaction commits,
+-- so other nodes never invalidate from an uncommitted policy change.
+CREATE OR REPLACE FUNCTION notify_auth_policy_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF OLD.policy_version IS DISTINCT FROM NEW.policy_version THEN
+        PERFORM pg_notify('auth_policy', NEW.id);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER spaces_auth_policy_notify
+AFTER UPDATE OF policy_version ON spaces
+FOR EACH ROW
+EXECUTE FUNCTION notify_auth_policy_change();

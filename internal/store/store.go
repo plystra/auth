@@ -22,8 +22,9 @@ import (
 )
 
 type Store struct {
-	Pool *pgxpool.Pool
-	Jobs *jobs.Client
+	Pool           *pgxpool.Pool
+	Jobs           *jobs.Client
+	PolicyListener *PolicyListener
 }
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
@@ -49,10 +50,20 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{Pool: pool, Jobs: jobClient}, nil
+	return &Store{
+		Pool:           pool,
+		Jobs:           jobClient,
+		PolicyListener: NewPolicyListener(context.Background(), pool, nil),
+	}, nil
 }
 func (s *Store) Close() {
-	if s != nil && s.Pool != nil {
+	if s == nil {
+		return
+	}
+	if s.PolicyListener != nil {
+		_ = s.PolicyListener.Close(context.Background())
+	}
+	if s.Pool != nil {
 		s.Pool.Close()
 	}
 }
