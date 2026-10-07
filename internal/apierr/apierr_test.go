@@ -15,6 +15,7 @@ func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 		"unavailable":               http.StatusServiceUnavailable,
 		"not_implemented":           http.StatusNotImplemented,
 		"invalid_grant":             http.StatusBadRequest,
+		"invalid_scope":             http.StatusBadRequest,
 		"inline_grants_not_allowed": http.StatusBadRequest,
 	}
 	for code, want := range tests {

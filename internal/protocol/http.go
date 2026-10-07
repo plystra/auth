@@ -3,7 +3,6 @@ package protocol
 import (
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/plystra/auth/internal/agent"
@@ -118,6 +117,10 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_grant", "actor token is invalid"))
 		return
 	}
+	if err := h.Agents.ValidateActive(r.Context(), actor.MemberID); err != nil {
+		writeErr(w, apierr.New("invalid_grant", "actor token is invalid"))
+		return
+	}
 	parentClaims, active, err := h.Sessions.Introspect(r.Context(), r.Form.Get("subject_token"), security.DefaultApplicationAudience)
 	if err != nil || !active || parentClaims.Type != "agent" {
 		writeErr(w, apierr.New("invalid_grant", "subject token is invalid"))
@@ -132,18 +135,31 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
 		return
 	}
-	requested := strings.Fields(r.Form.Get("scope"))
-	if len(requested) > 0 {
+	requested := uniqueScopes(strings.Fields(r.Form.Get("scope")))
+	parentScopes := uniqueScopes(parentClaims.Scopes)
+	if len(requested) == 0 && len(parentScopes) > 0 {
+		// An omitted scope inherits the parent token's restriction. It must
+		// never turn a previously narrowed delegation back into an unscoped
+		// token.
+		requested = parentScopes
+	}
+	if len(parentScopes) > 0 {
 		for _, permission := range requested {
-			decision, _, checkErr := h.Authorization.Check(r.Context(), authorization.CheckRequest{MemberID: actor.MemberID, Permission: permission, ResourceSpace: actor.SpaceID})
-			if checkErr != nil {
-				writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+			if !scopeContains(parentScopes, permission) {
+				writeErr(w, apierr.New("invalid_scope", "requested scope exceeds the subject token scope"))
 				return
 			}
-			if decision.Effect != engine.Allow {
-				writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
-				return
-			}
+		}
+	}
+	for _, permission := range requested {
+		decision, _, checkErr := h.Authorization.Check(r.Context(), authorization.CheckRequest{MemberID: actor.MemberID, Permission: permission, ResourceSpace: actor.SpaceID})
+		if checkErr != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+			return
+		}
+		if decision.Effect != engine.Allow {
+			writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
+			return
 		}
 	}
 	tokens, err := h.Sessions.CreateAgentDelegatedAccess(r.Context(), actor.MemberID, actor.SpaceID, r.Form.Get("resource"), parentClaims.Subject, requested, parentClaims.ExpiresAt)
@@ -172,4 +188,28 @@ func writeErr(w http.ResponseWriter, e *apierr.Error) {
 	writeJSON(w, apierr.Status(e.Code), map[string]any{"error": map[string]any{"code": e.Code, "message": e.Message}})
 }
 
-var _ = url.Values{}
+func uniqueScopes(scopes []string) []string {
+	seen := make(map[string]struct{}, len(scopes))
+	out := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	return out
+}
+
+func scopeContains(scopes []string, want string) bool {
+	for _, scope := range scopes {
+		if scope == want {
+			return true
+		}
+	}
+	return false
+}

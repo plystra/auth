@@ -651,6 +651,18 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, 
 	return Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, ExpiresAt: row.ExpiresAt.Time, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}, nil
 }
 
+// ValidateActive checks the live Agent and its "my agents" group before a
+// protocol operation delegates authority to the Agent. Ordinary credential
+// authentication intentionally keeps its historical semantics so callers
+// that need to report authorization facts can do so through the engine.
+func (s *Service) ValidateActive(ctx context.Context, memberID string) error {
+	member, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) || err != nil || member.Status != "active" || member.GroupStatus != "active" || (member.ExpiresAt.Valid && !member.ExpiresAt.Time.After(time.Now().UTC())) {
+		return apierr.New("UNAUTHENTICATED", "agent credential is invalid")
+	}
+	return nil
+}
+
 func (s *Service) generateCredential() (string, string, []byte, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
