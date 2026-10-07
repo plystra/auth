@@ -3,6 +3,7 @@ package authorization
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -388,6 +389,55 @@ func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
 	}
 	if unowned.Effect != engine.Deny || unowned.Code != "SCOPE_OUT_OF_BOUNDS" {
 		t.Fatalf("owner self scope over unrelated resource = %+v, want SCOPE_OUT_OF_BOUNDS", unowned)
+	}
+}
+
+func TestAgentGovernancePermissionsMatchHumanDecision(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "governance-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	permissions := []string{
+		"auth.spaces:manage",
+		"auth.members:manage",
+		"auth.roles:manage",
+		"auth.grants:assign",
+		"auth.assign_rights:manage",
+		"auth.envelopes:manage",
+		"auth.agents:create",
+		"auth.groups:manage",
+	}
+	for i, permission := range permissions {
+		encoded, marshalErr := json.Marshal([]string{permission})
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if _, err := st.Pool.Exec(ctx, `
+			INSERT INTO authorization_grants
+			    (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+			VALUES ($1, $2, $3, $4, 'space', $2, $5),
+			       ($6, $2, $3, $7, 'space', $2, $5)
+		`, fmt.Sprintf("grt_governance_human_%02d", i), spaceID, encoded, owner.ID, owner.ID,
+			fmt.Sprintf("grt_governance_agent_%02d", i), created.ID); err != nil {
+			t.Fatal(err)
+		}
+		human, _, err := svc.Check(ctx, CheckRequest{MemberID: owner.ID, Permission: permission, ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		agentDecision, _, err := svc.Check(ctx, CheckRequest{MemberID: created.ID, Permission: permission, ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if agentDecision.Effect != human.Effect || agentDecision.Code != human.Code {
+			t.Fatalf("governance permission %s human=%+v agent=%+v", permission, human, agentDecision)
+		}
+		if agentDecision.Effect != engine.Allow {
+			t.Fatalf("governance permission %s was not allowed for equivalent Agent grant: %+v", permission, agentDecision)
+		}
 	}
 }
 
