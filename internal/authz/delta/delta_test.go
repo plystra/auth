@@ -582,7 +582,7 @@ func bruteScopeContains(a, b Scope, graph Graph) bool {
 	if a.Kind == GroupTree && (b.Kind == GroupOnly || b.Kind == GroupTree) {
 		return b.Anchor == a.Anchor || isGroupDescendant(graph, b.Anchor, a.Anchor)
 	}
-	if a.Kind == SpaceOnly && (b.Kind == GroupOnly || b.Kind == GroupTree) {
+	if (a.Kind == SpaceOnly || a.Kind == SpaceTree) && (b.Kind == GroupOnly || b.Kind == GroupTree) {
 		return groupInSpace(graph, b.Anchor, a.Anchor)
 	}
 	return false
