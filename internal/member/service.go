@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/store"
@@ -34,6 +35,13 @@ func (s *Service) Create(ctx context.Context, spaceID, name, kind string) (Membe
 }
 func (s *Service) LinkUser(ctx context.Context, userID, memberID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID})
+		if err != nil {
+			return err
+		}
+		if operators != 0 {
+			return apierr.New("CONFLICT", "an operator identity cannot become a member")
+		}
 		return q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberID})
 	})
 }

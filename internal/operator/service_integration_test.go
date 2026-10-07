@@ -157,6 +157,48 @@ func TestOperatorBootstrapOnlyRunsWithoutExistingOperators(t *testing.T) {
 	}
 }
 
+func TestOperatorAndMemberIdentitiesAreMutuallyExclusive(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	if err := insertAccountUserForOperator(ctx, st, "usr_member_identity", "member-identity@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, kind, type, binding_policy, status)
+		VALUES ('mem_operator_exclusion', 'spc_01h00000000000000000000000', 'Bound member', 'user', 'human', 'single', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO user_members (user_id, member_id) VALUES ('usr_member_identity', 'mem_operator_exclusion')`); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{[]byte(strings.Repeat("h", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Bootstrap(ctx, "usr_member_identity"); err == nil {
+		t.Fatal("bootstrap promoted an active member binding to an operator")
+	} else {
+		assertOperatorError(t, err, "CONFLICT")
+	}
+
+	if err := insertAccountUserForOperator(ctx, st, "usr_operator_identity", "operator-identity@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO operators (user_id, capabilities) VALUES ('usr_operator_identity', '["*"]'::jsonb)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, kind, type, binding_policy, status)
+		VALUES ('mem_operator_exclusion_reverse', 'spc_01h00000000000000000000000', 'Operator member', 'user', 'human', 'single', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO user_members (user_id, member_id) VALUES ('usr_operator_identity', 'mem_operator_exclusion_reverse')`); err == nil {
+		t.Fatal("database allowed an operator to receive an active member binding")
+	}
+}
+
 func TestOperatorStepUpBindsRequestDigestAndIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	st := newOperatorStore(t)

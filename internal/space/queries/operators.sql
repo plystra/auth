@@ -1,6 +1,14 @@
 -- name: CountOperators :one
 SELECT count(*)::int FROM operators WHERE active;
 
+-- name: CountActiveMemberBindingsForUser :one
+SELECT count(*)::int
+FROM user_members
+WHERE user_id = sqlc.arg(user_id)
+  AND status = 'active'
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now());
+
 -- name: CreateOperator :exec
 INSERT INTO operators (user_id, capabilities) VALUES (sqlc.arg(user_id), sqlc.arg(capabilities));
 

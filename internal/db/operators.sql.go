@@ -11,6 +11,26 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveMemberBindingsForUser = `-- name: CountActiveMemberBindingsForUser :one
+SELECT count(*)::int
+FROM user_members
+WHERE user_id = $1
+  AND status = 'active'
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > now())
+`
+
+type CountActiveMemberBindingsForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) CountActiveMemberBindingsForUser(ctx context.Context, arg CountActiveMemberBindingsForUserParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countActiveMemberBindingsForUser, arg.UserID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const countFullCapabilityOperators = `-- name: CountFullCapabilityOperators :one
 SELECT count(*)::int FROM operators WHERE active AND capabilities @> '["*"]'::jsonb
 `

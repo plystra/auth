@@ -11,6 +11,9 @@ RETURNING id, space_id, name, type, binding_policy, status, created_at;
 -- name: LinkUserMember :exec
 INSERT INTO user_members (user_id, member_id) VALUES (sqlc.arg(user_id), sqlc.arg(member_id)) ON CONFLICT DO NOTHING;
 
+-- name: CountOperatorsForUser :one
+SELECT count(*)::int FROM operators WHERE user_id = sqlc.arg(user_id);
+
 -- name: BindUserMember :exec
 INSERT INTO user_members (user_id, member_id, status, expires_at, revoked_at)
 VALUES (sqlc.arg(user_id), sqlc.arg(member_id), 'active', sqlc.narg(expires_at), NULL)

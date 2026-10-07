@@ -478,6 +478,11 @@ func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType,
 		if err != nil {
 			return err
 		}
+		if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+			return err
+		} else if operators != 0 {
+			return apierr.New("CONFLICT", "an operator identity cannot become a member")
+		}
 		if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberRow.ID}); err != nil {
 			return err
 		}
@@ -720,6 +725,11 @@ func (s *Service) PolicyVersion(ctx context.Context, spaceID string) (int64, err
 
 // EnsureDefaultMembershipTx is part of the caller's registration transaction.
 func (s *Service) EnsureDefaultMembershipTx(ctx context.Context, q *db.Queries, userID, displayName string) (string, error) {
+	if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+		return "", err
+	} else if operators != 0 {
+		return "", apierr.New("CONFLICT", "an operator identity cannot become a member")
+	}
 	if existing, err := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: "spc_01h00000000000000000000000"}); err == nil {
 		return existing.ID, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -783,6 +793,11 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 			if kind != "human" {
 				return apierr.New("VALIDATION_FAILED", "only human members can bind a user")
 			}
+			if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+				return err
+			} else if operators != 0 {
+				return apierr.New("CONFLICT", "an operator identity cannot become a member")
+			}
 			if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberRow.ID}); err != nil {
 				return err
 			}
@@ -842,6 +857,11 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		}
 		if user.Status != "active" {
 			return apierr.New("CONFLICT", "user is not active")
+		}
+		if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+			return err
+		} else if operators != 0 {
+			return apierr.New("CONFLICT", "an operator identity cannot become a member")
 		}
 		change, err := s.bindingAuthorityDeltaTx(ctx, q, memberID, userID, spaceID)
 		if err != nil {

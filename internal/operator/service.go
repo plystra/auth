@@ -133,6 +133,13 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 		if user.DisabledAt.Valid || user.Status != "active" {
 			return apierr.New("CONFLICT", "bootstrap user is not active")
 		}
+		memberBindings, err := q.CountActiveMemberBindingsForUser(ctx, db.CountActiveMemberBindingsForUserParams{UserID: user.ID})
+		if err != nil {
+			return err
+		}
+		if memberBindings != 0 {
+			return apierr.New("CONFLICT", "a member identity cannot become an operator")
+		}
 		caps, err := json.Marshal([]string{"*"})
 		if err != nil {
 			return err
@@ -450,6 +457,13 @@ func (s *Service) Create(ctx context.Context, raw, userID string, capabilities [
 		}
 		if user.DisabledAt.Valid {
 			return apierr.New("CONFLICT", "A disabled user cannot become an operator.")
+		}
+		memberBindings, err := q.CountActiveMemberBindingsForUser(ctx, db.CountActiveMemberBindingsForUserParams{UserID: user.ID})
+		if err != nil {
+			return err
+		}
+		if memberBindings != 0 {
+			return apierr.New("CONFLICT", "A member identity cannot become an operator.")
 		}
 		if _, err := q.GetOperator(ctx, db.GetOperatorParams{UserID: userID}); err == nil {
 			return apierr.New("CONFLICT", "The user is already an operator.")

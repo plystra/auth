@@ -68,6 +68,21 @@ func (q *Queries) CountActiveMemberBindings(ctx context.Context, arg CountActive
 	return column_1, err
 }
 
+const countOperatorsForUser = `-- name: CountOperatorsForUser :one
+SELECT count(*)::int FROM operators WHERE user_id = $1
+`
+
+type CountOperatorsForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) CountOperatorsForUser(ctx context.Context, arg CountOperatorsForUserParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countOperatorsForUser, arg.UserID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createMember = `-- name: CreateMember :one
 INSERT INTO members (id, space_id, name, kind, type)
 VALUES ($1, $2, $3, $4, $5)
