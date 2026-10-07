@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ type Config struct {
 	ServerAddr              string        `env:"PLYSTRA_AUTH_SERVER_ADDR" envDefault:":8081"`
 	OpsAddr                 string        `env:"PLYSTRA_AUTH_OPS_ADDR" envDefault:"127.0.0.1:8082"`
 	DatabaseURL             string        `env:"PLYSTRA_AUTH_DATABASE_URL,required"`
+	MigrationDatabaseURL    string        `env:"PLYSTRA_AUTH_MIGRATION_DATABASE_URL,required"`
 	Issuer                  string        `env:"PLYSTRA_AUTH_ISSUER,required"`
 	SessionHMACKeys         string        `env:"PLYSTRA_AUTH_SESSION_HMAC_KEYS,required"`
 	DataKey                 string        `env:"PLYSTRA_AUTH_DATA_KEY,required"`
@@ -38,6 +40,9 @@ func Load() (Config, error) {
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.DatabaseURL) == "" {
 		return errors.New("PLYSTRA_AUTH_DATABASE_URL is required")
+	}
+	if strings.TrimSpace(c.MigrationDatabaseURL) == "" {
+		return errors.New("PLYSTRA_AUTH_MIGRATION_DATABASE_URL is required")
 	}
 	if strings.TrimSpace(c.Issuer) == "" {
 		return errors.New("PLYSTRA_AUTH_ISSUER is required")
@@ -70,6 +75,16 @@ func (c Config) Validate() error {
 	}
 	if strings.EqualFold(c.Environment, "production") && strings.TrimSpace(c.SigningKeyFile) == "" {
 		return errors.New("signing key file is required in production")
+	}
+	if strings.EqualFold(c.Environment, "production") {
+		applicationURL, applicationErr := url.Parse(c.DatabaseURL)
+		migrationURL, migrationErr := url.Parse(c.MigrationDatabaseURL)
+		if applicationErr != nil || migrationErr != nil || applicationURL.User == nil || migrationURL.User == nil {
+			return errors.New("production database URLs must identify distinct application and migration roles")
+		}
+		if applicationURL.User.Username() == migrationURL.User.Username() {
+			return errors.New("production database URLs must use distinct application and migration roles")
+		}
 	}
 	return nil
 }

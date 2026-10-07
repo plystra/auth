@@ -423,7 +423,7 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close(context.Background()) })
-	if err := store.Migrate(ctx, database.URL); err != nil {
+	if err := store.Migrate(ctx, database.OwnerURL); err != nil {
 		t.Fatalf("reapplying migrations: %v", err)
 	}
 	verificationStore, err := store.Open(ctx, database.URL)

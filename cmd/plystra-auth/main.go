@@ -61,7 +61,7 @@ func migrateCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		return store.Migrate(cmd.Context(), c.DatabaseURL)
+		return store.Migrate(cmd.Context(), c.MigrationDatabaseURL)
 	}}
 }
 func doctorCommand() *cobra.Command {

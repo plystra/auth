@@ -24,12 +24,16 @@ var validDatabaseName = regexp.MustCompile(`^[a-z][a-z0-9_]+$`)
 type Harness struct {
 	container *postgres.PostgresContainer
 	adminURL  string
+	ownerURL  string
+	appURL    string
 	template  string
 	nextID    atomic.Uint64
 }
 
 type Database struct {
 	URL      string
+	OwnerURL string
+	AppURL   string
 	name     string
 	adminURL string
 }
@@ -53,13 +57,20 @@ func Start(ctx context.Context) (*Harness, error) {
 		_ = container.Terminate(ctx)
 		return nil, fmt.Errorf("get postgres connection string: %w", err)
 	}
+	adminURL = databaseURL(adminURL, "postgres")
+	if err := createRoles(ctx, adminURL); err != nil {
+		_ = container.Terminate(ctx)
+		return nil, err
+	}
 	templateName := fmt.Sprintf("auth_template_%d", os.Getpid())
-	h := &Harness{container: container, adminURL: databaseURL(adminURL, "postgres"), template: templateName}
+	ownerURL := roleDatabaseURL(adminURL, "plystra_auth_owner", "test-owner-password")
+	appURL := roleDatabaseURL(adminURL, "plystra_auth_app", "test-app-password")
+	h := &Harness{container: container, adminURL: adminURL, ownerURL: ownerURL, appURL: appURL, template: templateName}
 	if err := h.createDatabase(ctx, templateName, "postgres"); err != nil {
 		_ = h.Close(ctx)
 		return nil, err
 	}
-	if err := store.Migrate(ctx, databaseURL(adminURL, templateName)); err != nil {
+	if err := store.Migrate(ctx, databaseURL(ownerURL, templateName)); err != nil {
 		_ = h.Close(ctx)
 		return nil, fmt.Errorf("migrate postgres template: %w", err)
 	}
@@ -82,7 +93,13 @@ func (h *Harness) Clone(ctx context.Context) (Database, error) {
 	if err := h.createDatabase(ctx, name, h.template); err != nil {
 		return Database{}, err
 	}
-	return Database{URL: databaseURL(h.adminURL, name), name: name, adminURL: h.adminURL}, nil
+	return Database{
+		URL:      databaseURL(h.adminURL, name),
+		OwnerURL: databaseURL(h.ownerURL, name),
+		AppURL:   databaseURL(h.appURL, name),
+		name:     name,
+		adminURL: h.adminURL,
+	}, nil
 }
 
 func (d Database) Close(ctx context.Context) error {
@@ -151,12 +168,61 @@ func (h *Harness) createDatabase(ctx context.Context, name, template string) err
 	return nil
 }
 
+func createRoles(ctx context.Context, adminURL string) error {
+	var conn *pgx.Conn
+	var err error
+	for attempt := 0; attempt < 10; attempt++ {
+		conn, err = pgx.Connect(ctx, adminURL)
+		if err == nil {
+			break
+		}
+		if attempt == 9 {
+			return fmt.Errorf("connect postgres admin database for roles: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("connect postgres admin database for roles: %w", ctx.Err())
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	defer func() { _ = conn.Close(ctx) }()
+	if _, err := conn.Exec(ctx, `
+		DO $$
+		BEGIN
+			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'plystra_auth_owner') THEN
+				CREATE ROLE plystra_auth_owner LOGIN PASSWORD 'test-owner-password';
+			ELSE
+				ALTER ROLE plystra_auth_owner LOGIN PASSWORD 'test-owner-password';
+			END IF;
+			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'plystra_auth_app') THEN
+				CREATE ROLE plystra_auth_app LOGIN PASSWORD 'test-app-password';
+			ELSE
+				ALTER ROLE plystra_auth_app LOGIN PASSWORD 'test-app-password';
+			END IF;
+		END
+		$$;
+		GRANT USAGE, CREATE ON SCHEMA public TO plystra_auth_owner;
+	`); err != nil {
+		return fmt.Errorf("create postgres test roles: %w", err)
+	}
+	return nil
+}
+
 func databaseURL(raw, name string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		panic(err)
 	}
 	u.Path = "/" + name
+	return u.String()
+}
+
+func roleDatabaseURL(raw, username, password string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		panic(err)
+	}
+	u.User = url.UserPassword(username, password)
 	return u.String()
 }
 
