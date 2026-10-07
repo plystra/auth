@@ -151,7 +151,7 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 func (s *Service) requireOwnerAssignmentCoverageTx(ctx context.Context, q *db.Queries, agentMemberID string, candidate delta.Right, graph delta.Graph, expiresAt *time.Time) error {
 	current := agentMemberID
 	seen := map[string]struct{}{}
-	for depth := 0; depth <= 8; depth++ {
+	for depth := 0; depth <= s.maxDelegationDepth(); depth++ {
 		if _, ok := seen[current]; ok {
 			return apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
 		}

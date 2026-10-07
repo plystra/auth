@@ -20,7 +20,19 @@ import (
 
 const maxLifetime = 90 * 24 * time.Hour
 
-type Service struct{ Store *store.Store }
+type Service struct {
+	Store              *store.Store
+	MaxDelegationDepth int
+}
+
+const defaultMaxDelegationDepth = 8
+
+func (s *Service) maxDelegationDepth() int {
+	if s != nil && s.MaxDelegationDepth > 0 {
+		return s.MaxDelegationDepth
+	}
+	return defaultMaxDelegationDepth
+}
 
 type Agent struct {
 	ID              string    `json:"id"`
@@ -99,6 +111,9 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 		if owner.Type != "human" && owner.Type != "agent" && owner.Type != "application" {
 			return apierr.New("VALIDATION_FAILED", "owner member type is invalid")
 		}
+		if err := s.validateDelegationDepthTx(ctx, q, owner.ID); err != nil {
+			return err
+		}
 		parentID := pgtype.Text{}
 		if owner.Type == "agent" {
 			if !owner.HomeGroupID.Valid {
@@ -146,6 +161,46 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 		return Agent{}, "", err
 	}
 	return out, raw, nil
+}
+
+func (s *Service) validateDelegationDepthTx(ctx context.Context, q *db.Queries, ownerMemberID string) error {
+	depth := 1 // the Agent being created is the first delegation level
+	current := ownerMemberID
+	seen := map[string]struct{}{}
+	for {
+		if _, ok := seen[current]; ok {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
+		}
+		seen[current] = struct{}{}
+		owner, err := q.GetMemberForAgentOwner(ctx, db.GetMemberForAgentOwnerParams{MemberID: current})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if owner.Status != "active" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		if owner.Type != "agent" {
+			return nil
+		}
+		if depth >= s.maxDelegationDepth() {
+			return apierr.New("VALIDATION_FAILED", "Agent delegation depth exceeds the configured maximum")
+		}
+		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: current})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner is missing")
+		}
+		current = agent.OwnerMemberID.String
+		depth++
+	}
 }
 
 func (s *Service) ensureGroupTx(ctx context.Context, q *db.Queries, owner db.GetMemberForAgentOwnerRow, parentID pgtype.Text) (agentsGroup, error) {

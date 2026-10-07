@@ -27,10 +27,20 @@ var errSpaceInactive = errors.New("Space or ancestor is inactive")
 var errGroupInactive = errors.New("group or ancestor is inactive")
 
 type Service struct {
-	Store *store.Store
+	Store              *store.Store
+	MaxDelegationDepth int
 
 	cacheOnce sync.Once
 	cache     *decisionCache
+}
+
+const defaultMaxDelegationDepth = 8
+
+func (s *Service) maxDelegationDepth() int {
+	if s != nil && s.MaxDelegationDepth > 0 {
+		return s.MaxDelegationDepth
+	}
+	return defaultMaxDelegationDepth
 }
 
 // CheckRequest describes the persisted facts needed by the authorization
@@ -97,9 +107,6 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	if permission.Status == "disabled" {
 		return engine.Decision{Effect: engine.Deny, Code: "PERMISSION_DISABLED"}, 0, nil
 	}
-	if depth > 8 {
-		return engine.Decision{Effect: engine.Deny, Code: "OWNER_INACTIVE"}, 0, nil
-	}
 	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: in.MemberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
@@ -109,6 +116,9 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	}
 	if member.Status != "active" {
 		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
+	}
+	if member.Type == "agent" && depth >= s.maxDelegationDepth() {
+		return engine.Decision{Effect: engine.Deny, Code: "OWNER_INACTIVE"}, 0, nil
 	}
 	if _, err := spaceAncestorsQueries(ctx, q, member.SpaceID); err != nil {
 		if errors.Is(err, errSpaceInactive) {
@@ -228,7 +238,7 @@ func (s *Service) buildCacheKey(ctx context.Context, q *db.Queries, in CheckRequ
 	}
 	memberVersions := make([]versionFact, 0, 4)
 	currentID := memberID
-	for depth := 0; depth <= 8 && currentID != ""; depth++ {
+	for depth := 0; depth <= s.maxDelegationDepth() && currentID != ""; depth++ {
 		version, versionErr := q.GetMemberVersion(ctx, db.GetMemberVersionParams{MemberID: currentID})
 		if versionErr != nil {
 			return "", versionErr
@@ -250,9 +260,6 @@ func (s *Service) buildCacheKey(ctx context.Context, q *db.Queries, in CheckRequ
 }
 
 func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, memberID string, in CheckRequest, depth int) (*engine.Request, error) {
-	if depth > 8 {
-		return nil, nil
-	}
 	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -261,6 +268,9 @@ func (s *Service) ownerRequestQueries(ctx context.Context, q *db.Queries, member
 		return nil, err
 	}
 	if member.Status != "active" {
+		return nil, nil
+	}
+	if member.Type == "agent" && depth >= s.maxDelegationDepth() {
 		return nil, nil
 	}
 	if _, err := spaceAncestorsQueries(ctx, q, member.SpaceID); err != nil {
@@ -620,7 +630,7 @@ func (s *Service) GetMemberAnySpace(ctx context.Context, memberID string) (Membe
 func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, error) {
 	current := strings.TrimSpace(memberID)
 	seen := map[string]struct{}{}
-	for depth := 0; depth <= 8; depth++ {
+	for depth := 0; depth <= s.maxDelegationDepth(); depth++ {
 		if current == "" {
 			return "", apierr.New("OWNER_INACTIVE", "the owner chain is incomplete")
 		}

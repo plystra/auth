@@ -91,6 +91,25 @@ func TestAgentGroupsAreUniqueNestedAndBoundedByExpiry(t *testing.T) {
 	}
 }
 
+func TestAgentDelegationDepthUsesConfiguredLimit(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	agents := &Service{Store: st, MaxDelegationDepth: 2}
+	parent, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "depth-parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: parent.ID, Name: "depth-child", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: child.ID, Name: "depth-grandchild", ExpiresAt: time.Now().UTC().Add(15 * time.Minute)}); err == nil {
+		t.Fatal("Agent creation exceeded configured delegation depth")
+	} else {
+		assertAgentError(t, err, "VALIDATION_FAILED")
+	}
+}
+
 func TestAgentGroupStructureIsDatabaseEnforced(t *testing.T) {
 	ctx := context.Background()
 	st, _, owner, spaceID := newAgentFixture(t)

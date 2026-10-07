@@ -315,6 +315,35 @@ func TestAgentAuthorizationUsesOwnerEnvelope(t *testing.T) {
 	}
 }
 
+func TestAuthorizationUsesConfiguredAgentDelegationDepth(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st, MaxDelegationDepth: 8}
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "configured-depth-parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, Name: "configured-depth-child", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_configured_depth_parent', $1, '["auth.members:manage"]'::jsonb, $2, 'space', $1, $3),
+		       ('grt_configured_depth_child', $1, '["auth.members:manage"]'::jsonb, $4, 'space', $1, $3)
+	`, spaceID, parent.ID, owner.ID, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	svc.MaxDelegationDepth = 1
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: child.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "OWNER_INACTIVE" {
+		t.Fatalf("configured Agent depth decision = %+v, want OWNER_INACTIVE", decision)
+	}
+}
+
 func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
 	ctx := context.Background()
 	st, svc, owner, spaceID := newBindingFixture(t)

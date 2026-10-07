@@ -22,6 +22,7 @@ type Config struct {
 	DataKey                 string        `env:"PLYSTRA_AUTH_DATA_KEY,required"`
 	SigningKeyFile          string        `env:"PLYSTRA_AUTH_SIGNING_KEY_FILE"`
 	SigningKeyEncryptionKey string        `env:"PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY,required"`
+	AgentDelegationMaxDepth int           `env:"PLYSTRA_AUTH_AGENT_DELEGATION_MAX_DEPTH" envDefault:"8"`
 	ShutdownTimeout         time.Duration `env:"PLYSTRA_AUTH_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	Environment             string        `env:"PLYSTRA_AUTH_ENVIRONMENT" envDefault:"development"`
 }
@@ -72,6 +73,9 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("shutdown timeout must be positive")
+	}
+	if c.AgentDelegationMaxDepth < 1 || c.AgentDelegationMaxDepth > 64 {
+		return errors.New("agent delegation max depth must be between 1 and 64")
 	}
 	if strings.EqualFold(c.Environment, "production") && strings.TrimSpace(c.SigningKeyFile) == "" {
 		return errors.New("signing key file is required in production")
