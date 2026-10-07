@@ -2,6 +2,7 @@ package delta
 
 import (
 	"slices"
+	"strconv"
 	"testing"
 
 	"github.com/plystra/auth/internal/authz/engine"
@@ -50,6 +51,28 @@ func TestEvaluatePermissionCoverageAcrossScopeKinds(t *testing.T) {
 	result, err := Evaluate(Snapshot{Permissions: []Permission{permission(SpaceOnly, "spc_root")}}, Snapshot{Permissions: []Permission{other}}, graph)
 	if err != nil || len(result.Permissions) != 1 {
 		t.Fatalf("different subject delta = %+v, %v", result, err)
+	}
+}
+
+func BenchmarkEvaluateAuthorityDeltaByTupleCount(b *testing.B) {
+	for _, count := range []int{8, 64, 512} {
+		before := Snapshot{Permissions: make([]Permission, count)}
+		after := Snapshot{Permissions: make([]Permission, count*2)}
+		for i := 0; i < count; i++ {
+			position := Node{Kind: Space, ID: "spc_root"}
+			before.Permissions[i] = Permission{Subject: "mem_actor", Position: position, Key: "document:read:" + strconv.Itoa(i), Scope: Scope{Kind: SpaceOnly, Anchor: "spc_root"}}
+			after.Permissions[i] = before.Permissions[i]
+			after.Permissions[count+i] = Permission{Subject: "mem_actor", Position: position, Key: "document:write:" + strconv.Itoa(i), Scope: Scope{Kind: SpaceOnly, Anchor: "spc_root"}}
+		}
+		b.Run(strconv.Itoa(count), func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				result, err := Evaluate(before, after, Graph{})
+				if err != nil || len(result.Permissions) != count {
+					b.Fatalf("result = %d, %v; want %d permission tuples", len(result.Permissions), err, count)
+				}
+			}
+		})
 	}
 }
 
