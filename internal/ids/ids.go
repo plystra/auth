@@ -27,6 +27,7 @@ type APIKeyID string
 type AgentID string
 type AuditID string
 type OperatorSessionID string
+type InvitationID string
 
 type prefixer interface{ ~string }
 
@@ -53,3 +54,4 @@ func (id APIKeyID) Valid() bool          { return valid(string(id), "key") }
 func (id AgentID) Valid() bool           { return valid(string(id), "agt") }
 func (id AuditID) Valid() bool           { return valid(string(id), "aud") }
 func (id OperatorSessionID) Valid() bool { return valid(string(id), "ops") }
+func (id InvitationID) Valid() bool      { return valid(string(id), "ivt") }

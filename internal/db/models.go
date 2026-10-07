@@ -188,6 +188,17 @@ type InstanceSetting struct {
 	UpdatedBy                pgtype.Text        `json:"updated_by"`
 }
 
+type InvitationToken struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	EmailNormalized string             `json:"email_normalized"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	TokenHash       []byte             `json:"token_hash"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt      pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Member struct {
 	ID                string             `json:"id"`
 	SpaceID           string             `json:"space_id"`

@@ -15,6 +15,7 @@ sql:
       - "internal/authorization/queries"
       - "internal/store"
       - "internal/operator/queries"
+      - "internal/invitation/queries"
     database:
       uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
     analyzer:
