@@ -29,6 +29,50 @@ WHERE grantee_member_id = sqlc.arg(grantee_member_id)
 SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: LockRoleInSpace :one
+SELECT id, space_id, name, description, managed, created_at FROM roles
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+FOR UPDATE;
+
+-- name: ListActiveRoleGranteeMembers :many
+WITH RECURSIVE role_grantee_groups AS (
+    SELECT ag.grantee_group_id AS root_group_id, ag.grantee_group_id AS group_id
+    FROM authorization_grants ag
+    WHERE ag.role_id = sqlc.arg(role_id)
+      AND ag.revoked_at IS NULL
+      AND ag.grantee_group_id IS NOT NULL
+    UNION ALL
+    SELECT rgg.root_group_id, g.id
+    FROM role_grantee_groups rgg
+    JOIN groups g ON g.parent_id = rgg.group_id
+), affected_members AS (
+    SELECT ag.grantee_member_id AS member_id
+    FROM authorization_grants ag
+    WHERE ag.role_id = sqlc.arg(role_id)
+      AND ag.revoked_at IS NULL
+      AND ag.grantee_member_id IS NOT NULL
+    UNION
+    SELECT gm.member_id
+    FROM authorization_grants ag
+    JOIN role_grantee_groups rgg ON rgg.root_group_id = ag.grantee_group_id
+    JOIN group_members gm ON gm.group_id = rgg.group_id
+    WHERE ag.role_id = sqlc.arg(role_id)
+      AND ag.revoked_at IS NULL
+)
+SELECT DISTINCT m.id AS member_id
+FROM affected_members am
+JOIN members m ON m.id = am.member_id
+ORDER BY m.id;
+
+-- name: ClearRolePermissions :exec
+DELETE FROM role_permissions WHERE role_id = sqlc.arg(role_id);
+
+-- name: UpdateRole :one
+UPDATE roles
+SET name = sqlc.arg(name), description = sqlc.arg(description)
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+RETURNING id, space_id, name, description, managed, created_at;
+
 -- name: ListRolesInSpace :many
 SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE space_id = sqlc.arg(space_id) ORDER BY name, id;

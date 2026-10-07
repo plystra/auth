@@ -48,6 +48,17 @@ type createRoleInput struct {
 	}
 }
 
+type updateRoleInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	RoleID        string `path:"role_id"`
+	Body          struct {
+		Name        string   `json:"name"`
+		Description string   `json:"description,omitempty"`
+		Permissions []string `json:"permissions"`
+	}
+}
+
 type createGrantInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
@@ -168,6 +179,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("members.bindings.revoke", "DELETE", "/v1/spaces/{id}/members/{mid}/users/{user_id}", route.Principal, "auth.bindings:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.unbindUser)
 	route.Register(api, route.NewSpec("roles.list", "GET", "/v1/spaces/{id}/roles", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}), a.listRoles)
 	route.Register(api, route.NewSpec("roles.create", "POST", "/v1/spaces/{id}/roles", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createRole)
+	route.Register(api, route.NewSpec("roles.update", "PATCH", "/v1/spaces/{id}/roles/{role_id}", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.updateRole)
 	route.Register(api, route.NewSpec("grants.create", "POST", "/v1/spaces/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGrant)
 	route.Register(api, route.NewSpec("grants.revoke", "DELETE", "/v1/spaces/{id}/grants/{grant_id}", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}), a.revokeGrant)
 	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.listAssignmentRights)
@@ -399,6 +411,20 @@ func (a *API) createRole(ctx context.Context, in *createRoleInput) (*authorizati
 		return nil, err
 	}
 	role, err := a.Authorization.CreateRole(ctx, actor.ID, in.ID, in.Body.Name, in.Body.Description, in.Body.Permissions)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[authorization.Role]{}
+	out.Body.Data = role
+	return out, nil
+}
+
+func (a *API) updateRole(ctx context.Context, in *updateRoleInput) (*authorizationDataOutput[authorization.Role], error) {
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	if err != nil {
+		return nil, err
+	}
+	role, err := a.Authorization.UpdateRole(ctx, actor.ID, in.ID, in.RoleID, in.Body.Name, in.Body.Description, in.Body.Permissions)
 	if err != nil {
 		return nil, err
 	}

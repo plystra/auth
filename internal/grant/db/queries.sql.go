@@ -26,6 +26,19 @@ func (q *Queries) AssignRole(ctx context.Context, arg AssignRoleParams) error {
 	return err
 }
 
+const clearRolePermissions = `-- name: ClearRolePermissions :exec
+DELETE FROM role_permissions WHERE role_id = $1
+`
+
+type ClearRolePermissionsParams struct {
+	RoleID string `json:"role_id"`
+}
+
+func (q *Queries) ClearRolePermissions(ctx context.Context, arg ClearRolePermissionsParams) error {
+	_, err := q.db.Exec(ctx, clearRolePermissions, arg.RoleID)
+	return err
+}
+
 const createGrant = `-- name: CreateGrant :one
 INSERT INTO authorization_grants (id, space_id, role_id, permission_keys, grantee_member_id, scope, anchor_space_id, anchor_group_id, granted_by)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -351,6 +364,61 @@ func (q *Queries) GrantRolePermission(ctx context.Context, arg GrantRolePermissi
 	return err
 }
 
+const listActiveRoleGranteeMembers = `-- name: ListActiveRoleGranteeMembers :many
+WITH RECURSIVE role_grantee_groups AS (
+    SELECT ag.grantee_group_id AS root_group_id, ag.grantee_group_id AS group_id
+    FROM authorization_grants ag
+    WHERE ag.role_id = $1
+      AND ag.revoked_at IS NULL
+      AND ag.grantee_group_id IS NOT NULL
+    UNION ALL
+    SELECT rgg.root_group_id, g.id
+    FROM role_grantee_groups rgg
+    JOIN groups g ON g.parent_id = rgg.group_id
+), affected_members AS (
+    SELECT ag.grantee_member_id AS member_id
+    FROM authorization_grants ag
+    WHERE ag.role_id = $1
+      AND ag.revoked_at IS NULL
+      AND ag.grantee_member_id IS NOT NULL
+    UNION
+    SELECT gm.member_id
+    FROM authorization_grants ag
+    JOIN role_grantee_groups rgg ON rgg.root_group_id = ag.grantee_group_id
+    JOIN group_members gm ON gm.group_id = rgg.group_id
+    WHERE ag.role_id = $1
+      AND ag.revoked_at IS NULL
+)
+SELECT DISTINCT m.id AS member_id
+FROM affected_members am
+JOIN members m ON m.id = am.member_id
+ORDER BY m.id
+`
+
+type ListActiveRoleGranteeMembersParams struct {
+	RoleID pgtype.Text `json:"role_id"`
+}
+
+func (q *Queries) ListActiveRoleGranteeMembers(ctx context.Context, arg ListActiveRoleGranteeMembersParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listActiveRoleGranteeMembers, arg.RoleID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var member_id string
+		if err := rows.Scan(&member_id); err != nil {
+			return nil, err
+		}
+		items = append(items, member_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMemberAssignments = `-- name: ListMemberAssignments :many
 WITH RECURSIVE member_groups AS (
     SELECT gm.group_id
@@ -513,6 +581,31 @@ func (q *Queries) ListRolesInSpace(ctx context.Context, arg ListRolesInSpacePara
 	return items, nil
 }
 
+const lockRoleInSpace = `-- name: LockRoleInSpace :one
+SELECT id, space_id, name, description, managed, created_at FROM roles
+WHERE id = $1 AND space_id = $2
+FOR UPDATE
+`
+
+type LockRoleInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) LockRoleInSpace(ctx context.Context, arg LockRoleInSpaceParams) (Role, error) {
+	row := q.db.QueryRow(ctx, lockRoleInSpace, arg.ID, arg.SpaceID)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Description,
+		&i.Managed,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const revokeGrant = `-- name: RevokeGrant :exec
 UPDATE authorization_grants SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL
@@ -541,4 +634,37 @@ type RevokeInlineGrantsForMemberParams struct {
 func (q *Queries) RevokeInlineGrantsForMember(ctx context.Context, arg RevokeInlineGrantsForMemberParams) error {
 	_, err := q.db.Exec(ctx, revokeInlineGrantsForMember, arg.GranteeMemberID)
 	return err
+}
+
+const updateRole = `-- name: UpdateRole :one
+UPDATE roles
+SET name = $1, description = $2
+WHERE id = $3 AND space_id = $4
+RETURNING id, space_id, name, description, managed, created_at
+`
+
+type UpdateRoleParams struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ID          string `json:"id"`
+	SpaceID     string `json:"space_id"`
+}
+
+func (q *Queries) UpdateRole(ctx context.Context, arg UpdateRoleParams) (Role, error) {
+	row := q.db.QueryRow(ctx, updateRole,
+		arg.Name,
+		arg.Description,
+		arg.ID,
+		arg.SpaceID,
+	)
+	var i Role
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Description,
+		&i.Managed,
+		&i.CreatedAt,
+	)
+	return i, err
 }

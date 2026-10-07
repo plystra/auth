@@ -172,3 +172,18 @@ func TestGroupMoveRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T) {
 	}
 	t.Fatal("group move route was not registered")
 }
+
+func TestRoleUpdateRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "roles.update" {
+			continue
+		}
+		if spec.Method != http.MethodPatch || spec.Path != "/v1/spaces/{id}/roles/{role_id}" || spec.Permission != "auth.roles:manage" || !spec.AuthoritativeCheck || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("role update route = %+v, want PATCH H/A auth.roles:manage authoritative check", spec)
+		}
+		return
+	}
+	t.Fatal("role update route was not registered")
+}

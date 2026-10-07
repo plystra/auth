@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authz/delta"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
@@ -1016,6 +1017,92 @@ func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, 
 			return err
 		}
 		out = Role{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, Managed: row.Managed, Permissions: permissions}
+		return nil
+	})
+	return out, err
+}
+
+// UpdateRole changes a role definition and evaluates the resulting authority
+// delta for every active grant that references it. The role row is locked for
+// the duration of the transaction so a concurrent grant cannot observe a
+// partially updated definition.
+func (s *Service) UpdateRole(ctx context.Context, actorMemberID, spaceID, roleID, name, description string, permissions []string) (Role, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 128 || len(permissions) > 256 {
+		return Role{}, apierr.New("VALIDATION_FAILED", "role fields are invalid")
+	}
+	permissions = uniqueSorted(permissions)
+	var out Role
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "role was not found in this Space")
+		}
+		if err != nil {
+			return err
+		}
+		if role.Managed {
+			return apierr.New("VALIDATION_FAILED", "managed roles cannot be modified")
+		}
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.roles:manage", role.SpaceID); err != nil {
+			return err
+		}
+
+		memberRows, err := q.ListActiveRoleGranteeMembers(ctx, db.ListActiveRoleGranteeMembersParams{RoleID: pgtype.Text{String: role.ID, Valid: true}})
+		if err != nil {
+			return err
+		}
+		type affectedMember struct {
+			id     string
+			kind   string
+			before delta.Snapshot
+		}
+		affected := make([]affectedMember, 0, len(memberRows))
+		for _, memberID := range memberRows {
+			member, memberErr := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+			if memberErr != nil {
+				return memberErr
+			}
+			if err := lockAuthorizationMembersTx(ctx, q, memberID); err != nil {
+				return err
+			}
+			before, snapshotErr := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, member.Type)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			affected = append(affected, affectedMember{id: memberID, kind: member.Type, before: before})
+		}
+
+		if err := q.ClearRolePermissions(ctx, db.ClearRolePermissionsParams{RoleID: role.ID}); err != nil {
+			return err
+		}
+		if err := addRolePermissions(ctx, q, role.ID, permissions); err != nil {
+			return err
+		}
+
+		for _, item := range affected {
+			after, snapshotErr := s.grantAuthoritySnapshotTx(ctx, q, item.id, spaceID, item.kind)
+			if snapshotErr != nil {
+				return snapshotErr
+			}
+			change, evalErr := delta.Evaluate(item.before, after, delta.Graph{})
+			if evalErr != nil {
+				return evalErr
+			}
+			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, item.id, item.kind, spaceID); err != nil {
+				return err
+			}
+		}
+		if _, err := q.UpdateRole(ctx, db.UpdateRoleParams{ID: role.ID, SpaceID: role.SpaceID, Name: name, Description: description}); err != nil {
+			return normalizeDBError(err)
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "role.update", role.ID, "success"); err != nil {
+			return err
+		}
+		out = Role{ID: role.ID, SpaceID: role.SpaceID, Name: name, Description: description, Managed: role.Managed, Permissions: permissions}
 		return nil
 	})
 	return out, err
