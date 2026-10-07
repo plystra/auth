@@ -684,7 +684,7 @@ func TestAssignmentRightManagementEndpointsUseAuthorizationEngineAndPreserveGran
 	}
 }
 
-func TestAssignmentRightManagementEndpointRejectsAgentDeltaUntilOwnerAwareCoverageExists(t *testing.T) {
+func TestAssignmentRightManagementEndpointRejectsAgentDeltaWithoutOwnerAssignmentCoverage(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
 	agents := &agent.Service{Store: st}
@@ -706,7 +706,7 @@ func TestAssignmentRightManagementEndpointRejectsAgentDeltaUntilOwnerAwareCovera
 	create.Body.HolderMemberID = target.ID
 	create.Body.Permissions = []string{"auth.members:manage"}
 	if _, err := api.createAssignmentRight(ctx, create); err == nil {
-		t.Fatal("Agent created an assignment right before owner-aware delta coverage was implemented")
+		t.Fatal("Agent created an assignment right without owner assignment-right coverage")
 	} else {
 		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
 	}
