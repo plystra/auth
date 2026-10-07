@@ -171,6 +171,68 @@ func TestPlaneServersBindDistinctListeners(t *testing.T) {
 	}
 }
 
+func TestPlaneMaintenanceDoesNotAffectOtherPlanes(t *testing.T) {
+	addresses := make([]string, 3)
+	listeners := make([]net.Listener, 0, len(addresses))
+	for i := range addresses {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addresses[i] = listener.Addr().String()
+		listeners = append(listeners, listener)
+	}
+	servers := planeServers(
+		config.Config{HTTPAddr: addresses[0], ServerAddr: addresses[1], OpsAddr: addresses[2]},
+		"127.0.0.1:0",
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "maintenance", http.StatusServiceUnavailable)
+		}),
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		http.NewServeMux(),
+	)
+	for i, listener := range listeners {
+		go func(i int, listener net.Listener) {
+			if err := servers[i].Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				t.Errorf("plane %d serve: %v", i, err)
+			}
+		}(i, listener)
+	}
+	t.Cleanup(func() {
+		for _, server := range servers {
+			_ = server.Close()
+		}
+	})
+	for _, test := range []struct {
+		name string
+		url  string
+		want int
+	}{
+		{name: "principal", url: "http://" + addresses[0], want: http.StatusOK},
+		{name: "server maintenance", url: "http://" + addresses[1], want: http.StatusServiceUnavailable},
+		{name: "operations", url: "http://" + addresses[2], want: http.StatusNoContent},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			deadline := time.Now().Add(time.Second)
+			for {
+				response, err := http.Get(test.url)
+				if err == nil {
+					defer response.Body.Close()
+					if response.StatusCode != test.want {
+						t.Fatalf("status = %d, want %d", response.StatusCode, test.want)
+					}
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatal(err)
+				}
+				time.Sleep(time.Millisecond)
+			}
+		})
+	}
+}
+
 func TestWarnSharedPublicOpsListener(t *testing.T) {
 	var output bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&output, nil))
