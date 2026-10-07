@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"math/rand"
 	"slices"
 	"testing"
 )
@@ -105,6 +106,120 @@ func TestOwnerEnvelopeDoesNotPropagateOwnerApproval(t *testing.T) {
 	if got := Check(request); got.Effect != Allow {
 		t.Fatalf("owner approval must not be required while checking the envelope: %+v", got)
 	}
+}
+
+func TestAgentCoreDecisionMatchesHumanAndStaysWithinOwnerAuthority(t *testing.T) {
+	rng := rand.New(rand.NewSource(0xA17E))
+	permissions := []string{"document:read", "document:write", "invoice:approve", "ticket:read"}
+	for iteration := 0; iteration < 1000; iteration++ {
+		subject := "mem_subject"
+		ownerID := "mem_owner"
+		permission := permissions[rng.Intn(len(permissions))]
+		resourceSpace := "spc_" + string(rune('a'+rng.Intn(3)))
+		resourceGroup := "grp_" + string(rune('a'+rng.Intn(3)))
+		resourceOwner := ""
+		switch rng.Intn(3) {
+		case 0:
+			resourceOwner = subject
+		case 1:
+			resourceOwner = "mem_resource_owner"
+		}
+		base := Request{
+			MemberID: subject, Permission: permission, ResourceSpace: resourceSpace,
+			ResourceSpaceAncestors: []string{"spc_a", "spc_b"}, ResourceGroup: resourceGroup,
+			ResourceGroupAncestors: []string{"grp_a", "grp_b"}, ResourceOwner: resourceOwner,
+			SelfOwners: []string{"mem_resource_owner"}, Assignments: randomAssignments(rng, subject, permissions, resourceSpace, resourceGroup),
+		}
+		human := base
+		human.PrincipalType = "human"
+		owner := base
+		owner.MemberID = ownerID
+		owner.PrincipalType = "human"
+		owner.ResourceOwner = resourceOwner
+		if owner.ResourceOwner == subject {
+			owner.ResourceOwner = ownerID
+		}
+		owner.Assignments = cloneAssignmentsForMember(base.Assignments, subject, ownerID)
+		agent := base
+		agent.PrincipalType = "agent"
+		agent.Owner = &owner
+
+		humanDecision := Check(human)
+		agentDecision := Check(agent)
+		if humanDecision.Effect != agentDecision.Effect || humanDecision.Code != agentDecision.Code {
+			t.Fatalf("iteration %d: agent decision %+v differs from human %+v for request %+v", iteration, agentDecision, humanDecision, base)
+		}
+		if agentDecision.Effect == Allow {
+			ownerDecision := Check(owner)
+			if ownerDecision.Effect != Allow {
+				t.Fatalf("iteration %d: allowed Agent exceeded owner authority: agent=%+v owner=%+v", iteration, agentDecision, ownerDecision)
+			}
+		}
+	}
+}
+
+func randomAssignments(rng *rand.Rand, member string, permissions []string, resourceSpace, resourceGroup string) []Assignment {
+	assignments := make([]Assignment, 0, 4)
+	for i := 0; i < 1+rng.Intn(4); i++ {
+		permission := permissions[rng.Intn(len(permissions))]
+		scope := randomScope(rng, resourceSpace, resourceGroup)
+		assignment := Assignment{MemberID: member, Permissions: []string{permission}, Scope: scope}
+		if rng.Intn(3) == 0 {
+			assignment.Envelope = []string{permission}
+			assignment.EnvelopeEnforced = true
+		}
+		if rng.Intn(2) == 0 {
+			assignment.PrincipalKinds = []string{"human", "agent"}
+		}
+		assignments = append(assignments, assignment)
+	}
+	return assignments
+}
+
+func randomScope(rng *rand.Rand, resourceSpace, resourceGroup string) Scope {
+	switch rng.Intn(7) {
+	case 0:
+		return Scope{Kind: "global"}
+	case 1:
+		anchor := resourceSpace
+		if rng.Intn(2) == 0 {
+			anchor = "spc_outside"
+		}
+		return Scope{Kind: "space", Anchor: anchor}
+	case 2:
+		anchor := "spc_a"
+		if rng.Intn(2) == 0 {
+			anchor = "spc_outside"
+		}
+		return Scope{Kind: "space_tree", Anchor: anchor}
+	case 3:
+		anchor := resourceGroup
+		if rng.Intn(2) == 0 {
+			anchor = "grp_outside"
+		}
+		return Scope{Kind: "group", Anchor: anchor}
+	case 4:
+		anchor := "grp_a"
+		if rng.Intn(2) == 0 {
+			anchor = "grp_outside"
+		}
+		return Scope{Kind: "group_tree", Anchor: anchor}
+	case 5:
+		return Scope{Kind: "self"}
+	default:
+		return Scope{Anchor: resourceSpace, IncludeDescendants: rng.Intn(2) == 0}
+	}
+}
+
+func cloneAssignmentsForMember(assignments []Assignment, from, to string) []Assignment {
+	cloned := make([]Assignment, len(assignments))
+	for i, assignment := range assignments {
+		cloned[i] = assignment
+		if cloned[i].MemberID == from {
+			cloned[i].MemberID = to
+		}
+	}
+	return cloned
 }
 
 func TestNestedInactiveOwnerReturnsOwnerInactive(t *testing.T) {
