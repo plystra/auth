@@ -261,6 +261,33 @@ func TestGrantCreationAllowsEmptyDelta(t *testing.T) {
 	}
 }
 
+func TestEmptyAuthorityDeltaNeedsOnlyGrantManagement(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Existing authority", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_empty_delta", "empty-delta@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_empty_delta"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_empty_delta_existing', $1, '["auth.members:read"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, target.ID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
+		t.Fatalf("empty authority delta should need only auth.grants:assign: %v", err)
+	}
+}
+
 func TestGroupScopedGrantManagerCanMakeEmptyDeltaChangeWithinGroup(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
