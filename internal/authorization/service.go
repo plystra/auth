@@ -938,28 +938,25 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
+			return err
+		}
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
 			}
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, "", anchorSpaceID); err != nil {
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
 			return err
 		}
-		lockedMember, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
-			}
-			return err
-		}
-		member.Type = lockedMember.Type
-		member.Status = lockedMember.Status
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
 			return err
@@ -1022,28 +1019,25 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	}
 	var out Grant
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
+			return err
+		}
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
 			}
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, "", anchorSpaceID); err != nil {
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
 			return err
 		}
-		lockedMember, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
-			}
-			return err
-		}
-		member.Type = lockedMember.Type
-		member.Status = lockedMember.Status
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
 			return err
@@ -1226,6 +1220,9 @@ func addRolePermissions(ctx context.Context, q *db.Queries, roleID string, keys 
 }
 
 func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, permission, spaceID string) error {
+	if err := lockAuthorizationMembersTx(ctx, q, memberID); err != nil {
+		return err
+	}
 	if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
 		return err
 	}
@@ -1239,12 +1236,15 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 }
 
-func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, targetMemberID string) error {
+func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, targetMemberID string, extraSpaceIDs ...string) error {
+	if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
+		return err
+	}
 	groupID, err := resourceGroupForMemberTx(ctx, q, targetMemberID, spaceID)
 	if err != nil {
 		return err
 	}
-	if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID); err != nil {
+	if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID, extraSpaceIDs...); err != nil {
 		return err
 	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{
@@ -1259,27 +1259,146 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 }
 
-// lockAuthorizationNodesTx establishes the lock order used by every
-// authorization-backed mutation: governing Space, then target group. Member
-// rows are locked only after this helper returns. Keeping node facts stable
-// across the decision and write closes the G8 check/write race window.
-func lockAuthorizationNodesTx(ctx context.Context, q *db.Queries, spaceID, groupID string) error {
-	if _, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: spaceID}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "authorization Space was not found")
+// lockAuthorizationMembersTx locks the acting and target members, including
+// every persisted Agent owner in their chains, in a deterministic order.
+// Authorization facts and the mutation then observe one stable member state.
+func lockAuthorizationMembersTx(ctx context.Context, q *db.Queries, memberIDs ...string) error {
+	ids := make(map[string]struct{}, len(memberIDs))
+	pending := make([]string, 0, len(memberIDs))
+	for _, id := range memberIDs {
+		if strings.TrimSpace(id) == "" {
+			continue
 		}
-		return err
-	}
-	if groupID == "" {
-		return nil
-	}
-	if _, err := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: groupID, SpaceID: spaceID}); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "authorization group was not found")
+		if _, ok := ids[id]; !ok {
+			ids[id] = struct{}{}
+			pending = append(pending, id)
 		}
-		return err
+	}
+	for len(pending) > 0 {
+		id := pending[0]
+		pending = pending[1:]
+		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: id})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
+			continue
+		}
+		ownerID := agent.OwnerMemberID.String
+		if _, ok := ids[ownerID]; ok {
+			continue
+		}
+		ids[ownerID] = struct{}{}
+		pending = append(pending, ownerID)
+	}
+	ordered := make([]string, 0, len(ids))
+	for id := range ids {
+		ordered = append(ordered, id)
+	}
+	sort.Strings(ordered)
+	for _, id := range ordered {
+		if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: id}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
 	}
 	return nil
+}
+
+// lockAuthorizationNodesTx establishes the lock order used by every
+// authorization-backed mutation: all Space ancestors first, then all group
+// ancestors, each in deterministic ID order. Extra Space IDs cover grant
+// anchors in the same transaction.
+func lockAuthorizationNodesTx(ctx context.Context, q *db.Queries, spaceID, groupID string, extraSpaceIDs ...string) error {
+	spaceIDs := make(map[string]struct{}, len(extraSpaceIDs)+1)
+	for _, id := range append([]string{spaceID}, extraSpaceIDs...) {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		ids, err := authorizationSpaceChainIDs(ctx, q, id)
+		if err != nil {
+			return err
+		}
+		for _, chainID := range ids {
+			spaceIDs[chainID] = struct{}{}
+		}
+	}
+	orderedSpaces := make([]string, 0, len(spaceIDs))
+	for id := range spaceIDs {
+		orderedSpaces = append(orderedSpaces, id)
+	}
+	sort.Strings(orderedSpaces)
+	for _, id := range orderedSpaces {
+		if _, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: id}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	if strings.TrimSpace(groupID) == "" {
+		return nil
+	}
+	groupIDs, err := authorizationGroupChainIDs(ctx, q, groupID, spaceID)
+	if err != nil {
+		return err
+	}
+	sort.Strings(groupIDs)
+	for _, id := range groupIDs {
+		if _, err := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: id, SpaceID: spaceID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+	}
+	return nil
+}
+
+func authorizationSpaceChainIDs(ctx context.Context, q *db.Queries, spaceID string) ([]string, error) {
+	ids := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	current := spaceID
+	for len(ids) < 64 && strings.TrimSpace(current) != "" {
+		if _, ok := seen[current]; ok {
+			break
+		}
+		seen[current] = struct{}{}
+		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: current})
+		if errors.Is(err, pgx.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, space.ID)
+		if !space.ParentID.Valid || strings.TrimSpace(space.ParentID.String) == "" {
+			break
+		}
+		current = space.ParentID.String
+	}
+	return ids, nil
+}
+
+func authorizationGroupChainIDs(ctx context.Context, q *db.Queries, groupID, spaceID string) ([]string, error) {
+	ids := make([]string, 0, 8)
+	seen := map[string]struct{}{}
+	current := groupID
+	for len(ids) < 64 && strings.TrimSpace(current) != "" {
+		if _, ok := seen[current]; ok {
+			break
+		}
+		seen[current] = struct{}{}
+		group, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: current, SpaceID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, group.ID)
+		if !group.ParentID.Valid || strings.TrimSpace(group.ParentID.String) == "" {
+			break
+		}
+		current = group.ParentID.String
+	}
+	return ids, nil
 }
 
 func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (string, error) {

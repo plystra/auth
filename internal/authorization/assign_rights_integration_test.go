@@ -189,6 +189,154 @@ func TestHumanCanDelegateAssignmentRightAnchoredAtGroup(t *testing.T) {
 	}
 }
 
+func TestAssignmentRightValidationLocksHolderMemberBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Assignment holder lock", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: target.ID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("member lock transaction ended before the contender started: %v", err)
+	case <-locked:
+	}
+
+	rightErr := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+		rightErr <- err
+	}()
+	select {
+	case err := <-rightErr:
+		t.Fatalf("assignment validation/write bypassed the holder-member lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rightErr; err != nil {
+		t.Fatalf("assignment right failed after the holder-member lock was released: %v", err)
+	}
+}
+
+func TestAssignmentRightValidationLocksGroupAnchorBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Group assignment holder", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_assignment_anchor_lock"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, kind, status) VALUES ($1, $2, 'Anchor lock group', 'standard', 'active')`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: groupID, SpaceID: spaceID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("group lock transaction ended before the contender started: %v", err)
+	case <-locked:
+	}
+
+	rightErr := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, "", groupID, true, false, nil)
+		rightErr <- err
+	}()
+	select {
+	case err := <-rightErr:
+		t.Fatalf("assignment validation/write bypassed the group-anchor lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-rightErr; err != nil {
+		t.Fatalf("assignment right failed after the group-anchor lock was released: %v", err)
+	}
+}
+
+func TestAssignmentRightRevocationLocksHolderMemberBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Revoke holder lock", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: target.ID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("member lock transaction ended before the contender started: %v", err)
+	case <-locked:
+	}
+
+	revokeErr := make(chan error, 1)
+	go func() {
+		revokeErr <- svc.RevokeAssignmentRight(ctx, actor.ID, spaceID, right.ID)
+	}()
+	select {
+	case err := <-revokeErr:
+		t.Fatalf("revocation bypassed the holder-member lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-revokeErr; err != nil {
+		t.Fatalf("revocation failed after the holder-member lock was released: %v", err)
+	}
+}
+
 func TestAssignmentRightDelegationRejectsUncoveredPermissionAndSubtreeExpansion(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {

@@ -379,6 +379,53 @@ func TestGrantValidationLocksTargetMemberBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestGrantValidationLocksAnchorSpaceBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Anchor lock target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: spaceID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("Space lock transaction ended before the contender started: %v", err)
+	case <-locked:
+	}
+
+	grantErr := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+		grantErr <- err
+	}()
+	select {
+	case err := <-grantErr:
+		t.Fatalf("grant validation/write bypassed the anchor-Space lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantErr; err != nil {
+		t.Fatalf("grant failed after the anchor-Space lock was released: %v", err)
+	}
+}
+
 func TestGrantCreationAllowsEmptyDelta(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)

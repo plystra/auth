@@ -50,6 +50,42 @@ func (q *Queries) LockGroupInSpaceForAuthorization(ctx context.Context, arg Lock
 	return i, err
 }
 
+const lockMemberForAuthorization = `-- name: LockMemberForAuthorization :one
+SELECT id, space_id, name, type, binding_policy, status, created_at
+FROM members
+WHERE id = $1
+FOR UPDATE
+`
+
+type LockMemberForAuthorizationParams struct {
+	ID string `json:"id"`
+}
+
+type LockMemberForAuthorizationRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Type          string             `json:"type"`
+	BindingPolicy string             `json:"binding_policy"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) LockMemberForAuthorization(ctx context.Context, arg LockMemberForAuthorizationParams) (LockMemberForAuthorizationRow, error) {
+	row := q.db.QueryRow(ctx, lockMemberForAuthorization, arg.ID)
+	var i LockMemberForAuthorizationRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Type,
+		&i.BindingPolicy,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const lockSpaceForAuthorization = `-- name: LockSpaceForAuthorization :one
 SELECT id, name, slug, parent_id, policy_version, created_at, status
 FROM spaces

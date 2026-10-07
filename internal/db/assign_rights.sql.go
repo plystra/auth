@@ -281,6 +281,40 @@ func (q *Queries) LockActiveAssignRightsForHolder(ctx context.Context, arg LockA
 	return items, nil
 }
 
+const lockAssignRight = `-- name: LockAssignRight :one
+SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
+    covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
+    expires_at, revoked_at, created_at
+FROM assign_rights
+WHERE id = $1
+FOR UPDATE
+`
+
+type LockAssignRightParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) LockAssignRight(ctx context.Context, arg LockAssignRightParams) (AssignRight, error) {
+	row := q.db.QueryRow(ctx, lockAssignRight, arg.ID)
+	var i AssignRight
+	err := row.Scan(
+		&i.ID,
+		&i.HolderMemberID,
+		&i.PermissionKeys,
+		&i.AnchorSpaceID,
+		&i.AnchorGroupID,
+		&i.CoversSubtree,
+		&i.CanRedelegate,
+		&i.Source,
+		&i.ParentID,
+		&i.GrantedByOperatorUserID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const revokeAssignRight = `-- name: RevokeAssignRight :exec
 UPDATE assign_rights SET revoked_at = now()
 WHERE id = $1 AND revoked_at IS NULL

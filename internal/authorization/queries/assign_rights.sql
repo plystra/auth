@@ -49,6 +49,14 @@ SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
 FROM assign_rights
 WHERE id = sqlc.arg(id);
 
+-- name: LockAssignRight :one
+SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
+    covers_subtree, can_redelegate, source, parent_id, granted_by_operator_user_id,
+    expires_at, revoked_at, created_at
+FROM assign_rights
+WHERE id = sqlc.arg(id)
+FOR UPDATE;
+
 -- name: ListAssignRightsInSpace :many
 SELECT ar.id, ar.holder_member_id, ar.permission_keys, ar.anchor_space_id, ar.anchor_group_id,
     ar.covers_subtree, ar.can_redelegate, ar.source, ar.parent_id, ar.granted_by_operator_user_id,

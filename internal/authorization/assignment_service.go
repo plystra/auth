@@ -48,6 +48,9 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 	}
 	var out AssignmentRight
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, holderMemberID); err != nil {
+			return err
+		}
 		actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
 		if err != nil {
 			return err
@@ -67,6 +70,9 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		}
 		anchorSpace, anchorGroup, err := assignmentAnchorTx(ctx, q, spaceID, anchorSpaceID, anchorGroupID)
 		if err != nil {
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, anchorSpace, anchorGroup, actor.SpaceID, holder.SpaceID, spaceID); err != nil {
 			return err
 		}
 		if err := s.authorizeAssignmentRightTx(ctx, q, actorMemberID, anchorSpace, anchorGroup); err != nil {
@@ -229,6 +235,26 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		if row.AnchorSpaceID.Valid {
 			anchorSpace = row.AnchorSpaceID.String
 		}
+		holder, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: row.HolderMemberID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("OWNER_INACTIVE", "assignment-right holder was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, row.HolderMemberID); err != nil {
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, anchorSpace, row.AnchorGroupID.String, holder.SpaceID, spaceID); err != nil {
+			return err
+		}
+		row, err = q.LockAssignRight(ctx, db.LockAssignRightParams{ID: rightID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "assignment right was not found")
+		}
+		if err != nil {
+			return err
+		}
 		if err := s.authorizeAssignmentRightTx(ctx, q, actorMemberID, anchorSpace, row.AnchorGroupID.String); err != nil {
 			return err
 		}
@@ -292,6 +318,12 @@ func addActiveSpaceCheck(ctx context.Context, q *db.Queries, spaceID string) err
 }
 
 func (s *Service) authorizeAssignmentRightTx(ctx context.Context, q *db.Queries, actorMemberID, anchorSpaceID, anchorGroupID string) error {
+	if err := lockAuthorizationMembersTx(ctx, q, actorMemberID); err != nil {
+		return err
+	}
+	if err := lockAuthorizationNodesTx(ctx, q, anchorSpaceID, anchorGroupID); err != nil {
+		return err
+	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{MemberID: actorMemberID, Permission: "auth.assign_rights:manage", ResourceSpace: anchorSpaceID, ResourceGroup: anchorGroupID})
 	if err != nil {
 		return err
