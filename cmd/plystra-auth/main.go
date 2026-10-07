@@ -26,6 +26,7 @@ import (
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/member"
+	"github.com/plystra/auth/internal/observability"
 	"github.com/plystra/auth/internal/operator"
 	"github.com/plystra/auth/internal/plane/ops"
 	"github.com/plystra/auth/internal/plane/principal"
@@ -135,6 +136,11 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	warnSharedPublicOpsListener(slog.Default(), c)
+	telemetry, e := observability.New()
+	if e != nil {
+		return fmt.Errorf("initialize observability: %w", e)
+	}
+	defer func() { _ = telemetry.Shutdown(context.Background()) }()
 	st, e := store.Open(ctx, c.DatabaseURL)
 	if e != nil {
 		return e
@@ -229,6 +235,7 @@ func serve(ctx context.Context) error {
 			return err
 		})
 	})
+	health.Handle("/metrics", telemetry.MetricsHandler())
 	principalOriginPolicy := func(ctx context.Context, origin string) (bool, error) {
 		v, err := settings.Get(ctx)
 		if err != nil {
@@ -241,7 +248,10 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, principalMux, principalOriginPolicy, st, validateCredential), "principal"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Server, serverMux, st, validateCredential), "server"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Ops, opsMux, st, validateCredential), "ops"), health)
+	principalHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, principalMux, principalOriginPolicy, st, validateCredential), "principal", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	serverHandler := otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Server, serverMux, st, validateCredential), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	opsHandler := otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Ops, opsMux, st, validateCredential), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	servers := planeServers(c, ":8090", telemetry.HTTP("principal", principalHandler), telemetry.HTTP("server", serverHandler), telemetry.HTTP("ops", opsHandler), health)
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)
