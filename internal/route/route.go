@@ -174,8 +174,14 @@ func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager i
 			}
 		}
 		request := r.WithContext(ctx)
+		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
+				writeRouteError(w, ctx, err)
+				return
+			}
+		}
 		if manager != nil && isWriteMethod(r.Method) {
-			serveIdempotent(w, request, next, p, manager, validate)
+			serveIdempotent(w, request, next, p, manager, nil)
 			return
 		}
 		next.ServeHTTP(w, request)

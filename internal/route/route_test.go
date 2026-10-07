@@ -245,6 +245,32 @@ func TestIdempotencyValidatesCredentialBeforeReplayAndReusesCommittedResponse(t 
 	}
 }
 
+func TestCredentialValidationRunsBeforeEveryRoute(t *testing.T) {
+	called := 0
+	validated := 0
+	validate := func(_ context.Context, plane, raw string) error {
+		validated++
+		if plane != string(Principal) || raw != "Bearer valid" {
+			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "credential is not accepted on this plane")
+		}
+		return nil
+	}
+	handler := MiddlewareWithIdempotency(Principal, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called++ }), nil, validate)
+	invalid := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	invalid.Header.Set("Authorization", "Bearer wrong")
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusUnauthorized || called != 0 || validated != 1 {
+		t.Fatalf("invalid credential = (%d, called=%d, validated=%d), want pre-route rejection", invalidResponse.Code, called, validated)
+	}
+	valid := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	valid.Header.Set("Authorization", "Bearer valid")
+	handler.ServeHTTP(httptest.NewRecorder(), valid)
+	if called != 1 || validated != 2 {
+		t.Fatalf("valid credential did not reach route: called=%d validated=%d", called, validated)
+	}
+}
+
 func TestIdempotencyRejectsInvalidKeyAndOversizedBody(t *testing.T) {
 	manager := &fakeIdempotencyManager{}
 	calls := 0

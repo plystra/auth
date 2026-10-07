@@ -193,6 +193,13 @@ func serve(ctx context.Context) error {
 		raw = parts[1]
 		switch route.Plane(plane) {
 		case route.Principal:
+			if strings.HasPrefix(raw, "ply_sk_") {
+				slog.Warn("application API key presented on principal plane", "plane", plane, "credential_type", "application_api_key")
+				return apierr.New("CREDENTIAL_PLANE_MISMATCH", "application API keys are not accepted on the principal plane")
+			}
+			if strings.HasPrefix(raw, "ply_ops_") {
+				return apierr.New("CREDENTIAL_PLANE_MISMATCH", "operations credentials are not accepted on the principal plane")
+			}
 			if strings.HasPrefix(raw, "ply_ag_") {
 				_, err := agentSvc.AuthenticateKey(ctx, raw)
 				return err
@@ -206,9 +213,19 @@ func serve(ctx context.Context) error {
 			}
 			return nil
 		case route.Server:
+			if strings.HasPrefix(raw, "ply_ag_") || strings.HasPrefix(raw, "ply_ops_") || strings.HasPrefix(raw, "ply_rt_") {
+				return apierr.New("CREDENTIAL_PLANE_MISMATCH", "this credential is not accepted on the server plane")
+			}
 			_, err := apps.AuthenticateKey(ctx, raw)
 			return err
 		case route.Ops:
+			if strings.HasPrefix(raw, "ply_sk_") {
+				slog.Warn("application API key presented on operations plane", "plane", plane, "credential_type", "application_api_key")
+				return apierr.New("CREDENTIAL_PLANE_MISMATCH", "application API keys are not accepted on the operations plane")
+			}
+			if strings.HasPrefix(raw, "ply_ag_") || strings.HasPrefix(raw, "ply_rt_") {
+				return apierr.New("CREDENTIAL_PLANE_MISMATCH", "member credentials are not accepted on the operations plane")
+			}
 			return opsSvc.Validate(ctx, raw)
 		default:
 			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "credential plane is not supported")
