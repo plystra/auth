@@ -22,8 +22,10 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
+	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/observability"
@@ -229,6 +231,17 @@ func serve(ctx context.Context) error {
 			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "credential plane is not supported")
 		}
 	}
+	auditCredentialFailure := func(ctx context.Context, plane route.Plane, credentialType, code string) error {
+		if code != "CREDENTIAL_PLANE_MISMATCH" {
+			return nil
+		}
+		return st.InTx(ctx, func(q *db.Queries) error {
+			return audit.WriteWithMetadata(ctx, q, "credential", "", "auth.credential.plane_mismatch", string(plane), "failure", map[string]string{
+				"credential_type": credentialType,
+				"deny_code":       code,
+			})
+		})
+	}
 	principalMux := http.NewServeMux()
 	serverMux := http.NewServeMux()
 	opsMux := http.NewServeMux()
@@ -263,9 +276,9 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	principalHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, principalMux, principalOriginPolicy, st, validateCredential), "principal", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
-	serverHandler := otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Server, serverMux, st, validateCredential), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
-	opsHandler := otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Ops, opsMux, st, validateCredential), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	principalHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Principal, principalMux, principalOriginPolicy, st, validateCredential, auditCredentialFailure), "principal", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	serverHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Server, serverMux, nil, st, validateCredential, auditCredentialFailure), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	opsHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Ops, opsMux, nil, st, validateCredential, auditCredentialFailure), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
 	servers := planeServers(c, ":8090", telemetry.HTTP("principal", principalHandler), telemetry.HTTP("server", serverHandler), telemetry.HTTP("ops", opsHandler), health)
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {

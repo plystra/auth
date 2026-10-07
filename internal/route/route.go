@@ -46,6 +46,7 @@ type Spec struct {
 }
 type Handler func(http.ResponseWriter, *http.Request)
 type OriginPolicy func(context.Context, string) (bool, error)
+type CredentialFailureAuditor func(context.Context, Plane, string, string) error
 
 var registry struct {
 	sync.RWMutex
@@ -128,11 +129,23 @@ func MiddlewareWithIdempotency(p Plane, next http.Handler, manager idempotency.T
 	return middleware(p, next, nil, manager, validate)
 }
 
+func MiddlewareWithCredentialAudit(p Plane, next http.Handler, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
+	return middlewareWithAudit(p, next, nil, nil, validate, auditFailure)
+}
+
 func MiddlewareWithOriginPolicyAndIdempotency(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
 	return middleware(p, next, policy, manager, validate)
 }
 
+func MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
+	return middlewareWithAudit(p, next, policy, manager, validate, auditFailure)
+}
+
 func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
+	return middlewareWithAudit(p, next, originPolicy, manager, validate, nil)
+}
+
+func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if id == "" || len(id) > 128 {
@@ -176,6 +189,12 @@ func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager i
 		request := r.WithContext(ctx)
 		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
+				if auditFailure != nil {
+					if auditErr := auditFailure(ctx, p, credentialType(r.Header.Get("Authorization")), credentialErrorCode(err)); auditErr != nil {
+						writeRouteError(w, ctx, apierr.New("UNAVAILABLE", "credential audit is temporarily unavailable"))
+						return
+					}
+				}
 				writeRouteError(w, ctx, err)
 				return
 			}
@@ -186,4 +205,31 @@ func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager i
 		}
 		next.ServeHTTP(w, request)
 	})
+}
+
+func credentialType(value string) string {
+	parts := strings.Fields(value)
+	if len(parts) != 2 {
+		return "unknown"
+	}
+	switch {
+	case strings.HasPrefix(parts[1], "ply_sk_"):
+		return "application_api_key"
+	case strings.HasPrefix(parts[1], "ply_ag_"):
+		return "agent_key"
+	case strings.HasPrefix(parts[1], "ply_ops_"):
+		return "operator_session"
+	case strings.HasPrefix(parts[1], "ply_rt_"):
+		return "refresh_token"
+	default:
+		return "access_token"
+	}
+}
+
+func credentialErrorCode(err error) string {
+	var public *apierr.Error
+	if errors.As(err, &public) && public.Code != "" {
+		return public.Code
+	}
+	return "UNAUTHENTICATED"
 }

@@ -271,6 +271,30 @@ func TestCredentialValidationRunsBeforeEveryRoute(t *testing.T) {
 	}
 }
 
+func TestCredentialMismatchIsAuditedWithoutSecret(t *testing.T) {
+	var gotPlane Plane
+	var gotType, gotCode string
+	called := false
+	validate := func(context.Context, string, string) error {
+		return apierr.New("CREDENTIAL_PLANE_MISMATCH", "wrong plane")
+	}
+	auditFailure := func(_ context.Context, plane Plane, credentialType, code string) error {
+		gotPlane, gotType, gotCode = plane, credentialType, code
+		return nil
+	}
+	handler := MiddlewareWithCredentialAudit(Principal, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }), validate, auditFailure)
+	request := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+	request.Header.Set("Authorization", "Bearer ply_sk_public-prefix.secret-value")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnauthorized || called {
+		t.Fatalf("response = %d, called=%v, want audited rejection", response.Code, called)
+	}
+	if gotPlane != Principal || gotType != "application_api_key" || gotCode != "CREDENTIAL_PLANE_MISMATCH" {
+		t.Fatalf("audit = (%s, %s, %s), want principal/application_api_key/CREDENTIAL_PLANE_MISMATCH", gotPlane, gotType, gotCode)
+	}
+}
+
 func TestIdempotencyRejectsInvalidKeyAndOversizedBody(t *testing.T) {
 	manager := &fakeIdempotencyManager{}
 	calls := 0
