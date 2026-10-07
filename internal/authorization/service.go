@@ -832,8 +832,17 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if user.Status != "active" {
 			return apierr.New("CONFLICT", "user is not active")
 		}
-		if err := s.requireEmptyBindingDeltaTx(ctx, q, memberID, userID, spaceID); err != nil {
+		change, err := s.bindingAuthorityDeltaTx(ctx, q, memberID, userID, spaceID)
+		if err != nil {
 			return err
+		}
+		if len(change.Permissions) != 0 || len(change.Rights) != 0 {
+			if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID); err != nil {
+				return err
+			}
+			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, member.ID, member.Type, spaceID); err != nil {
+				return err
+			}
 		}
 		count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
 		if err != nil {

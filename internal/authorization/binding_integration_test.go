@@ -306,6 +306,9 @@ func TestBindingWithPositiveAuthorityDeltaWaitsForAssignmentRights(t *testing.T)
 	`, spaceID, target.ID, actor.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
 	var versionBefore int64
 	if err := st.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, spaceID).Scan(&versionBefore); err != nil {
 		t.Fatal(err)
@@ -342,6 +345,64 @@ func TestBindingWithPositiveAuthorityDeltaWaitsForAssignmentRights(t *testing.T)
 	}
 	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_privileged_binding"); err != nil {
 		t.Fatalf("dormant grant should not contribute a positive delta: %v", err)
+	}
+}
+
+func TestBindingWithAssignmentRightDeltaIsRejectedWithoutDelegationCoverage(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Assignment identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_assignment_binding", "assignment-binding@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO assign_rights (id, holder_member_id, permission_keys, anchor_space_id, covers_subtree, can_redelegate, source)
+		VALUES ('ar_binding_delta', $1, '["auth.members:read"]'::jsonb, $2, true, false, 'system')
+	`, target.ID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_assignment_binding"); err == nil {
+		t.Fatal("binding transferred an assignment right without delegation coverage")
+	} else {
+		assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = 'usr_assignment_binding'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("denied assignment-right binding persisted %d rows", count)
+	}
+}
+
+func TestBindingWithPositivePermissionDeltaUsesAssignmentCoverage(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Covered identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := insertUser(ctx, st, "usr_covered_binding", "covered-binding@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_covered_binding', $1, '["auth.members:read"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, target.ID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_covered_binding"); err != nil {
+		t.Fatalf("assignment-right-covered binding failed: %v", err)
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = 'usr_covered_binding' AND member_id = $1 AND status = 'active'`, target.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("covered binding rows = %d, want 1", count)
 	}
 }
 

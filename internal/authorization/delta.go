@@ -2,6 +2,7 @@ package authorization
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
 	"sort"
 	"strings"
@@ -12,25 +13,59 @@ import (
 	"github.com/plystra/auth/internal/db"
 )
 
-// G8's assignment-right coverage is not available yet. Until it is, G6
-// binding writes may commit only when the new user/member identity has no
-// positive authority delta (auth-docs/roadmap.md, G6 and G8).
-func (s *Service) requireEmptyBindingDeltaTx(ctx context.Context, q *db.Queries, memberID, userID, spaceID string) error {
+func (s *Service) bindingAuthorityDeltaTx(ctx context.Context, q *db.Queries, memberID, userID, spaceID string) (delta.Result, error) {
 	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
 	if err != nil {
-		return err
+		return delta.Result{}, err
 	}
 	newIdentity := userID + "\x00" + memberID
 	position, err := memberPositionTx(ctx, q, memberID, spaceID)
 	if err != nil {
-		return err
+		return delta.Result{}, err
 	}
 	after := permissionSnapshot(assignments, newIdentity, position, "human")
+	rights, err := s.assignmentRightsSnapshotTx(ctx, q, memberID)
+	if err != nil {
+		return delta.Result{}, err
+	}
+	after.Rights = rights
 	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
 	if err != nil {
-		return err
+		return delta.Result{}, err
 	}
-	return rejectUncoveredDelta(change, "The binding would transfer authority without assignment-right coverage.")
+	return change, nil
+}
+
+func (s *Service) assignmentRightsSnapshotTx(ctx context.Context, q *db.Queries, memberID string) ([]delta.Right, error) {
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if err != nil {
+		return nil, err
+	}
+	rows, err := q.LockActiveAssignRightsForHolder(ctx, db.LockActiveAssignRightsForHolderParams{HolderMemberID: memberID})
+	if err != nil {
+		return nil, err
+	}
+	position := delta.Node{Kind: delta.Space, ID: member.SpaceID}
+	rights := make([]delta.Right, 0, len(rows))
+	for _, row := range rows {
+		var permissions []string
+		if err := json.Unmarshal(row.PermissionKeys, &permissions); err != nil {
+			return nil, err
+		}
+		right := delta.Right{
+			Holder: memberID, Position: position, Permissions: permissions,
+			Descendants: row.CoversSubtree, Delegate: row.CanRedelegate,
+		}
+		if row.AnchorSpaceID.Valid {
+			right.Anchor = delta.Node{Kind: delta.Space, ID: row.AnchorSpaceID.String}
+		} else if row.AnchorGroupID.Valid {
+			right.Anchor = delta.Node{Kind: delta.Group, ID: row.AnchorGroupID.String}
+		} else {
+			return nil, apierr.New("INVALID_RESOURCE", "assignment right has no anchor")
+		}
+		rights = append(rights, right)
+	}
+	return rights, nil
 }
 
 func permissionSnapshot(assignments []engine.Assignment, subject string, position delta.Node, principalKind string) delta.Snapshot {
