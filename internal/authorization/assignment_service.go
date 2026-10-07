@@ -59,7 +59,7 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err != nil {
 			return err
 		}
-		if actor.Type != "human" || holder.Type == "application" {
+		if actor.Type == "application" || holder.Type == "application" {
 			return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "assignment-right delegation requires human authority coverage")
 		}
 		if holder.Status != "active" {
@@ -75,7 +75,7 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err := holderCoversAnchorTx(ctx, q, holder.SpaceID, anchorSpace); err != nil {
 			return err
 		}
-		if err := validateDelegablePermissionsTx(ctx, q, anchorSpace, anchorGroup, permissions); err != nil {
+		if err := validateDelegablePermissionsTx(ctx, q, anchorSpace, anchorGroup, permissions, holder.Type, actor.Type == "agent"); err != nil {
 			return err
 		}
 		storedAnchorSpace := anchorSpace
@@ -103,6 +103,11 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err != nil {
 			return err
 		}
+		if actor.Type == "agent" {
+			if err := s.requireOwnerAssignmentCoverageTx(ctx, q, actorMemberID, candidate, graph, expiresAt); err != nil {
+				return err
+			}
+		}
 		if parentExpiry.Valid && (expiresAt == nil || expiresAt.After(parentExpiry.Time)) {
 			return apierr.New("VALIDATION_FAILED", "assignment right cannot outlive its parent")
 		}
@@ -129,6 +134,75 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		return nil
 	})
 	return out, err
+}
+
+// G8: an Agent may use an assignment right only while every owner in its
+// chain still has a covering right. This keeps delegated authority bounded by
+// the owner's current authority without copying owner state onto the Agent.
+func (s *Service) requireOwnerAssignmentCoverageTx(ctx context.Context, q *db.Queries, agentMemberID string, candidate delta.Right, graph delta.Graph, expiresAt *time.Time) error {
+	current := agentMemberID
+	seen := map[string]struct{}{}
+	for depth := 0; depth <= 8; depth++ {
+		if _, ok := seen[current]; ok {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
+		}
+		seen[current] = struct{}{}
+		member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: current})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
+			}
+			return err
+		}
+		if member.Status != "active" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		if member.Type != "agent" {
+			return nil
+		}
+		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: member.ID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
+			}
+			return err
+		}
+		if !agent.OwnerMemberID.Valid || agent.OwnerMemberID.String == "" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner is missing")
+		}
+		owner, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
+			}
+			return err
+		}
+		if owner.Status != "active" {
+			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+		}
+		rows, err := q.LockActiveAssignRightsForHolder(ctx, db.LockActiveAssignRightsForHolderParams{HolderMemberID: owner.ID})
+		if err != nil {
+			return err
+		}
+		if err := addCoverageSpaceTx(ctx, q, owner.SpaceID, &graph); err != nil {
+			return err
+		}
+		_, ownerExpiry, covered, err := coveringAssignmentRight(rows, owner.ID, owner.SpaceID, candidate, graph)
+		if err != nil {
+			return err
+		}
+		if !covered {
+			return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The Agent assignment right exceeds its owner's delegation authority.", Details: map[string]string{"uncovered": strings.Join(candidate.Permissions, ",")}}
+		}
+		if ownerExpiry.Valid && (expiresAt == nil || expiresAt.After(ownerExpiry.Time)) {
+			return apierr.New("VALIDATION_FAILED", "assignment right cannot outlive its owner authority")
+		}
+		if owner.Type != "agent" {
+			return nil
+		}
+		current = owner.ID
+	}
+	return apierr.New("OWNER_INACTIVE", "the Agent owner chain exceeds the maximum depth")
 }
 
 func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spaceID, rightID string) error {
@@ -239,7 +313,7 @@ func holderCoversAnchorTx(ctx context.Context, q *db.Queries, holderSpaceID, anc
 	return nil
 }
 
-func validateDelegablePermissionsTx(ctx context.Context, q *db.Queries, anchorSpaceID, anchorGroupID string, permissions []string) error {
+func validateDelegablePermissionsTx(ctx context.Context, q *db.Queries, anchorSpaceID, anchorGroupID string, permissions []string, holderType string, actorIsAgent bool) error {
 	envelopes := newEnvelopeFacts(q)
 	node := delta.Node{Kind: delta.Space, ID: anchorSpaceID}
 	if anchorGroupID != "" {
@@ -256,6 +330,16 @@ func validateDelegablePermissionsTx(ctx context.Context, q *db.Queries, anchorSp
 		if permission.Status != "active" || !permission.Delegable {
 			return apierr.New("PERMISSION_OUTSIDE_ENVELOPE", "permission cannot be delegated")
 		}
+		var principalKinds []string
+		if err := json.Unmarshal(permission.PrincipalKinds, &principalKinds); err != nil {
+			return err
+		}
+		if holderType != "" && len(principalKinds) > 0 && !slices.Contains(principalKinds, holderType) {
+			return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "the permission cannot be delegated to this member type")
+		}
+		if actorIsAgent && holderType == "agent" && permission.AgentApproval == "required" {
+			return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "Agent approval-required permissions cannot be delegated to a child Agent")
+		}
 		mode, err := envelopes.grantMode(ctx, node, anchorSpaceID, key, permission.Delegable)
 		if err != nil {
 			return err
@@ -268,10 +352,21 @@ func validateDelegablePermissionsTx(ctx context.Context, q *db.Queries, anchorSp
 }
 
 func findCoveringAssignmentRight(rows []db.AssignRight, actorID, actorSpaceID string, candidate delta.Right, graph delta.Graph) (string, pgtype.Timestamptz, error) {
+	id, expiry, covered, err := coveringAssignmentRight(rows, actorID, actorSpaceID, candidate, graph)
+	if err != nil {
+		return "", pgtype.Timestamptz{}, err
+	}
+	if !covered {
+		return "", pgtype.Timestamptz{}, &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The assignment right exceeds the administrator's delegation authority.", Details: map[string]string{"uncovered": strings.Join(candidate.Permissions, ",")}}
+	}
+	return id, expiry, nil
+}
+
+func coveringAssignmentRight(rows []db.AssignRight, actorID, actorSpaceID string, candidate delta.Right, graph delta.Graph) (string, pgtype.Timestamptz, bool, error) {
 	for _, row := range rows {
 		keys := []string{}
 		if err := json.Unmarshal(row.PermissionKeys, &keys); err != nil {
-			return "", pgtype.Timestamptz{}, err
+			return "", pgtype.Timestamptz{}, false, err
 		}
 		parent := delta.Right{Holder: actorID, Position: delta.Node{Kind: delta.Space, ID: actorSpaceID}, Permissions: keys, Descendants: row.CoversSubtree, Delegate: row.CanRedelegate}
 		if row.AnchorSpaceID.Valid {
@@ -281,13 +376,13 @@ func findCoveringAssignmentRight(rows []db.AssignRight, actorID, actorSpaceID st
 		}
 		covered, err := delta.CoversAssignmentRight(parent, candidate, graph)
 		if err != nil {
-			return "", pgtype.Timestamptz{}, err
+			return "", pgtype.Timestamptz{}, false, err
 		}
 		if covered {
-			return row.ID, row.ExpiresAt, nil
+			return row.ID, row.ExpiresAt, true, nil
 		}
 	}
-	return "", pgtype.Timestamptz{}, &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The assignment right exceeds the administrator's delegation authority.", Details: map[string]string{"uncovered": strings.Join(candidate.Permissions, ",")}}
+	return "", pgtype.Timestamptz{}, false, nil
 }
 
 func assignmentAnchorNode(spaceID, groupID string) delta.Node {

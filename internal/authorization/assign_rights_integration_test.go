@@ -326,8 +326,101 @@ func TestAssignmentRightDelegationRejectsOutOfSpaceHolderExpiredChildAndAgentAct
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_assign_rights_check', $1, '["auth.assign_rights:manage"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, created.ID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
 	_, err = svc.CreateAssignmentRight(ctx, created.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
 	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestAgentCanDelegateOwnerCoveredAssignmentRight(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, owner.ID, "", spaceID, "Agent delegated administrator", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_binding_actor", Name: "delegating-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_agent_assign_rights_allow', $1, '["auth.assign_rights:manage"]'::jsonb, $2, 'space', $1, $3)
+	`, spaceID, created.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.CreateAssignmentRight(ctx, owner.ID, spaceID, created.ID, []string{"auth.members:manage", "auth.assign_rights:manage"}, spaceID, "", true, true, nil); err != nil {
+		t.Fatalf("owner delegation to Agent failed: %v", err)
+	}
+	delegated, err := svc.CreateAssignmentRight(ctx, created.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	if err != nil {
+		t.Fatalf("owner-covered Agent delegation failed: %v", err)
+	}
+	if delegated.HolderMemberID != target.ID || delegated.ParentID == "" {
+		t.Fatalf("delegated Agent right = %+v", delegated)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1 AND source = 'system'`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = svc.CreateAssignmentRight(ctx, created.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil)
+	assertAPIErrorCode(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestAgentAssignmentDelegationHonorsPrincipalKindsAndApproval(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name       string
+		permission string
+		want       string
+	}{
+		{name: "principal kind", permission: "auth.users:impersonate", want: "PRINCIPAL_KIND_NOT_ALLOWED"},
+		{name: "approval required", permission: "auth.bindings:manage", want: "AUTHORITY_DELTA_NOT_COVERED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, svc, owner, spaceID := newBindingFixture(t)
+			agents := &agent.Service{Store: st}
+			created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_binding_actor", Name: "delegating-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: created.ID, CreatedByUser: "usr_binding_actor", Name: "child-agent", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `
+				INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+				VALUES ('grt_agent_assign_rights_policy', $1, '["auth.assign_rights:manage"]'::jsonb, $2, 'space', $1, $3)
+			`, spaceID, created.ID, owner.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.permission == "auth.users:impersonate" {
+				if _, err := st.Pool.Exec(ctx, `UPDATE permissions SET delegable = true WHERE key = $1`, tc.permission); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET permission_keys = permission_keys || '"auth.users:impersonate"'::jsonb WHERE holder_member_id = $1 AND source = 'system'`, owner.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.permission == "auth.users:impersonate" {
+				if _, err := st.Pool.Exec(ctx, `
+					INSERT INTO assign_rights (id, holder_member_id, permission_keys, anchor_space_id, covers_subtree, can_redelegate, source, parent_id)
+					SELECT 'ar_agent_principal_policy', $1, '["auth.assign_rights:manage", "auth.users:impersonate"]'::jsonb, $2, true, true, 'delegated', id
+					FROM assign_rights WHERE holder_member_id = $3 AND source = 'system' AND revoked_at IS NULL
+				`, created.ID, spaceID, owner.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else if _, err := svc.CreateAssignmentRight(ctx, owner.ID, spaceID, created.ID, []string{"auth.assign_rights:manage", tc.permission}, spaceID, "", true, true, nil); err != nil {
+				t.Fatalf("owner delegation failed: %v", err)
+			}
+			_, err = svc.CreateAssignmentRight(ctx, created.ID, spaceID, child.ID, []string{tc.permission}, spaceID, "", false, false, nil)
+			assertAPIErrorCode(t, err, tc.want)
+		})
+	}
 }
 
 func TestAssignmentRightAuditFailureRollsBackAndBumpsNoPolicyVersion(t *testing.T) {

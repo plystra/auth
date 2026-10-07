@@ -74,7 +74,7 @@ FROM groups
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
 -- name: GetPermissionByKey :one
-SELECT id, key, description, status, delegable, created_at FROM permissions WHERE key=sqlc.arg(key);
+SELECT id, key, description, status, delegable, principal_kinds, agent_approval, created_at FROM permissions WHERE key=sqlc.arg(key);
 
 -- name: GetSpaceEnvelopePermission :one
 SELECT e.mode

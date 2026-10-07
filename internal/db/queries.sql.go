@@ -992,7 +992,7 @@ func (q *Queries) GetMemberVersion(ctx context.Context, arg GetMemberVersionPara
 }
 
 const getPermissionByKey = `-- name: GetPermissionByKey :one
-SELECT id, key, description, status, delegable, created_at FROM permissions WHERE key=$1
+SELECT id, key, description, status, delegable, principal_kinds, agent_approval, created_at FROM permissions WHERE key=$1
 `
 
 type GetPermissionByKeyParams struct {
@@ -1000,12 +1000,14 @@ type GetPermissionByKeyParams struct {
 }
 
 type GetPermissionByKeyRow struct {
-	ID          string             `json:"id"`
-	Key         string             `json:"key"`
-	Description string             `json:"description"`
-	Status      string             `json:"status"`
-	Delegable   bool               `json:"delegable"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID             string             `json:"id"`
+	Key            string             `json:"key"`
+	Description    string             `json:"description"`
+	Status         string             `json:"status"`
+	Delegable      bool               `json:"delegable"`
+	PrincipalKinds []byte             `json:"principal_kinds"`
+	AgentApproval  string             `json:"agent_approval"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKeyParams) (GetPermissionByKeyRow, error) {
@@ -1017,6 +1019,8 @@ func (q *Queries) GetPermissionByKey(ctx context.Context, arg GetPermissionByKey
 		&i.Description,
 		&i.Status,
 		&i.Delegable,
+		&i.PrincipalKinds,
+		&i.AgentApproval,
 		&i.CreatedAt,
 	)
 	return i, err
