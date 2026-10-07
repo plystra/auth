@@ -526,3 +526,19 @@ func (q *Queries) RevokeGrant(ctx context.Context, arg RevokeGrantParams) error 
 	_, err := q.db.Exec(ctx, revokeGrant, arg.ID)
 	return err
 }
+
+const revokeInlineGrantsForMember = `-- name: RevokeInlineGrantsForMember :exec
+UPDATE authorization_grants SET revoked_at = now()
+WHERE grantee_member_id = $1
+  AND role_id IS NULL
+  AND revoked_at IS NULL
+`
+
+type RevokeInlineGrantsForMemberParams struct {
+	GranteeMemberID pgtype.Text `json:"grantee_member_id"`
+}
+
+func (q *Queries) RevokeInlineGrantsForMember(ctx context.Context, arg RevokeInlineGrantsForMemberParams) error {
+	_, err := q.db.Exec(ctx, revokeInlineGrantsForMember, arg.GranteeMemberID)
+	return err
+}

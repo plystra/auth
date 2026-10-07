@@ -165,7 +165,7 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if !canManage {
 		return nil, apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 	}
-	grant, err := a.Authorization.CreateInlineGrant(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	grant, err := a.Authorization.ReplaceInlineGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
 	if err != nil {
 		return nil, err
 	}

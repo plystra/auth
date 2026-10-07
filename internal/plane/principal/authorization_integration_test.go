@@ -1039,6 +1039,57 @@ func TestCreateAgentEndpointReturnsOneTimeAgentCredential(t *testing.T) {
 	}
 }
 
+func TestAgentGrantReplacementEndpointReplacesDirectGrants(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "grant-replacement-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authz.CreateAssignmentRight(ctx, owner.ID, spaceID, created.ID, []string{"auth.grants:assign", "auth.members:read", "auth.members:manage"}, spaceID, "", true, true, nil); err != nil {
+		t.Fatalf("owner could not delegate Agent grant coverage: %v", err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "auth.grants:assign")
+	tokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &agentGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: created.ID}
+	in.Body.Permissions = []string{"auth.grants:assign", "auth.members:read"}
+	in.Body.Scope = "space"
+	in.Body.AnchorSpaceID = spaceID
+	if _, err := api.replaceAgentGrants(ctx, in); err != nil {
+		t.Fatalf("first Agent grant replacement failed: %v", err)
+	}
+	in.Body.Permissions = []string{"auth.grants:assign", "auth.members:manage"}
+	if _, err := api.replaceAgentGrants(ctx, in); err != nil {
+		t.Fatalf("second Agent grant replacement failed: %v", err)
+	}
+	var active, revoked int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE revoked_at IS NULL), count(*) FILTER (WHERE revoked_at IS NOT NULL) FROM authorization_grants WHERE grantee_member_id = $1 AND role_id IS NULL`, created.ID).Scan(&active, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 || revoked != 2 {
+		t.Fatalf("Agent direct grants active=%d revoked=%d, want 1 active and 2 revoked", active, revoked)
+	}
+	readDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: created.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readDecision.Effect != engine.Deny {
+		t.Fatalf("replaced Agent grant still allowed members:read: %+v", readDecision)
+	}
+	manageDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: created.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manageDecision.Effect != engine.Allow {
+		t.Fatalf("replacement Agent grant was not effective: %+v", manageDecision)
+	}
+}
+
 func newPrincipalFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, *session.Service, *security.Signer) {
 	t.Helper()
 	ctx := context.Background()

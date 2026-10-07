@@ -19,6 +19,12 @@ RETURNING id, space_id, role_id, permission_keys, grantee_member_id, grantee_gro
 UPDATE authorization_grants SET revoked_at = now()
 WHERE id = sqlc.arg(id) AND revoked_at IS NULL;
 
+-- name: RevokeInlineGrantsForMember :exec
+UPDATE authorization_grants SET revoked_at = now()
+WHERE grantee_member_id = sqlc.arg(grantee_member_id)
+  AND role_id IS NULL
+  AND revoked_at IS NULL;
+
 -- name: GetRoleInSpace :one
 SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);

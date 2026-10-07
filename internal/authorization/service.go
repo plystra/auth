@@ -1154,6 +1154,75 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	return out, err
 }
 
+// ReplaceInlineGrants atomically replaces a member's direct permission grants.
+// Named-role grants remain intact; the resulting effective authority is
+// checked once before the transaction can commit.
+func (s *Service) ReplaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	permissions = uniqueSorted(permissions)
+	if len(permissions) == 0 || len(permissions) > 256 {
+		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
+	}
+	if scope == "" {
+		scope = "space"
+	}
+	if scope != "self" && scope != "space" && scope != "space_tree" {
+		return Grant{}, apierr.New("VALIDATION_FAILED", "only self, space, and space_tree scopes are available for member grants")
+	}
+	if anchorSpaceID == "" {
+		anchorSpaceID = spaceID
+	}
+	encoded, err := json.Marshal(permissions)
+	if err != nil {
+		return Grant{}, err
+	}
+	var out Grant
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
+			return err
+		}
+		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
+			}
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, "", anchorSpaceID); err != nil {
+			return err
+		}
+		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
+			return err
+		}
+		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
+		if err != nil {
+			return err
+		}
+		if err := q.RevokeInlineGrantsForMember(ctx, db.RevokeInlineGrantsForMemberParams{GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true}}); err != nil {
+			return err
+		}
+		row, err := q.CreateGrant(ctx, db.CreateGrantParams{
+			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID,
+			PermissionKeys: encoded, GranteeMemberID: pgtype.Text{String: granteeMemberID, Valid: true},
+			Scope: scope, AnchorSpaceID: pgtype.Text{String: anchorSpaceID, Valid: true}, AnchorGroupID: pgtype.Text{}, GrantedBy: actorMemberID,
+		})
+		if err != nil {
+			return normalizeDBError(err)
+		}
+		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.replace", row.ID, "success"); err != nil {
+			return err
+		}
+		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
+		return nil
+	})
+	return out, err
+}
+
 func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grantID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		row, err := q.GetGrantInSpace(ctx, db.GetGrantInSpaceParams{ID: grantID, SpaceID: spaceID})
