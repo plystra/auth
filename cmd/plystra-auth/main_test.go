@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/plystra/auth/internal/config"
+	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
 
@@ -38,6 +39,27 @@ func TestJWKSWellKnownEndpointPublishesSigningKey(t *testing.T) {
 	}
 	if len(body.Keys) != 1 || body.Keys[0]["alg"] != "ES256" || body.Keys[0]["use"] != "sig" {
 		t.Fatalf("JWKS = %+v, want one ES256 signing key", body.Keys)
+	}
+}
+
+func TestPlaneCredentialPrefixesRejectCrossPlaneKeys(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		plane route.Plane
+		raw   string
+	}{
+		{name: "application on principal", plane: route.Principal, raw: "ply_sk_prefix.secret"},
+		{name: "operator on principal", plane: route.Principal, raw: "ply_ops_secret"},
+		{name: "agent on server", plane: route.Server, raw: "ply_ag_prefix.secret"},
+		{name: "application on ops", plane: route.Ops, raw: "ply_sk_prefix.secret"},
+		{name: "agent on ops", plane: route.Ops, raw: "ply_ag_prefix.secret"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := rejectCredentialPlane(test.plane, test.raw)
+			if err == nil || !strings.Contains(err.Error(), "CREDENTIAL_PLANE_MISMATCH") {
+				t.Fatalf("rejectCredentialPlane(%s, %q) = %v, want CREDENTIAL_PLANE_MISMATCH", test.plane, test.raw, err)
+			}
+		})
 	}
 }
 
