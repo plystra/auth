@@ -315,6 +315,42 @@ func TestAgentAuthorizationUsesOwnerEnvelope(t *testing.T) {
 	}
 }
 
+func TestOwnerSelfScopeCoversOwnedAgentResource(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "self-scope-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description)
+		VALUES ('prm_owner_self_scope', 'resource:self', 'Owner self scope test permission')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_owner_self_scope', $1, '["resource:self"]'::jsonb, $2, 'self', $1, $2)
+	`, spaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	owned, _, err := svc.Check(ctx, CheckRequest{MemberID: owner.ID, Permission: "resource:self", ResourceSpace: spaceID, ResourceOwner: created.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owned.Effect != engine.Allow {
+		t.Fatalf("owner self scope over Agent resource = %+v, want allow", owned)
+	}
+	unowned, _, err := svc.Check(ctx, CheckRequest{MemberID: owner.ID, Permission: "resource:self", ResourceSpace: spaceID, ResourceOwner: "mem_unowned_resource"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unowned.Effect != engine.Deny || unowned.Code != "SCOPE_OUT_OF_BOUNDS" {
+		t.Fatalf("owner self scope over unrelated resource = %+v, want SCOPE_OUT_OF_BOUNDS", unowned)
+	}
+}
+
 func TestAgentGroupGrantStillRequiresOwnerEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st, svc, owner, spaceID := newBindingFixture(t)
