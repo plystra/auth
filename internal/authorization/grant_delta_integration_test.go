@@ -329,6 +329,9 @@ func TestGrantCreationForUnboundHumanHasNoActingIdentityDelta(t *testing.T) {
 	if err := insertUser(ctx, st, "usr_unbound_grant", "unbound-grant@example.test"); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
 	assertAPIErrorCode(t, svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_unbound_grant"), "AUTHORITY_DELTA_NOT_COVERED")
 }
 
