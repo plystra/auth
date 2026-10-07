@@ -2,6 +2,7 @@ package authorization
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,6 +156,128 @@ func TestAuthorizationCacheKeyIncludesAgentVersionChain(t *testing.T) {
 	}
 	if decision.Effect != engine.Deny || decision.Code != "ACTOR_MEMBER_INACTIVE" {
 		t.Fatalf("decision after Agent version change = %+v, want ACTOR_MEMBER_INACTIVE", decision)
+	}
+}
+
+func TestAgentVersionChangeInvalidatesOnlyThatAgentCacheKey(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agentService := &agent.Service{Store: st}
+	first, _, err := agentService.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "cache-first", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := agentService.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "cache-second", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, memberID := range []string{first.ID, second.ID} {
+		if _, err := st.Pool.Exec(ctx, `
+			INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+			VALUES ($1, $2, '["auth.members:manage"]'::jsonb, $3, 'space', $2, $4)
+		`, "grt_"+memberID, spaceID, memberID, owner.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, memberID := range []string{first.ID, second.ID} {
+		decision, _, err := svc.Check(ctx, CheckRequest{MemberID: memberID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Effect != engine.Allow {
+			t.Fatalf("initial Agent %s decision = %+v, want allow", memberID, decision)
+		}
+	}
+	countKeys := func(memberID string) int {
+		svc.cache.mu.RLock()
+		defer svc.cache.mu.RUnlock()
+		count := 0
+		for key := range svc.cache.entries {
+			if strings.HasPrefix(key, memberID+"\x00") {
+				count++
+			}
+		}
+		return count
+	}
+	if got := countKeys(first.ID); got != 1 {
+		t.Fatalf("first Agent cache keys before version change = %d, want 1", got)
+	}
+	if got := countKeys(second.ID); got != 1 {
+		t.Fatalf("second Agent cache keys before version change = %d, want 1", got)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET version = version + 1 WHERE id = $1`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: first.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("first Agent decision after own version change = %+v, want allow", decision)
+	}
+	if got := countKeys(first.ID); got != 2 {
+		t.Fatalf("first Agent cache keys after version change = %d, want 2 versioned entries", got)
+	}
+	if got := countKeys(second.ID); got != 1 {
+		t.Fatalf("second Agent cache keys after sibling version change = %d, want 1", got)
+	}
+}
+
+func TestParentAgentVersionInvalidatesDescendantWithoutClearingOwnerCache(t *testing.T) {
+	ctx := context.Background()
+	st, svc, owner, spaceID := newBindingFixture(t)
+	agentService := &agent.Service{Store: st}
+	parent, _, err := agentService.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "cache-parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agentService.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, Name: "cache-child", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, memberID := range []string{parent.ID, child.ID} {
+		if _, err := st.Pool.Exec(ctx, `
+			INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+			VALUES ($1, $2, '["auth.members:manage"]'::jsonb, $3, 'space', $2, $4)
+		`, "grt_chain_"+memberID, spaceID, memberID, owner.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, memberID := range []string{owner.ID, child.ID} {
+		decision, _, err := svc.Check(ctx, CheckRequest{MemberID: memberID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decision.Effect != engine.Allow {
+			t.Fatalf("initial %s decision = %+v, want allow", memberID, decision)
+		}
+	}
+	countKeys := func(memberID string) int {
+		svc.cache.mu.RLock()
+		defer svc.cache.mu.RUnlock()
+		count := 0
+		for key := range svc.cache.entries {
+			if strings.HasPrefix(key, memberID+"\x00") {
+				count++
+			}
+		}
+		return count
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET version = version + 1 WHERE id = $1`, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: child.ID, Permission: "auth.members:manage", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("child decision after parent version change = %+v, want allow", decision)
+	}
+	if got := countKeys(child.ID); got != 2 {
+		t.Fatalf("child cache keys after parent version change = %d, want 2 versioned entries", got)
+	}
+	if got := countKeys(owner.ID); got != 1 {
+		t.Fatalf("owner cache keys after Agent version change = %d, want 1", got)
 	}
 }
 
