@@ -149,8 +149,12 @@ func serve(ctx context.Context) error {
 	}
 	defer st.Close()
 	var signer *security.Signer
+	signingKeyEncryptionKey, e := decodeDataKey(c.SigningKeyEncryptionKey)
+	if e != nil {
+		return e
+	}
 	if c.SigningKeyFile != "" {
-		signer, e = security.NewSigner(c.SigningKeyFile, c.Issuer)
+		signer, e = security.NewSigner(c.SigningKeyFile, c.Issuer, []byte(signingKeyEncryptionKey))
 	} else {
 		signer, e = security.GenerateSigner(c.Issuer)
 	}

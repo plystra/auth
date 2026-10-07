@@ -11,16 +11,17 @@ import (
 )
 
 type Config struct {
-	HTTPAddr        string        `env:"PLYSTRA_AUTH_HTTP_ADDR" envDefault:":8080"`
-	ServerAddr      string        `env:"PLYSTRA_AUTH_SERVER_ADDR" envDefault:":8081"`
-	OpsAddr         string        `env:"PLYSTRA_AUTH_OPS_ADDR" envDefault:"127.0.0.1:8082"`
-	DatabaseURL     string        `env:"PLYSTRA_AUTH_DATABASE_URL,required"`
-	Issuer          string        `env:"PLYSTRA_AUTH_ISSUER,required"`
-	SessionHMACKeys string        `env:"PLYSTRA_AUTH_SESSION_HMAC_KEYS,required"`
-	DataKey         string        `env:"PLYSTRA_AUTH_DATA_KEY,required"`
-	SigningKeyFile  string        `env:"PLYSTRA_AUTH_SIGNING_KEY_FILE"`
-	ShutdownTimeout time.Duration `env:"PLYSTRA_AUTH_SHUTDOWN_TIMEOUT" envDefault:"10s"`
-	Environment     string        `env:"PLYSTRA_AUTH_ENVIRONMENT" envDefault:"development"`
+	HTTPAddr                string        `env:"PLYSTRA_AUTH_HTTP_ADDR" envDefault:":8080"`
+	ServerAddr              string        `env:"PLYSTRA_AUTH_SERVER_ADDR" envDefault:":8081"`
+	OpsAddr                 string        `env:"PLYSTRA_AUTH_OPS_ADDR" envDefault:"127.0.0.1:8082"`
+	DatabaseURL             string        `env:"PLYSTRA_AUTH_DATABASE_URL,required"`
+	Issuer                  string        `env:"PLYSTRA_AUTH_ISSUER,required"`
+	SessionHMACKeys         string        `env:"PLYSTRA_AUTH_SESSION_HMAC_KEYS,required"`
+	DataKey                 string        `env:"PLYSTRA_AUTH_DATA_KEY,required"`
+	SigningKeyFile          string        `env:"PLYSTRA_AUTH_SIGNING_KEY_FILE"`
+	SigningKeyEncryptionKey string        `env:"PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY,required"`
+	ShutdownTimeout         time.Duration `env:"PLYSTRA_AUTH_SHUTDOWN_TIMEOUT" envDefault:"10s"`
+	Environment             string        `env:"PLYSTRA_AUTH_ENVIRONMENT" envDefault:"development"`
 }
 
 func Load() (Config, error) {
@@ -47,6 +48,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.DataKey) == "" {
 		return errors.New("PLYSTRA_AUTH_DATA_KEY is required")
 	}
+	if strings.TrimSpace(c.SigningKeyEncryptionKey) == "" {
+		return errors.New("PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY is required")
+	}
 	keys := strings.Split(c.SessionHMACKeys, ",")
 	for i, key := range keys {
 		if len([]byte(strings.TrimSpace(key))) < 32 {
@@ -56,6 +60,10 @@ func (c Config) Validate() error {
 	data, err := base64.StdEncoding.DecodeString(c.DataKey)
 	if err != nil || len(data) != 32 {
 		return errors.New("data key must be base64 encoded 32 bytes")
+	}
+	signingKeyEncryptionKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c.SigningKeyEncryptionKey))
+	if err != nil || len(signingKeyEncryptionKey) != 32 {
+		return errors.New("signing key encryption key must be base64 encoded 32 bytes")
 	}
 	if c.ShutdownTimeout <= 0 {
 		return errors.New("shutdown timeout must be positive")

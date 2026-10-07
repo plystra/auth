@@ -1,6 +1,8 @@
 package security
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -63,21 +65,33 @@ type Signer struct {
 	keys    map[string]signingKey
 }
 
-func NewSigner(pemFile, issuer string) (*Signer, error) {
+const encryptedSigningKeyPEMType = "PLYSTRA AUTH ENCRYPTED SIGNING KEY"
+
+// NewSigner loads an ES256 private key from an AES-GCM encrypted PEM file.
+// The encryption key is deliberately separate from the data key used for
+// user factors so compromise of one key does not unwrap the other secret.
+func NewSigner(pemFile, issuer string, encryptionKey []byte) (*Signer, error) {
+	if len(encryptionKey) != 32 {
+		return nil, errors.New("signing key encryption key must be 32 bytes")
+	}
 	data, err := os.ReadFile(pemFile)
 	if err != nil {
 		return nil, fmt.Errorf("signing key: %w", err)
 	}
 	block, _ := pem.Decode(data)
-	if block == nil {
-		return nil, errors.New("invalid signing key PEM")
+	if block == nil || block.Type != encryptedSigningKeyPEMType {
+		return nil, errors.New("signing key must be an encrypted PEM")
+	}
+	plain, err := decryptSigningKey(block.Bytes, encryptionKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt signing key: %w", err)
 	}
 	var key *ecdsa.PrivateKey
-	if k, e := x509.ParsePKCS8PrivateKey(block.Bytes); e == nil {
+	if k, e := x509.ParsePKCS8PrivateKey(plain); e == nil {
 		key, _ = k.(*ecdsa.PrivateKey)
 	}
 	if key == nil {
-		if k, e := x509.ParseECPrivateKey(block.Bytes); e == nil {
+		if k, e := x509.ParseECPrivateKey(plain); e == nil {
 			key = k
 		}
 	}
@@ -93,6 +107,67 @@ func NewSigner(pemFile, issuer string) (*Signer, error) {
 	}
 	sum := sha256.Sum256(publicBytes)
 	return newSigner(key, issuer, fmt.Sprintf("%x", sum[:8])), nil
+}
+
+// EncryptSigningKeyPEM serializes an ES256 private key into the encrypted PEM
+// format accepted by NewSigner. It is intended for provisioning tooling and
+// tests; callers must keep the returned bytes and encryption key secret.
+func EncryptSigningKeyPEM(key *ecdsa.PrivateKey, encryptionKey []byte) ([]byte, error) {
+	if key == nil {
+		return nil, errors.New("signing key is nil")
+	}
+	if len(encryptionKey) != 32 {
+		return nil, errors.New("signing key encryption key must be 32 bytes")
+	}
+	plain, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, fmt.Errorf("marshal signing key: %w", err)
+	}
+	ciphertext, err := encryptSigningKey(plain, encryptionKey)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: encryptedSigningKeyPEMType, Bytes: ciphertext}), nil
+}
+
+func encryptSigningKey(plain, key []byte) ([]byte, error) {
+	aead, err := signingKeyAEAD(key)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("generate signing key nonce: %w", err)
+	}
+	return aead.Seal(nonce, nonce, plain, nil), nil
+}
+
+func decryptSigningKey(ciphertext, key []byte) ([]byte, error) {
+	aead, err := signingKeyAEAD(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(ciphertext) < aead.NonceSize() {
+		return nil, errors.New("encrypted signing key is truncated")
+	}
+	nonce, payload := ciphertext[:aead.NonceSize()], ciphertext[aead.NonceSize():]
+	plain, err := aead.Open(nil, nonce, payload, nil)
+	if err != nil {
+		return nil, errors.New("encrypted signing key authentication failed")
+	}
+	return plain, nil
+}
+
+func signingKeyAEAD(key []byte) (cipher.AEAD, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("signing key encryption cipher: %w", err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("signing key encryption mode: %w", err)
+	}
+	return aead, nil
 }
 func GenerateSigner(issuer string) (*Signer, error) {
 	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

@@ -29,6 +29,7 @@ services:
       PLYSTRA_AUTH_ISSUER: http://localhost:8080
       PLYSTRA_AUTH_SESSION_HMAC_KEYS: dev-only-session-hmac-key-change-me-32
       PLYSTRA_AUTH_DATA_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
       PLYSTRA_AUTH_ENVIRONMENT: development
     command: ["plystra-auth migrate && exec plystra-auth serve"]
     ports:
