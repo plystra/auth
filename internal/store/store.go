@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/observability"
 	"github.com/plystra/auth/migrations"
 	"github.com/pressly/goose/v3"
 	"go.opentelemetry.io/otel"
@@ -29,7 +30,7 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	cfg.MaxConnLifetime = 30 * time.Minute
 	cfg.ConnConfig.Tracer = otelpgx.NewTracer(
 		otelpgx.WithTracerProvider(otel.GetTracerProvider()),
-		otelpgx.WithMeterProvider(otel.GetMeterProvider()),
+		otelpgx.WithMeterProvider(observability.PlaneMeterProvider(otel.GetMeterProvider())),
 	)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {

@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -332,4 +335,40 @@ func TestDatabaseTraceInheritsInteractionPlaneAttribute(t *testing.T) {
 		}
 	}
 	t.Fatal("database spans did not inherit the server plane attribute")
+}
+
+func TestDatabaseMetricsExposeInteractionPlaneAttribute(t *testing.T) {
+	previousMeter := otel.GetMeterProvider()
+	telemetry, err := observability.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = telemetry.Shutdown(context.Background())
+		otel.SetMeterProvider(previousMeter)
+	})
+	ctx := route.WithPlane(context.Background(), route.Server)
+	database, err := rateLimitDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	var result int
+	if err := st.Pool.QueryRow(ctx, `SELECT 1`).Scan(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result != 1 {
+		t.Fatalf("query result = %d, want 1", result)
+	}
+	response := httptest.NewRecorder()
+	telemetry.MetricsHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, "db_client_operation_duration") || !strings.Contains(body, `plane="server"`) {
+		t.Fatalf("metrics response = (%d, %s), want database duration with server plane", response.Code, body)
+	}
 }

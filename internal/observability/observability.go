@@ -24,6 +24,67 @@ type Provider struct {
 	requests       metric.Int64Counter
 }
 
+// PlaneMeterProvider augments synchronous measurements with the interaction
+// plane carried by their context. Database instrumentation records metrics at
+// query completion, so the request context is the only reliable source for
+// this dimension.
+func PlaneMeterProvider(provider metric.MeterProvider) metric.MeterProvider {
+	if provider == nil {
+		return nil
+	}
+	return planeMeterProvider{MeterProvider: provider}
+}
+
+type planeMeterProvider struct {
+	metric.MeterProvider
+}
+
+func (p planeMeterProvider) Meter(name string, options ...metric.MeterOption) metric.Meter {
+	return planeMeter{Meter: p.MeterProvider.Meter(name, options...)}
+}
+
+type planeMeter struct {
+	metric.Meter
+}
+
+func (m planeMeter) Int64Counter(name string, options ...metric.Int64CounterOption) (metric.Int64Counter, error) {
+	counter, err := m.Meter.Int64Counter(name, options...)
+	if err != nil {
+		return nil, err
+	}
+	return planeInt64Counter{Int64Counter: counter}, nil
+}
+
+func (m planeMeter) Float64Histogram(name string, options ...metric.Float64HistogramOption) (metric.Float64Histogram, error) {
+	histogram, err := m.Meter.Float64Histogram(name, options...)
+	if err != nil {
+		return nil, err
+	}
+	return planeFloat64Histogram{Float64Histogram: histogram}, nil
+}
+
+type planeInt64Counter struct {
+	metric.Int64Counter
+}
+
+func (c planeInt64Counter) Add(ctx context.Context, incr int64, options ...metric.AddOption) {
+	if plane := route.ContextPlane(ctx); plane != "" {
+		options = append(options, metric.WithAttributes(attribute.String("plane", string(plane))))
+	}
+	c.Int64Counter.Add(ctx, incr, options...)
+}
+
+type planeFloat64Histogram struct {
+	metric.Float64Histogram
+}
+
+func (h planeFloat64Histogram) Record(ctx context.Context, value float64, options ...metric.RecordOption) {
+	if plane := route.ContextPlane(ctx); plane != "" {
+		options = append(options, metric.WithAttributes(attribute.String("plane", string(plane))))
+	}
+	h.Float64Histogram.Record(ctx, value, options...)
+}
+
 func New() (*Provider, error) {
 	registry := prometheus.NewRegistry()
 	exporter, err := otelprom.New(otelprom.WithRegisterer(registry))
