@@ -963,6 +963,18 @@ func (s *Service) RevokeOwnBinding(ctx context.Context, userID, memberID string)
 		if err != nil {
 			return err
 		}
+		suspendedAgents, err := q.SuspendAgentsCreatedByBinding(ctx, db.SuspendAgentsCreatedByBindingParams{UserID: pgtype.Text{String: userID, Valid: true}, MemberID: pgtype.Text{String: memberID, Valid: true}})
+		if err != nil {
+			return err
+		}
+		for _, suspended := range suspendedAgents {
+			if err := q.RevokeAgentCredentialsForMember(ctx, db.RevokeAgentCredentialsForMemberParams{MemberID: suspended}); err != nil {
+				return err
+			}
+			if err := audit.Write(ctx, q, "member", memberID, "agent.binding.suspend", suspended, "success"); err != nil {
+				return err
+			}
+		}
 		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err
 		}

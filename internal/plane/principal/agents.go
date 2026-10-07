@@ -127,7 +127,7 @@ func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOu
 }
 
 func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecretOutput, error) {
-	memberID, _, err := a.currentMember(ctx, in.Authorization)
+	memberID, userID, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +137,7 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
 		return nil, err
 	}
-	key, err := a.Agents.Rotate(ctx, memberID, in.ID)
+	key, err := a.Agents.RotateForUser(ctx, memberID, userID, in.ID)
 	if err != nil {
 		return nil, err
 	}

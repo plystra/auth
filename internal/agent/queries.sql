@@ -54,6 +54,11 @@ UPDATE members
 SET status = 'suspended', version = version + 1
 WHERE id = sqlc.arg(member_id) AND type = 'agent' AND status = 'active';
 
+-- name: ResumeSuspendedAgent :exec
+UPDATE members
+SET status = 'active', version = version + 1
+WHERE id = sqlc.arg(member_id) AND type = 'agent' AND status = 'suspended';
+
 -- name: DeleteAgentMember :exec
 UPDATE members
 SET status = 'removed', deleted_at = now(), version = version + 1

@@ -218,6 +218,53 @@ func TestOAuthRefreshCredentialUsesRuntimeRefreshTTL(t *testing.T) {
 	}
 }
 
+func TestCreatorBindingRevocationPausesAgentAndBoundUserCanTakeOver(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, _ := newAgentFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET binding_policy = 'shared' WHERE id = $1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_agent_takeover', 'agent-takeover@example.test', 'agent-takeover@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO user_members (user_id, member_id, status)
+		VALUES ('usr_agent_takeover', $1, 'active')
+	`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	agents := &Service{Store: st, HMACKeys: [][]byte{[]byte("agent-takeover-hmac-key-000000001")}}
+	ag, oldKey, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_agent_owner", Name: "binding-takeover-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := authz.RevokeOwnBinding(ctx, "usr_agent_owner", owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertMemberStatus(t, st, ag.ID, "suspended")
+	if _, err := agents.AuthenticateKey(ctx, oldKey); err == nil {
+		t.Fatal("Agent credential remained usable after creator binding revocation")
+	}
+	newKey, err := agents.RotateForUser(ctx, owner.ID, "usr_agent_takeover", ag.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertMemberStatus(t, st, ag.ID, "active")
+	if _, err := agents.AuthenticateKey(ctx, newKey); err != nil {
+		t.Fatalf("takeover rotation did not issue a usable credential: %v", err)
+	}
+	var suspendedAudits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'agent.binding.suspend' AND resource_id = $1`, ag.ID).Scan(&suspendedAudits); err != nil {
+		t.Fatal(err)
+	}
+	if suspendedAudits != 1 {
+		t.Fatalf("binding suspension audits = %d, want 1", suspendedAudits)
+	}
+}
+
 func hmacSHA256(key []byte, value string) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))

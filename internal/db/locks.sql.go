@@ -176,3 +176,53 @@ func (q *Queries) LockSpaceForAuthorization(ctx context.Context, arg LockSpaceFo
 	)
 	return i, err
 }
+
+const revokeAgentCredentialsForMember = `-- name: RevokeAgentCredentialsForMember :exec
+UPDATE agent_credentials
+SET revoked_at = now()
+WHERE member_id = $1 AND revoked_at IS NULL
+`
+
+type RevokeAgentCredentialsForMemberParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) RevokeAgentCredentialsForMember(ctx context.Context, arg RevokeAgentCredentialsForMemberParams) error {
+	_, err := q.db.Exec(ctx, revokeAgentCredentialsForMember, arg.MemberID)
+	return err
+}
+
+const suspendAgentsCreatedByBinding = `-- name: SuspendAgentsCreatedByBinding :many
+UPDATE members
+SET status = 'suspended', version = version + 1
+WHERE type = 'agent'
+  AND created_by_user_id = $1
+  AND created_by_member_id = $2
+  AND status = 'active'
+RETURNING id
+`
+
+type SuspendAgentsCreatedByBindingParams struct {
+	UserID   pgtype.Text `json:"user_id"`
+	MemberID pgtype.Text `json:"member_id"`
+}
+
+func (q *Queries) SuspendAgentsCreatedByBinding(ctx context.Context, arg SuspendAgentsCreatedByBindingParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, suspendAgentsCreatedByBinding, arg.UserID, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

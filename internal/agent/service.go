@@ -291,11 +291,22 @@ func (s *Service) Get(ctx context.Context, memberID string) (Agent, error) {
 }
 
 func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (string, error) {
+	return s.rotate(ctx, ownerMemberID, "", memberID)
+}
+
+// RotateForUser allows an active user bound to the Agent owner member to take
+// over an Agent that was paused after its creating user's binding was revoked.
+func (s *Service) RotateForUser(ctx context.Context, ownerMemberID, actorUserID, memberID string) (string, error) {
+	return s.rotate(ctx, ownerMemberID, actorUserID, memberID)
+}
+
+func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, memberID string) (string, error) {
 	raw, prefix, hash, err := s.generateCredential()
 	if err != nil {
 		return "", err
 	}
 	var expires time.Time
+	takeover := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
 		row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 		if err != nil {
@@ -306,8 +317,34 @@ func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (s
 		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 		}
-		if row.Status != "active" || row.GroupStatus != "active" {
+		if row.GroupStatus != "active" {
 			return apierr.New("CONFLICT", "agent is not active")
+		}
+		if row.Status != "active" {
+			if row.Status != "suspended" || actorUserID == "" || (row.CreatedByUserID.Valid && row.CreatedByUserID.String == actorUserID) {
+				return apierr.New("CONFLICT", "agent is not active")
+			}
+			actorBinding, bindingErr := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: actorUserID, MemberID: ownerMemberID})
+			if errors.Is(bindingErr, pgx.ErrNoRows) {
+				return apierr.New("PERMISSION_DENIED", "the takeover user is not actively bound to the agent owner")
+			}
+			if bindingErr != nil {
+				return bindingErr
+			}
+			if actorBinding.Status != "active" || actorBinding.RevokedAt.Valid || (actorBinding.ExpiresAt.Valid && !actorBinding.ExpiresAt.Time.After(time.Now().UTC())) {
+				return apierr.New("PERMISSION_DENIED", "the takeover user is not actively bound to the agent owner")
+			}
+			if row.CreatedByUserID.Valid {
+				creatorBinding, creatorErr := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: row.CreatedByUserID.String, MemberID: ownerMemberID})
+				creatorActive := creatorErr == nil && creatorBinding.Status == "active" && !creatorBinding.RevokedAt.Valid && (!creatorBinding.ExpiresAt.Valid || creatorBinding.ExpiresAt.Time.After(time.Now().UTC()))
+				if creatorActive {
+					return apierr.New("CONFLICT", "agent is not paused for binding takeover")
+				}
+			}
+			if err := q.ResumeSuspendedAgent(ctx, db.ResumeSuspendedAgentParams{MemberID: memberID}); err != nil {
+				return err
+			}
+			takeover = true
 		}
 		expires = row.ExpiresAt.Time
 		if err := q.RevokeAgentCredentials(ctx, db.RevokeAgentCredentialsParams{MemberID: memberID}); err != nil {
@@ -317,7 +354,11 @@ func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (s
 		if err != nil {
 			return normalize(err)
 		}
-		return audit.Write(ctx, q, "member", ownerMemberID, "agent.credential.rotate", memberID, "success")
+		action := "agent.credential.rotate"
+		if takeover {
+			action = "agent.credential.takeover"
+		}
+		return audit.Write(ctx, q, "member", ownerMemberID, action, memberID, "success")
 	})
 	if err != nil {
 		return "", err

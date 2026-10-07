@@ -2617,6 +2617,21 @@ func (q *Queries) RemoveAgentGroupSubtree(ctx context.Context, arg RemoveAgentGr
 	return err
 }
 
+const resumeSuspendedAgent = `-- name: ResumeSuspendedAgent :exec
+UPDATE members
+SET status = 'active', version = version + 1
+WHERE id = $1 AND type = 'agent' AND status = 'suspended'
+`
+
+type ResumeSuspendedAgentParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) ResumeSuspendedAgent(ctx context.Context, arg ResumeSuspendedAgentParams) error {
+	_, err := q.db.Exec(ctx, resumeSuspendedAgent, arg.MemberID)
+	return err
+}
+
 const revokeAgentCredentialFamily = `-- name: RevokeAgentCredentialFamily :exec
 UPDATE agent_credentials
 SET revoked_at = now()
