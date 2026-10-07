@@ -167,6 +167,9 @@ func serve(ctx context.Context) error {
 	settings := &space.Service{Store: st}
 	authorizationSvc := &authorization.Service{Store: st}
 	agentSvc := &agent.Service{Store: st}
+	if err := st.Jobs.RegisterAgentExpiry(agentSvc); err != nil {
+		return fmt.Errorf("configure agent expiry job: %w", err)
+	}
 	limiter := &store.RateLimiter{Store: st}
 	dataKey, e := decodeDataKey(c.DataKey)
 	if e != nil {
@@ -263,12 +266,15 @@ func serve(ctx context.Context) error {
 	serverHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Server, serverMux, nil, st, validateCredential, auditCredentialFailure), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
 	opsHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Ops, opsMux, nil, st, validateCredential, auditCredentialFailure), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
 	servers := planeServers(c, ":8090", telemetry.HTTP("principal", principalHandler), telemetry.HTTP("server", serverHandler), telemetry.HTTP("ops", opsHandler), health)
+	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := st.Jobs.Start(sigCtx); err != nil {
+		return fmt.Errorf("start background jobs: %w", err)
+	}
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)
 	}
-	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	select {
 	case <-sigCtx.Done():
 	case e := <-errs:
@@ -278,6 +284,11 @@ func serve(ctx context.Context) error {
 	}
 	if err := shutdownServers(servers, tasks, c.ShutdownTimeout); err != nil {
 		slog.Warn("graceful shutdown timed out", "error", err)
+	}
+	jobCtx, cancelJobs := context.WithTimeout(context.Background(), c.ShutdownTimeout)
+	defer cancelJobs()
+	if err := st.Jobs.Stop(jobCtx); err != nil {
+		slog.Warn("background jobs shutdown timed out", "error", err)
 	}
 	return nil
 }

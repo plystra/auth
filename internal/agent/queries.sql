@@ -143,6 +143,17 @@ ORDER BY created_at, id;
 -- name: GetMemberVersion :one
 SELECT version FROM members WHERE id = sqlc.arg(member_id);
 
+-- name: ListExpiredAgentRoots :many
+SELECT m.id, m.home_group_id
+FROM members m
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+WHERE m.type = 'agent'
+  AND m.status = 'active'
+  AND m.expires_at IS NOT NULL
+  AND m.expires_at <= now()
+ORDER BY m.expires_at, m.id
+FOR UPDATE OF m;
+
 -- name: CanManageAgent :one
 WITH RECURSIVE agent_groups AS (
     SELECT g.id

@@ -275,6 +275,51 @@ func (s *Service) Delete(ctx context.Context, ownerMemberID, memberID string) er
 	})
 }
 
+// ExpireAgents turns every expired active Agent into a tombstone. Each root is
+// handled in one transaction with its descendant members, groups, credentials,
+// and audit event so an interrupted cleanup cannot leave a partially live
+// delegation subtree.
+func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
+	count := 0
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		roots, err := q.ListExpiredAgentRoots(ctx)
+		if err != nil {
+			return err
+		}
+		for _, root := range roots {
+			member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: root.ID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			if member.Status != "active" || !member.ExpiresAt.Valid || member.ExpiresAt.Time.After(time.Now().UTC()) {
+				continue
+			}
+			if !member.HomeGroupID.Valid {
+				return apierr.New("OWNER_INACTIVE", "expired Agent has no home group")
+			}
+			groupID := member.HomeGroupID.String
+			if err := q.DeleteAgentSubtree(ctx, db.DeleteAgentSubtreeParams{GroupID: groupID}); err != nil {
+				return err
+			}
+			if err := q.RemoveAgentGroupSubtree(ctx, db.RemoveAgentGroupSubtreeParams{GroupID: groupID}); err != nil {
+				return err
+			}
+			if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: groupID}); err != nil {
+				return err
+			}
+			if err := audit.Write(ctx, q, "system", "", "agent.expire", member.ID, "success"); err != nil {
+				return err
+			}
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action string, fn func(*db.Queries, string) error) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})

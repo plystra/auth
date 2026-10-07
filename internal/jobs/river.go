@@ -3,6 +3,7 @@ package jobs
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -11,11 +12,34 @@ import (
 	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
+type AgentExpiryService interface {
+	ExpireAgents(context.Context) (int, error)
+}
+
+type AgentExpiryArgs struct{}
+
+func (AgentExpiryArgs) Kind() string { return "agent_expiry" }
+
+type AgentExpiryWorker struct {
+	river.WorkerDefaults[AgentExpiryArgs]
+	Service AgentExpiryService
+}
+
+func (w *AgentExpiryWorker) Work(ctx context.Context, _ *river.Job[AgentExpiryArgs]) error {
+	if w.Service == nil {
+		return fmt.Errorf("agent expiry service is not configured")
+	}
+	_, err := w.Service.ExpireAgents(ctx)
+	return err
+}
+
 // Client is the process-local River producer. Workers are added by the
 // capability that owns a job; this producer is safe to use from business
 // transactions without opening a second connection.
 type Client struct {
-	river *river.Client[pgx.Tx]
+	pool    *pgxpool.Pool
+	river   *river.Client[pgx.Tx]
+	workers *river.Workers
 }
 
 func NewClient(pool *pgxpool.Pool) (*Client, error) {
@@ -23,7 +47,47 @@ func NewClient(pool *pgxpool.Pool) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("configure river client: %w", err)
 	}
-	return &Client{river: client}, nil
+	return &Client{pool: pool, river: client}, nil
+}
+
+func (c *Client) RegisterAgentExpiry(service AgentExpiryService) error {
+	if c == nil || c.pool == nil || c.river == nil {
+		return fmt.Errorf("river client is not configured")
+	}
+	if c.workers != nil {
+		return fmt.Errorf("agent expiry job is already registered")
+	}
+	workers := river.NewWorkers()
+	client, err := river.NewClient(riverpgxv5.New(c.pool), &river.Config{
+		Queues:  map[string]river.QueueConfig{river.QueueDefault: {MaxWorkers: 1}},
+		Workers: workers,
+	})
+	if err != nil {
+		return fmt.Errorf("configure agent expiry worker: %w", err)
+	}
+	c.river = client
+	c.workers = workers
+	river.AddWorker(c.workers, &AgentExpiryWorker{Service: service})
+	c.river.PeriodicJobs().Add(river.NewPeriodicJob(
+		river.PeriodicInterval(time.Minute),
+		func() (river.JobArgs, *river.InsertOpts) { return AgentExpiryArgs{}, nil },
+		&river.PeriodicJobOpts{RunOnStart: true},
+	))
+	return nil
+}
+
+func (c *Client) Start(ctx context.Context) error {
+	if c == nil || c.river == nil {
+		return fmt.Errorf("river client is not configured")
+	}
+	return c.river.Start(ctx)
+}
+
+func (c *Client) Stop(ctx context.Context) error {
+	if c == nil || c.river == nil {
+		return nil
+	}
+	return c.river.Stop(ctx)
 }
 
 // InsertTx enqueues args on the exact transaction owned by Store.InTx. A

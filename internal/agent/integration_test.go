@@ -223,6 +223,93 @@ func TestAgentStopAndDeleteRevokeCredentialsAcrossSubtreeAndKeepTombstones(t *te
 	}
 }
 
+func TestExpiredAgentsAreTombstonedByRiverWorker(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	agents := &Service{Store: st}
+	parent, parentKey, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "expired-parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, childKey, err := agents.Create(ctx, CreateInput{OwnerMemberID: parent.ID, Name: "expired-child", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET expires_at = now() - interval '1 second' WHERE id = $1`, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Jobs.RegisterAgentExpiry(agents); err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := st.Jobs.Start(workerCtx); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer stopCancel()
+		if err := st.Jobs.Stop(stopCtx); err != nil {
+			t.Fatalf("stop River worker: %v", err)
+		}
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var status string
+		if err := st.Pool.QueryRow(ctx, `SELECT status FROM members WHERE id = $1`, parent.ID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+		if status == "removed" {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	assertMemberStatus(t, st, parent.ID, "removed")
+	assertMemberStatus(t, st, child.ID, "removed")
+	if _, err := agents.AuthenticateKey(ctx, parentKey); err == nil {
+		t.Fatal("expired parent Agent credential remained usable")
+	}
+	if _, err := agents.AuthenticateKey(ctx, childKey); err == nil {
+		t.Fatal("expired child Agent credential remained usable")
+	}
+	var auditCount int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'agent.expire' AND resource_id = $1`, parent.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("expired Agent audit rows = %d, want 1", auditCount)
+	}
+}
+
+func TestExpiredAgentCleanupRollsBackWhenAuditFails(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	agents := &Service{Store: st}
+	ag, key, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "expired-audit-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET expires_at = now() - interval '1 second' WHERE id = $1`, ag.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_expired_agent_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'expired Agent audit insert rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_expired_agent_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_expired_agent_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := agents.ExpireAgents(ctx); err == nil {
+		t.Fatal("expired Agent cleanup succeeded despite audit failure")
+	}
+	assertMemberStatus(t, st, ag.ID, "active")
+	if _, err := agents.AuthenticateKey(ctx, key); err != nil {
+		t.Fatalf("expired Agent credential changed after rollback: %v", err)
+	}
+}
+
 func TestAgentStatusMutationRollsBackWhenAuditFails(t *testing.T) {
 	ctx := context.Background()
 	st, _, owner, _ := newAgentFixture(t)

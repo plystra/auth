@@ -1714,6 +1714,43 @@ func (q *Queries) ListAgentsForGroup(ctx context.Context, arg ListAgentsForGroup
 	return items, nil
 }
 
+const listExpiredAgentRoots = `-- name: ListExpiredAgentRoots :many
+SELECT m.id, m.home_group_id
+FROM members m
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+WHERE m.type = 'agent'
+  AND m.status = 'active'
+  AND m.expires_at IS NOT NULL
+  AND m.expires_at <= now()
+ORDER BY m.expires_at, m.id
+FOR UPDATE OF m
+`
+
+type ListExpiredAgentRootsRow struct {
+	ID          string      `json:"id"`
+	HomeGroupID pgtype.Text `json:"home_group_id"`
+}
+
+func (q *Queries) ListExpiredAgentRoots(ctx context.Context) ([]ListExpiredAgentRootsRow, error) {
+	rows, err := q.db.Query(ctx, listExpiredAgentRoots)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListExpiredAgentRootsRow{}
+	for rows.Next() {
+		var i ListExpiredAgentRootsRow
+		if err := rows.Scan(&i.ID, &i.HomeGroupID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listFactors = `-- name: ListFactors :many
 SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at FROM factors WHERE user_id = $1 ORDER BY created_at
 `
