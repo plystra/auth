@@ -825,6 +825,15 @@
         ],
         "type": "object"
       },
+      "GroupMoveInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "parent_group_id": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "LogoutInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2506,6 +2515,69 @@
           }
         },
         "summary": "groups.members.add"
+      }
+    },
+    "/v1/spaces/{id}/groups/{group_id}/move": {
+      "post": {
+        "operationId": "groups.move",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupMoveInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputAcceptedDataBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "groups.move"
       }
     },
     "/v1/spaces/{id}/members": {
