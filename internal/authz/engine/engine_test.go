@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestCheckRespectsGrantScopeAndDefaultDeny(t *testing.T) {
 	tests := []struct {
@@ -52,6 +55,8 @@ func TestAgentAuthorityIsBoundToOwnerEnvelope(t *testing.T) {
 	}
 	if got := Check(agent); got.Effect != Allow {
 		t.Fatalf("agent should be allowed while owner is allowed: %+v", got)
+	} else if !slices.Contains(got.Trace, "owner envelope matched") {
+		t.Fatalf("agent allow trace = %v, want owner envelope step", got.Trace)
 	}
 	owner.Assignments[0].Permissions = []string{"invoice:read"}
 	if got := Check(agent); got.Code != "OWNER_ENVELOPE_EXCLUDED" {

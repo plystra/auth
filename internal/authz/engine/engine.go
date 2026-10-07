@@ -110,6 +110,7 @@ func Check(in Request) Decision {
 			}
 			return Decision{Effect: Deny, Code: "OWNER_ENVELOPE_EXCLUDED", Trace: append(trace, "owner envelope denied")}
 		}
+		trace = append(trace, "owner envelope matched")
 		for _, a := range matches {
 			if a.AgentApprovalRequired && !in.ApprovalValid && !in.SkipApproval {
 				return Decision{Effect: Deny, Code: "APPROVAL_REQUIRED", Trace: append(trace, "human approval required")}

@@ -387,22 +387,7 @@ func explainSummary(action string, decision engine.Decision) string {
 
 func explainTrace(decision engine.Decision) []ExplainStep {
 	if len(decision.Trace) == 0 {
-		detail := "authorization denied"
-		switch decision.Code {
-		case "UNKNOWN_PERMISSION":
-			detail = "permission is not registered"
-		case "PERMISSION_DISABLED":
-			detail = "permission is disabled"
-		case "ACTOR_MEMBER_INACTIVE":
-			detail = "subject member is inactive"
-		case "OWNER_INACTIVE":
-			detail = "owner chain contains an inactive member"
-		case "RESOURCE_GROUP_NOT_FOUND":
-			detail = "resource group was not found in the Space"
-		case "SPACE_INACTIVE":
-			detail = "resource Space is inactive"
-		}
-		return []ExplainStep{{Step: "authorization", Result: "fail", Detail: detail}}
+		return []ExplainStep{{Step: "authorization", Result: "fail", Detail: explainDenyDetail(decision.Code)}}
 	}
 	trace := make([]ExplainStep, 0, len(decision.Trace))
 	for i, detail := range decision.Trace {
@@ -413,6 +398,45 @@ func explainTrace(decision engine.Decision) []ExplainStep {
 		trace = append(trace, ExplainStep{Step: "authorization", Result: result, Detail: detail})
 	}
 	return trace
+}
+
+func explainDenyDetail(code string) string {
+	switch code {
+	case "INVALID_SUBJECT":
+		return "subject or permission is missing"
+	case "UNKNOWN_PERMISSION":
+		return "permission is not registered"
+	case "PERMISSION_DISABLED":
+		return "permission is disabled"
+	case "ACTOR_MEMBER_INACTIVE":
+		return "subject member is inactive"
+	case "PRINCIPAL_KIND_NOT_ALLOWED":
+		return "the permission does not allow this principal type"
+	case "ENVELOPE_EXCLUDED":
+		return "the permission is excluded by the effective envelope"
+	case "SCOPE_OUT_OF_BOUNDS":
+		return "the assignment scope does not cover the resource"
+	case "OWNER_INACTIVE":
+		return "owner chain contains an inactive member"
+	case "OWNER_ENVELOPE_EXCLUDED":
+		return "the owner effective envelope excludes the permission"
+	case "APPROVAL_REQUIRED":
+		return "human approval is required"
+	case "RESOURCE_GROUP_NOT_FOUND":
+		return "resource group was not found in the Space"
+	case "RESOURCE_GROUP_INACTIVE":
+		return "resource group is inactive"
+	case "SPACE_INACTIVE":
+		return "resource Space is inactive"
+	case "KEY_SCOPE_EXCLUDED":
+		return "the API key is outside the resource Space scope"
+	case "TOKEN_SCOPE_EXCLUDED":
+		return "the delegated token scope excludes the permission"
+	case "NO_MATCHING_PERMISSION":
+		return "no matching permission assignment was found"
+	default:
+		return "authorization denied"
+	}
 }
 
 func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectOutput, error) {
