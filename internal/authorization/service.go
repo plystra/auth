@@ -47,8 +47,22 @@ type CheckRequest struct {
 // Check is the single authorization decision entry point shared by all
 // interaction planes and state-changing services.
 func (s *Service) Check(ctx context.Context, in CheckRequest) (engine.Decision, int64, error) {
+	if s == nil || s.Store == nil {
+		return engine.Decision{}, 0, apierr.New("UNAVAILABLE", "authorization is unavailable")
+	}
 	s.initializeCache()
-	return s.checkQueries(ctx, s.Store.Queries(), in, 0, true)
+
+	// Authorization facts and every version component of the cache key must be
+	// read from one snapshot. A pool-backed sequence of independent queries can
+	// otherwise combine facts from before and after a concurrent policy commit.
+	var decision engine.Decision
+	var policyVersion int64
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		decision, policyVersion, err = s.checkQueries(ctx, q, in, 0, true)
+		return err
+	})
+	return decision, policyVersion, err
 }
 
 // CheckTx evaluates the same decision using an existing business transaction.
