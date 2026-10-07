@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -339,6 +340,95 @@ func TestLoginRehashesLegacyPasswordAndRejectsOverlongInput(t *testing.T) {
 	}
 	if sessionsAfter != sessionsBefore {
 		t.Fatalf("overlong login created a session: before=%d after=%d", sessionsBefore, sessionsAfter)
+	}
+}
+
+func TestLoginAttemptsAreRateLimitedByIPAccountAndPair(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st}}
+
+	for i := 0; i < 5; i++ {
+		if _, err := accounts.Login(ctx, LoginInput{Email: "pair-limit@example.test", Password: "wrong", IP: net.ParseIP("192.0.2.1")}); err == nil {
+			t.Fatal("login unexpectedly succeeded")
+		} else {
+			assertAccountError(t, err, "invalid_credentials")
+		}
+	}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "pair-limit@example.test", Password: "wrong", IP: net.ParseIP("192.0.2.1")}); err == nil {
+		t.Fatal("login pair limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+
+	for i := 0; i < 10; i++ {
+		ip := net.ParseIP(fmt.Sprintf("198.51.100.%d", i+1))
+		if _, err := accounts.Login(ctx, LoginInput{Email: "account-limit@example.test", Password: "wrong", IP: ip}); err == nil {
+			t.Fatal("login unexpectedly succeeded")
+		} else {
+			assertAccountError(t, err, "invalid_credentials")
+		}
+	}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "account-limit@example.test", Password: "wrong", IP: net.ParseIP("198.51.100.11")}); err == nil {
+		t.Fatal("login account limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+
+	for i := 0; i < 30; i++ {
+		if _, err := accounts.Login(ctx, LoginInput{Email: fmt.Sprintf("ip-limit-%d@example.test", i), Password: "wrong", IP: net.ParseIP("203.0.113.1")}); err == nil {
+			t.Fatal("login unexpectedly succeeded")
+		} else {
+			assertAccountError(t, err, "invalid_credentials")
+		}
+	}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "ip-limit-final@example.test", Password: "wrong", IP: net.ParseIP("203.0.113.1")}); err == nil {
+		t.Fatal("login IP limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+}
+
+func TestPasswordResetAndVerificationAttemptsAreRateLimitedWithoutEnumeration(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st}}
+
+	for i := 0; i < 5; i++ {
+		if token, err := accounts.RequestPasswordReset(ctx, "unknown-reset@example.test", net.ParseIP("198.51.100.10")); err != nil || token != "" {
+			t.Fatalf("unknown reset request = token %q, error %v; want empty token and no error", token, err)
+		}
+	}
+	if _, err := accounts.RequestPasswordReset(ctx, "unknown-reset@example.test", net.ParseIP("198.51.100.10")); err == nil {
+		t.Fatal("password reset request IP/account/pair limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := accounts.VerifyEmail(ctx, "invalid-email-token", net.ParseIP("198.51.100.11")); err == nil {
+			t.Fatal("invalid email token was accepted")
+		} else {
+			assertAccountError(t, err, "invalid_grant")
+		}
+	}
+	if err := accounts.VerifyEmail(ctx, "invalid-email-token", net.ParseIP("198.51.100.11")); err == nil {
+		t.Fatal("email verification limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+
+	for i := 0; i < 5; i++ {
+		if err := accounts.ResetPassword(ctx, "invalid-reset-token", "a newly secure password", net.ParseIP("198.51.100.12")); err == nil {
+			t.Fatal("invalid reset token was accepted")
+		} else {
+			assertAccountError(t, err, "invalid_grant")
+		}
+	}
+	if err := accounts.ResetPassword(ctx, "invalid-reset-token", "a newly secure password", net.ParseIP("198.51.100.12")); err == nil {
+		t.Fatal("password reset confirmation limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
 	}
 }
 

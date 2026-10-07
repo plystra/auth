@@ -97,3 +97,33 @@ func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswo
 	)
 	return err
 }
+
+const getEmailVerificationTokenUser = `-- name: GetEmailVerificationTokenUser :one
+SELECT user_id FROM email_verification_tokens WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+`
+
+type GetEmailVerificationTokenUserParams struct {
+	TokenHash []byte `json:"token_hash"`
+}
+
+func (q *Queries) GetEmailVerificationTokenUser(ctx context.Context, arg GetEmailVerificationTokenUserParams) (string, error) {
+	row := q.db.QueryRow(ctx, getEmailVerificationTokenUser, arg.TokenHash)
+	var user_id string
+	err := row.Scan(&user_id)
+	return user_id, err
+}
+
+const getPasswordResetTokenUser = `-- name: GetPasswordResetTokenUser :one
+SELECT user_id FROM password_reset_tokens WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+`
+
+type GetPasswordResetTokenUserParams struct {
+	TokenHash []byte `json:"token_hash"`
+}
+
+func (q *Queries) GetPasswordResetTokenUser(ctx context.Context, arg GetPasswordResetTokenUserParams) (string, error) {
+	row := q.db.QueryRow(ctx, getPasswordResetTokenUser, arg.TokenHash)
+	var user_id string
+	err := row.Scan(&user_id)
+	return user_id, err
+}

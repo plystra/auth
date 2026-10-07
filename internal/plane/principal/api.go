@@ -11,6 +11,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -151,8 +152,8 @@ func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) 
 	return out, nil
 }
 func (a *API) login(ctx context.Context, in *LoginInput) (*AuthOutput, error) {
-	var ip net.IP
-	if in.XForwardedFor != "" {
+	ip := requestinfo.Get(ctx).IP
+	if len(ip) == 0 && in.XForwardedFor != "" {
 		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))
 	}
 	result, e := a.Accounts.Login(ctx, account.LoginInput{Email: in.Body.Email, Password: in.Body.Password, IP: ip, UserAgent: in.UserAgent})
@@ -347,7 +348,7 @@ func (a *API) verifyEmail(ctx context.Context, in *VerifyEmailInput) (*GenericOu
 	if strings.TrimSpace(in.Body.Token) == "" {
 		return nil, apierr.New("invalid_request", "token is required")
 	}
-	if e := a.Accounts.VerifyEmail(ctx, in.Body.Token); e != nil {
+	if e := a.Accounts.VerifyEmail(ctx, in.Body.Token, requestinfo.Get(ctx).IP); e != nil {
 		return nil, e
 	}
 	out := &GenericOutput{}
@@ -355,7 +356,7 @@ func (a *API) verifyEmail(ctx context.Context, in *VerifyEmailInput) (*GenericOu
 	return out, nil
 }
 func (a *API) passwordResetRequest(ctx context.Context, in *ResetRequestInput) (*GenericOutput, error) {
-	_, e := a.Accounts.RequestPasswordReset(ctx, in.Body.Email)
+	_, e := a.Accounts.RequestPasswordReset(ctx, in.Body.Email, requestinfo.Get(ctx).IP)
 	if e != nil {
 		return nil, e
 	}
@@ -364,7 +365,7 @@ func (a *API) passwordResetRequest(ctx context.Context, in *ResetRequestInput) (
 	return out, nil
 }
 func (a *API) passwordResetConfirm(ctx context.Context, in *ResetConfirmInput) (*GenericOutput, error) {
-	if e := a.Accounts.ResetPassword(ctx, in.Body.Token, in.Body.Password); e != nil {
+	if e := a.Accounts.ResetPassword(ctx, in.Body.Token, in.Body.Password, requestinfo.Get(ctx).IP); e != nil {
 		return nil, e
 	}
 	out := &GenericOutput{}

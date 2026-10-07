@@ -2,6 +2,8 @@ package account
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"net"
 	"strings"
@@ -138,16 +140,21 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 	return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), Tokens: &tokens}, nil
 }
 func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) {
-	if s.Limiter != nil {
-		ok, e := s.Limiter.Allow(ctx, "login:"+strings.ToLower(strings.TrimSpace(in.Email)), 20, time.Minute)
-		if e != nil {
-			return AuthResult{}, e
-		}
-		if !ok {
-			return AuthResult{}, apierr.New("rate_limited", "too many login attempts")
+	email := strings.TrimSpace(strings.ToLower(in.Email))
+	ip := rateIdentity(in.IP)
+	for _, bucket := range []struct {
+		kind, value string
+		limit       int
+		window      time.Duration
+	}{
+		{"login:ip", ip, 30, time.Minute},
+		{"login:account", email, 10, time.Minute},
+		{"login:pair", ip + ":" + email, 5, time.Minute},
+	} {
+		if err := s.allowRateLimit(ctx, bucket.kind, bucket.value, bucket.limit, bucket.window); err != nil {
+			return AuthResult{}, err
 		}
 	}
-	email := strings.TrimSpace(strings.ToLower(in.Email))
 	settings, e := s.Settings.Get(ctx)
 	if e != nil {
 		return AuthResult{}, e
@@ -203,6 +210,28 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 		return AuthResult{}, e
 	}
 	return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), Tokens: &tokens}, nil
+}
+
+func (s *Service) allowRateLimit(ctx context.Context, kind, value string, limit int, window time.Duration) error {
+	if s.Limiter == nil {
+		return nil
+	}
+	digest := sha256.Sum256([]byte("plystra-auth-rate:" + kind + ":" + value))
+	ok, err := s.Limiter.Allow(ctx, "auth:"+base64.RawURLEncoding.EncodeToString(digest[:]), limit, window)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return apierr.New("rate_limited", "too many authentication attempts")
+	}
+	return nil
+}
+
+func rateIdentity(ip net.IP) string {
+	if len(ip) == 0 {
+		return "unknown"
+	}
+	return ip.String()
 }
 func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) {
 	u, e := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})

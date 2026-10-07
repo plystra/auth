@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
+	"net"
 	"strings"
 	"time"
 
@@ -37,8 +38,25 @@ func (s *Service) CreateEmailVerification(ctx context.Context, userID string) (s
 	})
 	return raw, e
 }
-func (s *Service) VerifyEmail(ctx context.Context, raw string) error {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(raw)))
+func (s *Service) VerifyEmail(ctx context.Context, raw string, ips ...net.IP) error {
+	raw = strings.TrimSpace(raw)
+	sum := sha256.Sum256([]byte(raw))
+	ip := rateIdentity(firstIP(ips))
+	if err := s.allowRateLimit(ctx, "verify:ip", ip, 30, time.Hour); err != nil {
+		return err
+	}
+	accountID := "token:" + base64.RawURLEncoding.EncodeToString(sum[:])
+	if userID, err := s.Store.Queries().GetEmailVerificationTokenUser(ctx, db.GetEmailVerificationTokenUserParams{TokenHash: sum[:]}); err == nil {
+		accountID = "account:" + userID
+		if err := s.allowRateLimit(ctx, "verify:account", userID, 10, time.Hour); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	if err := s.allowRateLimit(ctx, "verify:pair", ip+":"+accountID, 5, time.Hour); err != nil {
+		return err
+	}
 	var userID string
 	e := s.Store.InTx(ctx, func(q *db.Queries) error {
 		v, e := q.ConsumeEmailVerificationToken(ctx, db.ConsumeEmailVerificationTokenParams{TokenHash: sum[:]})
@@ -56,8 +74,22 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string) error {
 	}
 	return e
 }
-func (s *Service) RequestPasswordReset(ctx context.Context, email string) (string, error) {
-	u, e := s.Store.Queries().GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: strings.ToLower(strings.TrimSpace(email))})
+func (s *Service) RequestPasswordReset(ctx context.Context, email string, ips ...net.IP) (string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	ip := rateIdentity(firstIP(ips))
+	for _, bucket := range []struct {
+		kind, value string
+		limit       int
+	}{
+		{"reset:ip", ip, 30},
+		{"reset:account", email, 10},
+		{"reset:pair", ip + ":" + email, 5},
+	} {
+		if err := s.allowRateLimit(ctx, bucket.kind, bucket.value, bucket.limit, time.Hour); err != nil {
+			return "", err
+		}
+	}
+	u, e := s.Store.Queries().GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email})
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return "", nil
@@ -73,7 +105,25 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (strin
 	})
 	return raw, e
 }
-func (s *Service) ResetPassword(ctx context.Context, raw, password string) error {
+func (s *Service) ResetPassword(ctx context.Context, raw, password string, ips ...net.IP) error {
+	raw = strings.TrimSpace(raw)
+	tokenHash := sha256Bytes(raw)
+	ip := rateIdentity(firstIP(ips))
+	if err := s.allowRateLimit(ctx, "reset:ip", ip, 30, time.Hour); err != nil {
+		return err
+	}
+	accountID := "token:" + base64.RawURLEncoding.EncodeToString(tokenHash)
+	if userID, lookupErr := s.Store.Queries().GetPasswordResetTokenUser(ctx, db.GetPasswordResetTokenUserParams{TokenHash: tokenHash}); lookupErr == nil {
+		accountID = "account:" + userID
+		if err := s.allowRateLimit(ctx, "reset:account", userID, 10, time.Hour); err != nil {
+			return err
+		}
+	} else if !errors.Is(lookupErr, pgx.ErrNoRows) {
+		return lookupErr
+	}
+	if err := s.allowRateLimit(ctx, "reset:pair", ip+":"+accountID, 5, time.Hour); err != nil {
+		return err
+	}
 	if len(password) < 12 {
 		return apierr.New("invalid_request", "password does not meet the configured minimum length")
 	}
@@ -85,7 +135,7 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 		return e
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		v, e := q.ConsumePasswordResetToken(ctx, db.ConsumePasswordResetTokenParams{TokenHash: sha256Bytes(raw)})
+		v, e := q.ConsumePasswordResetToken(ctx, db.ConsumePasswordResetTokenParams{TokenHash: tokenHash})
 		if e != nil {
 			if errors.Is(e, pgx.ErrNoRows) {
 				return apierr.New("invalid_grant", "password reset token is invalid or expired")
@@ -106,6 +156,12 @@ func (s *Service) ResetPassword(ctx context.Context, raw, password string) error
 		}
 		return audit.Write(ctx, q, "public", v, "auth.password.reset", v, "success")
 	})
+}
+func firstIP(ips []net.IP) net.IP {
+	if len(ips) == 0 {
+		return nil
+	}
+	return ips[0]
 }
 func sha256Bytes(v string) []byte { sum := sha256.Sum256([]byte(strings.TrimSpace(v))); return sum[:] }
 
