@@ -135,6 +135,60 @@ func TestAgentCredentialsUseHMACHashesAndRotateKeys(t *testing.T) {
 	}
 }
 
+func TestOAuthRefreshCredentialsRotateWithHMACAndRevokeOnReplay(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	oldKey := []byte("oauth-refresh-hmac-key-000000000001")
+	newKey := []byte("oauth-refresh-hmac-key-000000000002")
+	legacy := &Service{Store: st, HMACKeys: [][]byte{oldKey}}
+	ag, _, err := legacy.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "oauth-refresh-agent", Source: "oauth", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := legacy.CreateOAuthRefreshCredential(ctx, ag.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(raw, "ply_rt_") || !strings.Contains(raw, ".") {
+		t.Fatalf("OAuth refresh credential format = %q, want ply_rt_ prefix and opaque secret", raw)
+	}
+	prefix := strings.SplitN(raw, ".", 2)[0]
+	var stored []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE prefix = $1 AND kind = 'oauth_refresh'`, prefix).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, hmacSHA256(oldKey, raw)) {
+		t.Fatalf("OAuth refresh hash = %x, want HMAC-SHA-256 of the complete token", stored)
+	}
+	rotating := &Service{Store: st, HMACKeys: [][]byte{newKey, oldKey}}
+	credential, next, err := rotating.RotateOAuthRefresh(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credential.MemberID != ag.ID || credential.Kind != "oauth_refresh" || next == raw {
+		t.Fatalf("rotated OAuth credential = %+v next=%q", credential, next)
+	}
+	nextPrefix := strings.SplitN(next, ".", 2)[0]
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE prefix = $1`, nextPrefix).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, hmacSHA256(newKey, next)) {
+		t.Fatal("rotated OAuth refresh hash did not use the current HMAC key")
+	}
+	if _, _, err := rotating.RotateOAuthRefresh(ctx, raw); err == nil {
+		t.Fatal("replayed OAuth refresh token was accepted")
+	} else {
+		assertAgentError(t, err, "invalid_grant")
+	}
+	var active int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM agent_credentials WHERE family_id = (SELECT family_id FROM agent_credentials WHERE prefix = $1) AND revoked_at IS NULL`, prefix).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatalf("OAuth refresh replay left %d active family credentials", active)
+	}
+}
+
 func hmacSHA256(key []byte, value string) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))

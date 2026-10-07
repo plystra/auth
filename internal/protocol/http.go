@@ -61,6 +61,24 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 		h.tokenExchange(w, r)
 		return
 	}
+	if grantType == "refresh_token" {
+		if h.Agents == nil || h.Sessions == nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
+			return
+		}
+		credential, refresh, err := h.Agents.RotateOAuthRefresh(r.Context(), r.Form.Get("refresh_token"))
+		if err != nil {
+			writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
+			return
+		}
+		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), credential.MemberID, credential.SpaceID, r.Form.Get("resource"))
+		if err != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": refresh})
+		return
+	}
 	if grantType == "agent_key" || (grantType == "urn:ietf:params:oauth:grant-type:token-exchange" && r.Form.Get("agent_key") != "") {
 		if h.Agents == nil || h.Sessions == nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent token exchange is unavailable"))

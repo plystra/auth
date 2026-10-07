@@ -104,6 +104,11 @@ INSERT INTO agent_credentials (id, member_id, kind, prefix, secret_hash, family_
 VALUES (sqlc.arg(id), sqlc.arg(member_id), 'key', sqlc.arg(prefix), sqlc.arg(secret_hash), sqlc.narg(family_id), sqlc.arg(expires_at))
 RETURNING id, member_id, kind, prefix, secret_hash, family_id, expires_at, revoked_at, last_used_at, created_at;
 
+-- name: CreateOAuthRefreshCredential :one
+INSERT INTO agent_credentials (id, member_id, kind, prefix, secret_hash, family_id, expires_at)
+VALUES (sqlc.arg(id), sqlc.arg(member_id), 'oauth_refresh', sqlc.arg(prefix), sqlc.arg(secret_hash), sqlc.arg(family_id), sqlc.arg(expires_at))
+RETURNING id, member_id, kind, prefix, secret_hash, family_id, expires_at, revoked_at, last_used_at, created_at;
+
 -- name: GetAgentCredentialByPrefix :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
@@ -112,6 +117,25 @@ FROM agent_credentials c
 JOIN members m ON m.id = c.member_id
 WHERE c.prefix = sqlc.arg(prefix)
 LIMIT 1;
+
+-- name: LockOAuthRefreshCredentialByHash :one
+SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
+       c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
+       m.type, m.home_group_id, m.created_by_member_id
+FROM agent_credentials c
+JOIN members m ON m.id = c.member_id
+WHERE c.secret_hash = sqlc.arg(secret_hash) AND c.kind = 'oauth_refresh'
+FOR UPDATE;
+
+-- name: MarkAgentCredentialUsed :execresult
+UPDATE agent_credentials
+SET last_used_at = now()
+WHERE id = sqlc.arg(id) AND revoked_at IS NULL AND last_used_at IS NULL;
+
+-- name: RevokeAgentCredentialFamily :exec
+UPDATE agent_credentials
+SET revoked_at = now()
+WHERE family_id = sqlc.arg(family_id) AND revoked_at IS NULL;
 
 -- name: TouchAgentCredential :exec
 UPDATE agent_credentials SET last_used_at = now()

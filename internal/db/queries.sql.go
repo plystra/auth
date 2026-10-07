@@ -8,6 +8,7 @@ package db
 import (
 	"context"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -703,6 +704,46 @@ func (q *Queries) CreateMemberWithPolicy(ctx context.Context, arg CreateMemberWi
 		&i.Type,
 		&i.BindingPolicy,
 		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createOAuthRefreshCredential = `-- name: CreateOAuthRefreshCredential :one
+INSERT INTO agent_credentials (id, member_id, kind, prefix, secret_hash, family_id, expires_at)
+VALUES ($1, $2, 'oauth_refresh', $3, $4, $5, $6)
+RETURNING id, member_id, kind, prefix, secret_hash, family_id, expires_at, revoked_at, last_used_at, created_at
+`
+
+type CreateOAuthRefreshCredentialParams struct {
+	ID         string             `json:"id"`
+	MemberID   string             `json:"member_id"`
+	Prefix     string             `json:"prefix"`
+	SecretHash []byte             `json:"secret_hash"`
+	FamilyID   pgtype.Text        `json:"family_id"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateOAuthRefreshCredential(ctx context.Context, arg CreateOAuthRefreshCredentialParams) (AgentCredential, error) {
+	row := q.db.QueryRow(ctx, createOAuthRefreshCredential,
+		arg.ID,
+		arg.MemberID,
+		arg.Prefix,
+		arg.SecretHash,
+		arg.FamilyID,
+		arg.ExpiresAt,
+	)
+	var i AgentCredential
+	err := row.Scan(
+		&i.ID,
+		&i.MemberID,
+		&i.Kind,
+		&i.Prefix,
+		&i.SecretHash,
+		&i.FamilyID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.LastUsedAt,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -2423,6 +2464,61 @@ func (q *Queries) LockMemberInSpace(ctx context.Context, arg LockMemberInSpacePa
 	return i, err
 }
 
+const lockOAuthRefreshCredentialByHash = `-- name: LockOAuthRefreshCredentialByHash :one
+SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
+       c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
+       m.type, m.home_group_id, m.created_by_member_id
+FROM agent_credentials c
+JOIN members m ON m.id = c.member_id
+WHERE c.secret_hash = $1 AND c.kind = 'oauth_refresh'
+FOR UPDATE
+`
+
+type LockOAuthRefreshCredentialByHashParams struct {
+	SecretHash []byte `json:"secret_hash"`
+}
+
+type LockOAuthRefreshCredentialByHashRow struct {
+	ID                string             `json:"id"`
+	MemberID          string             `json:"member_id"`
+	Kind              string             `json:"kind"`
+	Prefix            string             `json:"prefix"`
+	SecretHash        []byte             `json:"secret_hash"`
+	FamilyID          pgtype.Text        `json:"family_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt         pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt        pgtype.Timestamptz `json:"last_used_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	SpaceID           string             `json:"space_id"`
+	MemberStatus      string             `json:"member_status"`
+	Type              string             `json:"type"`
+	HomeGroupID       pgtype.Text        `json:"home_group_id"`
+	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+}
+
+func (q *Queries) LockOAuthRefreshCredentialByHash(ctx context.Context, arg LockOAuthRefreshCredentialByHashParams) (LockOAuthRefreshCredentialByHashRow, error) {
+	row := q.db.QueryRow(ctx, lockOAuthRefreshCredentialByHash, arg.SecretHash)
+	var i LockOAuthRefreshCredentialByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.MemberID,
+		&i.Kind,
+		&i.Prefix,
+		&i.SecretHash,
+		&i.FamilyID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.SpaceID,
+		&i.MemberStatus,
+		&i.Type,
+		&i.HomeGroupID,
+		&i.CreatedByMemberID,
+	)
+	return i, err
+}
+
 const lockRoleInSpace = `-- name: LockRoleInSpace :one
 SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE id = $1 AND space_id = $2
@@ -2488,6 +2584,20 @@ func (q *Queries) LockTOTPFactors(ctx context.Context, arg LockTOTPFactorsParams
 	return items, nil
 }
 
+const markAgentCredentialUsed = `-- name: MarkAgentCredentialUsed :execresult
+UPDATE agent_credentials
+SET last_used_at = now()
+WHERE id = $1 AND revoked_at IS NULL AND last_used_at IS NULL
+`
+
+type MarkAgentCredentialUsedParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) MarkAgentCredentialUsed(ctx context.Context, arg MarkAgentCredentialUsedParams) (pgconn.CommandTag, error) {
+	return q.db.Exec(ctx, markAgentCredentialUsed, arg.ID)
+}
+
 const removeAgentGroupSubtree = `-- name: RemoveAgentGroupSubtree :exec
 WITH RECURSIVE tree AS (
     SELECT groups.id FROM groups WHERE groups.id = $1
@@ -2504,6 +2614,21 @@ type RemoveAgentGroupSubtreeParams struct {
 
 func (q *Queries) RemoveAgentGroupSubtree(ctx context.Context, arg RemoveAgentGroupSubtreeParams) error {
 	_, err := q.db.Exec(ctx, removeAgentGroupSubtree, arg.GroupID)
+	return err
+}
+
+const revokeAgentCredentialFamily = `-- name: RevokeAgentCredentialFamily :exec
+UPDATE agent_credentials
+SET revoked_at = now()
+WHERE family_id = $1 AND revoked_at IS NULL
+`
+
+type RevokeAgentCredentialFamilyParams struct {
+	FamilyID pgtype.Text `json:"family_id"`
+}
+
+func (q *Queries) RevokeAgentCredentialFamily(ctx context.Context, arg RevokeAgentCredentialFamilyParams) error {
+	_, err := q.db.Exec(ctx, revokeAgentCredentialFamily, arg.FamilyID)
 	return err
 }
 

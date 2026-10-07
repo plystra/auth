@@ -22,6 +22,7 @@ import (
 )
 
 const maxLifetime = 90 * 24 * time.Hour
+const oauthRefreshLifetime = 30 * 24 * time.Hour
 
 type Service struct {
 	Store              *store.Store
@@ -67,8 +68,10 @@ type Credential struct {
 	ID          string
 	MemberID    string
 	SpaceID     string
+	Kind        string
 	Prefix      string
 	SecretHash  []byte
+	FamilyID    string
 	ExpiresAt   time.Time
 	Revoked     bool
 	MemberState string
@@ -321,6 +324,144 @@ func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (s
 	return raw, nil
 }
 
+// CreateOAuthRefreshCredential creates the opaque, one-time credential used
+// by an OAuth-authorized Agent. The credential is stored as an HMAC digest and
+// is never returned again after this call.
+func (s *Service) CreateOAuthRefreshCredential(ctx context.Context, memberID string, expiresAt time.Time) (string, error) {
+	now := time.Now().UTC()
+	if expiresAt.IsZero() {
+		expiresAt = now.Add(oauthRefreshLifetime)
+	}
+	if !expiresAt.After(now) {
+		return "", apierr.New("VALIDATION_FAILED", "OAuth refresh credential expiry must be in the future")
+	}
+	raw, prefix, hash, err := s.generateOAuthRefreshCredential()
+	if err != nil {
+		return "", err
+	}
+	family := ids.New[ids.RefreshFamilyID]("rtf")
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "agent was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if member.Status != "active" || member.GroupStatus != "active" {
+			return apierr.New("CONFLICT", "agent is not active")
+		}
+		if member.ExpiresAt.Valid && !member.ExpiresAt.Time.After(now) {
+			return apierr.New("CONFLICT", "agent is expired")
+		}
+		if member.ExpiresAt.Valid && expiresAt.After(member.ExpiresAt.Time) {
+			expiresAt = member.ExpiresAt.Time
+		}
+		if !expiresAt.After(now) {
+			return apierr.New("VALIDATION_FAILED", "OAuth refresh credential expiry exceeds the agent lifetime")
+		}
+		if _, err := q.CreateOAuthRefreshCredential(ctx, db.CreateOAuthRefreshCredentialParams{
+			ID: string(ids.New[ids.ID]("crd")), MemberID: memberID, Prefix: prefix,
+			SecretHash: hash, FamilyID: pgtype.Text{String: string(family), Valid: true}, ExpiresAt: pgTime(expiresAt),
+		}); err != nil {
+			return normalize(err)
+		}
+		return audit.Write(ctx, q, "member", memberID, "agent.oauth_refresh.create", memberID, "success")
+	})
+	if err != nil {
+		return "", err
+	}
+	return raw, nil
+}
+
+// RotateOAuthRefresh atomically consumes an OAuth refresh credential and
+// creates its successor. A replay revokes the entire credential family.
+func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credential, string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "ply_rt_") || raw == "" {
+		return Credential{}, "", apierr.New("invalid_grant", "OAuth refresh token is invalid")
+	}
+	now := time.Now().UTC()
+	next, prefix, hash, err := s.generateOAuthRefreshCredential()
+	if err != nil {
+		return Credential{}, "", err
+	}
+	family := ""
+	var out Credential
+	replayed := false
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		var row db.LockOAuthRefreshCredentialByHashRow
+		found := false
+		for _, candidate := range s.credentialHMACKeys() {
+			mac := hmac.New(sha256.New, candidate)
+			_, _ = mac.Write([]byte(raw))
+			row, err = q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: mac.Sum(nil)})
+			if err == nil {
+				found = true
+				break
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		if !found {
+			return apierr.New("invalid_grant", "OAuth refresh token is invalid")
+		}
+		if row.FamilyID.Valid {
+			family = row.FamilyID.String
+		}
+		if row.LastUsedAt.Valid {
+			replayed = true
+			if family != "" {
+				if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: pgtype.Text{String: family, Valid: true}}); err != nil {
+					return err
+				}
+			}
+			return audit.WriteWithPriority(ctx, q, "member", row.MemberID, "agent.oauth_refresh.replay", row.MemberID, "failure", "high")
+		}
+		if row.RevokedAt.Valid || !row.ExpiresAt.Time.After(now) || row.MemberStatus != "active" {
+			if family != "" {
+				if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: pgtype.Text{String: family, Valid: true}}); err != nil {
+					return err
+				}
+			}
+			return apierr.New("invalid_grant", "OAuth refresh token is invalid")
+		}
+		if _, err := q.MarkAgentCredentialUsed(ctx, db.MarkAgentCredentialUsedParams{ID: row.ID}); err != nil {
+			return err
+		}
+		expiresAt := now.Add(oauthRefreshLifetime)
+		if row.ExpiresAt.Time.Before(expiresAt) {
+			expiresAt = row.ExpiresAt.Time
+		}
+		member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: row.MemberID})
+		if err != nil {
+			return err
+		}
+		if member.ExpiresAt.Valid && member.ExpiresAt.Time.Before(expiresAt) {
+			expiresAt = member.ExpiresAt.Time
+		}
+		if !expiresAt.After(now) {
+			return apierr.New("invalid_grant", "OAuth refresh token is expired")
+		}
+		if _, err := q.CreateOAuthRefreshCredential(ctx, db.CreateOAuthRefreshCredentialParams{
+			ID: string(ids.New[ids.ID]("crd")), MemberID: row.MemberID, Prefix: prefix,
+			SecretHash: hash, FamilyID: pgtype.Text{String: family, Valid: family != ""}, ExpiresAt: pgTime(expiresAt),
+		}); err != nil {
+			return normalize(err)
+		}
+		out = Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, FamilyID: family, ExpiresAt: expiresAt, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}
+		return audit.Write(ctx, q, "member", row.MemberID, "agent.oauth_refresh", row.MemberID, "success")
+	})
+	if err != nil {
+		return Credential{}, "", err
+	}
+	if replayed {
+		return Credential{}, "", apierr.New("invalid_grant", "OAuth refresh token replayed")
+	}
+	return out, next, nil
+}
+
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {
 	return s.mutate(ctx, ownerMemberID, memberID, "stop", func(q *db.Queries, groupID string) error {
 		return q.StopAgentSubtree(ctx, db.StopAgentSubtreeParams{GroupID: groupID})
@@ -440,7 +581,10 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, 
 	}); err != nil {
 		return Credential{}, err
 	}
-	return Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Prefix: row.Prefix, SecretHash: row.SecretHash, ExpiresAt: row.ExpiresAt.Time, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}, nil
+	if row.Kind != "key" {
+		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
+	}
+	return Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, ExpiresAt: row.ExpiresAt.Time, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}, nil
 }
 
 func (s *Service) generateCredential() (string, string, []byte, error) {
@@ -451,6 +595,17 @@ func (s *Service) generateCredential() (string, string, []byte, error) {
 	raw := base64.RawURLEncoding.EncodeToString(b)
 	prefix := "ply_ag_" + raw[:12]
 	return prefix + "." + raw, prefix, s.hashCredential(raw), nil
+}
+
+func (s *Service) generateOAuthRefreshCredential() (string, string, []byte, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", nil, err
+	}
+	entropy := base64.RawURLEncoding.EncodeToString(b)
+	prefix := "ply_rt_" + entropy[:12]
+	raw := prefix + "." + entropy
+	return raw, prefix, s.hashCredential(raw), nil
 }
 
 func (s *Service) matchesCredentialHash(raw string, want []byte) bool {
