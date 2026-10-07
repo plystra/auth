@@ -14,6 +14,7 @@ import (
 
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/space"
@@ -404,6 +405,19 @@ func TestPasswordResetAndVerificationAttemptsAreRateLimitedWithoutEnumeration(t 
 	} else {
 		assertAccountError(t, err, "rate_limited")
 	}
+	if err := insertAccountUser(ctx, st, "usr_reset_rate_account", "known-reset@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		if token, err := accounts.RequestPasswordReset(ctx, "known-reset@example.test", net.ParseIP(fmt.Sprintf("198.51.101.%d", i+1))); err != nil || token == "" {
+			t.Fatalf("known reset request %d = token %q, error %v; want a token and no error", i, token, err)
+		}
+	}
+	if _, err := accounts.RequestPasswordReset(ctx, "known-reset@example.test", net.ParseIP("198.51.101.11")); err == nil {
+		t.Fatal("password reset account limit was not enforced for an existing account")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
 
 	for i := 0; i < 5; i++ {
 		if err := accounts.VerifyEmail(ctx, "invalid-email-token", net.ParseIP("198.51.100.11")); err == nil {
@@ -414,6 +428,39 @@ func TestPasswordResetAndVerificationAttemptsAreRateLimitedWithoutEnumeration(t 
 	}
 	if err := accounts.VerifyEmail(ctx, "invalid-email-token", net.ParseIP("198.51.100.11")); err == nil {
 		t.Fatal("email verification limit was not enforced")
+	} else {
+		assertAccountError(t, err, "rate_limited")
+	}
+	if err := insertAccountUser(ctx, st, "usr_verify_rate_account", "known-verify@example.test", "pending"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 10; i++ {
+		raw, hash, err := opaqueToken("ev_")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Queries().CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: fmt.Sprintf("evt_rate_%02d", i), UserID: "usr_verify_rate_account", TokenHash: hash, ExpiresAt: pgTime(time.Now().UTC().Add(time.Hour))}); err != nil {
+			t.Fatal(err)
+		}
+		if err := accounts.VerifyEmail(ctx, raw, net.ParseIP(fmt.Sprintf("198.51.102.%d", i+1))); i == 0 {
+			if err != nil {
+				t.Fatalf("first known email verification failed: %v", err)
+			}
+		} else if err == nil {
+			t.Fatal("reused pending status unexpectedly allowed a second verification")
+		} else {
+			assertAccountError(t, err, "invalid_grant")
+		}
+	}
+	raw, hash, err := opaqueToken("ev_")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Queries().CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: "evt_rate_10", UserID: "usr_verify_rate_account", TokenHash: hash, ExpiresAt: pgTime(time.Now().UTC().Add(time.Hour))}); err != nil {
+		t.Fatal(err)
+	}
+	if err := accounts.VerifyEmail(ctx, raw, net.ParseIP("198.51.102.11")); err == nil {
+		t.Fatal("email verification account limit was not enforced for an existing account")
 	} else {
 		assertAccountError(t, err, "rate_limited")
 	}
