@@ -116,6 +116,44 @@ func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
 	}
 }
 
+func TestGroupMembershipManagementEndpointUsesTargetGroupFacts(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	target, err := authz.CreateMember(ctx, owner.ID, "", spaceID, "Group endpoint target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_endpoint_membership"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status)
+		VALUES ($1, $2, 'Endpoint group', 'standard', 'active')
+	`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "auth.groups:manage")
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	req := httptest.NewRequest(http.MethodPut, "/v1/spaces/"+spaceID+"/groups/"+groupID+"/members/"+target.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	w := httptest.NewRecorder()
+	route.Middleware(route.Principal, mux).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT group membership = %d %s, want 200", w.Code, w.Body.String())
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM group_members WHERE group_id = $1 AND member_id = $2`, groupID, target.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("endpoint membership rows = %d, want 1", count)
+	}
+}
+
 func TestSuspendedSpaceDeniesManagementLikeAuthorizationCheck(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
