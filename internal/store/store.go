@@ -14,13 +14,17 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/observability"
 	"github.com/plystra/auth/migrations"
 	"github.com/pressly/goose/v3"
 	"go.opentelemetry.io/otel"
 )
 
-type Store struct{ Pool *pgxpool.Pool }
+type Store struct {
+	Pool *pgxpool.Pool
+	Jobs *jobs.Client
+}
 
 func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	cfg, err := pgxpool.ParseConfig(databaseURL)
@@ -40,7 +44,12 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, fmt.Errorf("database ping: %w", err)
 	}
-	return &Store{Pool: pool}, nil
+	jobClient, err := jobs.NewClient(pool)
+	if err != nil {
+		pool.Close()
+		return nil, err
+	}
+	return &Store{Pool: pool, Jobs: jobClient}, nil
 }
 func (s *Store) Close() {
 	if s != nil && s.Pool != nil {
