@@ -5,10 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/db"
 )
 
 func TestGrantCreationRejectsPositiveDeltaDespiteMatchingActorPermissionKey(t *testing.T) {
@@ -328,6 +330,53 @@ func TestGrantCreationForUnboundHumanHasNoActingIdentityDelta(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertAPIErrorCode(t, svc.BindUser(ctx, actor.ID, spaceID, target.ID, "usr_unbound_grant"), "AUTHORITY_DELTA_NOT_COVERED")
+}
+
+func TestGrantValidationLocksTargetMemberBeforeWrite(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Concurrent grant target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	lockErr := make(chan error, 1)
+	go func() {
+		lockErr <- st.InTx(ctx, func(q *db.Queries) error {
+			if _, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: target.ID, SpaceID: spaceID}); err != nil {
+				return err
+			}
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case err := <-lockErr:
+		t.Fatalf("member lock transaction ended before the contender started: %v", err)
+	case <-locked:
+	}
+
+	grantErr := make(chan error, 1)
+	go func() {
+		_, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+		grantErr <- err
+	}()
+	select {
+	case err := <-grantErr:
+		t.Fatalf("grant validation/write bypassed the target-member lock: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-lockErr; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantErr; err != nil {
+		t.Fatalf("grant failed after the lock was released: %v", err)
+	}
 }
 
 func TestGrantCreationAllowsEmptyDelta(t *testing.T) {

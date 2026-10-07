@@ -938,7 +938,7 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
@@ -951,6 +951,15 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
 			return err
 		}
+		lockedMember, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
+			}
+			return err
+		}
+		member.Type = lockedMember.Type
+		member.Status = lockedMember.Status
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
 			return err
@@ -1013,7 +1022,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	}
 	var out Grant
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		member, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
@@ -1026,6 +1035,15 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID); err != nil {
 			return err
 		}
+		lockedMember, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "grantee member was not found in this Space")
+			}
+			return err
+		}
+		member.Type = lockedMember.Type
+		member.Status = lockedMember.Status
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
 			return err
@@ -1208,6 +1226,9 @@ func addRolePermissions(ctx context.Context, q *db.Queries, roleID string, keys 
 }
 
 func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, permission, spaceID string) error {
+	if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
+		return err
+	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{MemberID: memberID, Permission: permission, ResourceSpace: spaceID})
 	if err != nil {
 		return err
@@ -1223,6 +1244,9 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 	if err != nil {
 		return err
 	}
+	if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID); err != nil {
+		return err
+	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{
 		MemberID: actorMemberID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID,
 	})
@@ -1233,6 +1257,29 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 		return nil
 	}
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+}
+
+// lockAuthorizationNodesTx establishes the lock order used by every
+// authorization-backed mutation: governing Space, then target group. Member
+// rows are locked only after this helper returns. Keeping node facts stable
+// across the decision and write closes the G8 check/write race window.
+func lockAuthorizationNodesTx(ctx context.Context, q *db.Queries, spaceID, groupID string) error {
+	if _, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: spaceID}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "authorization Space was not found")
+		}
+		return err
+	}
+	if groupID == "" {
+		return nil
+	}
+	if _, err := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: groupID, SpaceID: spaceID}); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "authorization group was not found")
+		}
+		return err
+	}
+	return nil
 }
 
 func resourceGroupForMemberTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (string, error) {
