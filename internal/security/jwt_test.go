@@ -61,3 +61,92 @@ func TestJWTClaimsUseStableJSONNames(t *testing.T) {
 		}
 	}
 }
+
+func TestSigningKeyRotationKeepsOldTokensVerifiableAndPublishesOverlap(t *testing.T) {
+	signer, err := GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claims := Claims{Issuer: signer.Issuer(), Subject: "usr_rotation_test", Audience: "app_test", ExpiresAt: now.Add(time.Minute).Unix(), IssuedAt: now.Unix(), JWTID: "jti_rotation_old", SessionID: "ses_rotation_old", Type: "user"}
+	oldToken, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKid := jwtHeaderKid(t, oldToken)
+
+	nextKid, err := signer.StageNext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextKid == oldKid {
+		t.Fatal("staged key reused the active key id")
+	}
+	if keys := jwksKeyIDs(t, signer); len(keys) != 1 || keys[0] != oldKid {
+		t.Fatalf("JWKS before promotion = %v, want only active key %q", keys, oldKid)
+	}
+	if err := signer.PromoteNext(); err != nil {
+		t.Fatal(err)
+	}
+	claims.JWTID = "jti_rotation_new"
+	newToken, err := signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jwtHeaderKid(t, newToken) != nextKid {
+		t.Fatalf("new token kid = %q, want %q", jwtHeaderKid(t, newToken), nextKid)
+	}
+	if _, err := signer.Verify(oldToken, now, "app_test"); err != nil {
+		t.Fatalf("old token was rejected during overlap: %v", err)
+	}
+	if _, err := signer.Verify(newToken, now, "app_test"); err != nil {
+		t.Fatalf("new token was rejected after promotion: %v", err)
+	}
+	keys := jwksKeyIDs(t, signer)
+	if len(keys) != 2 || keys[0] != nextKid && keys[1] != nextKid || keys[0] != oldKid && keys[1] != oldKid {
+		t.Fatalf("JWKS during overlap = %v, want active and retiring keys %q/%q", keys, nextKid, oldKid)
+	}
+	if err := signer.DropRetiring(oldKid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := signer.Verify(oldToken, now, "app_test"); err == nil {
+		t.Fatal("old token remained valid after retiring key removal")
+	}
+}
+
+func jwtHeaderKid(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("invalid token parts: %q", token)
+	}
+	var header struct {
+		Kid string `json:"kid"`
+	}
+	data, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil || json.Unmarshal(data, &header) != nil {
+		t.Fatalf("invalid JWT header: %q", parts[0])
+	}
+	return header.Kid
+}
+
+func jwksKeyIDs(t *testing.T, signer *Signer) []string {
+	t.Helper()
+	set, err := signer.JWKS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, ok := set["keys"].([]any)
+	if !ok {
+		t.Fatalf("JWKS keys = %#v", set["keys"])
+	}
+	ids := make([]string, 0, len(keys))
+	for _, raw := range keys {
+		key, ok := raw.(map[string]string)
+		if !ok {
+			t.Fatalf("JWKS key = %#v", raw)
+		}
+		ids = append(ids, key["kid"])
+	}
+	return ids
+}

@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -36,11 +38,29 @@ type Claims struct {
 
 const DefaultApplicationAudience = "default"
 
+var ErrNoActiveSigningKey = errors.New("no active signing key")
+
+type KeyStatus string
+
+const (
+	KeyNext     KeyStatus = "next"
+	KeyActive   KeyStatus = "active"
+	KeyRetiring KeyStatus = "retiring"
+)
+
+type signingKey struct {
+	private *ecdsa.PrivateKey
+	public  *ecdsa.PublicKey
+	status  KeyStatus
+}
+
 type Signer struct {
+	mu      sync.RWMutex
 	private *ecdsa.PrivateKey
 	public  *ecdsa.PublicKey
 	issuer  string
 	keyID   string
+	keys    map[string]signingKey
 }
 
 func NewSigner(pemFile, issuer string) (*Signer, error) {
@@ -72,16 +92,96 @@ func NewSigner(pemFile, issuer string) (*Signer, error) {
 		return nil, fmt.Errorf("encode signing public key: %w", err)
 	}
 	sum := sha256.Sum256(publicBytes)
-	return &Signer{private: key, public: &key.PublicKey, issuer: issuer, keyID: fmt.Sprintf("%x", sum[:8])}, nil
+	return newSigner(key, issuer, fmt.Sprintf("%x", sum[:8])), nil
 }
 func GenerateSigner(issuer string) (*Signer, error) {
 	key, e := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if e != nil {
 		return nil, e
 	}
-	return &Signer{private: key, public: &key.PublicKey, issuer: issuer, keyID: "dev"}, nil
+	publicBytes, err := key.PublicKey.Bytes()
+	if err != nil {
+		return nil, fmt.Errorf("encode signing public key: %w", err)
+	}
+	sum := sha256.Sum256(publicBytes)
+	return newSigner(key, issuer, fmt.Sprintf("%x", sum[:8])), nil
 }
+
+func newSigner(key *ecdsa.PrivateKey, issuer, keyID string) *Signer {
+	return &Signer{private: key, public: &key.PublicKey, issuer: issuer, keyID: keyID, keys: map[string]signingKey{keyID: {private: key, public: &key.PublicKey, status: KeyActive}}}
+}
+
+// StageNext generates a new signing key without changing the key used for new
+// tokens. It is the first step of an operational rotation transaction.
+func (s *Signer) StageNext() (string, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return "", err
+	}
+	publicBytes, err := key.PublicKey.Bytes()
+	if err != nil {
+		return "", fmt.Errorf("encode signing public key: %w", err)
+	}
+	sum := sha256.Sum256(publicBytes)
+	kid := fmt.Sprintf("%x", sum[:8])
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.keys[kid]; exists {
+		return "", errors.New("signing key id collision")
+	}
+	for existingID, existing := range s.keys {
+		if existing.status == KeyNext {
+			delete(s.keys, existingID)
+		}
+	}
+	s.keys[kid] = signingKey{private: key, public: &key.PublicKey, status: KeyNext}
+	return kid, nil
+}
+
+// PromoteNext makes the staged key active and retains the previous active key
+// as retiring so tokens already issued during the overlap remain verifiable.
+func (s *Signer) PromoteNext() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var nextID string
+	var next signingKey
+	for id, key := range s.keys {
+		if key.status == KeyNext {
+			nextID, next = id, key
+			break
+		}
+	}
+	if nextID == "" {
+		return errors.New("no staged signing key")
+	}
+	for id, key := range s.keys {
+		if key.status == KeyActive {
+			key.status = KeyRetiring
+			s.keys[id] = key
+		}
+	}
+	next.status = KeyActive
+	s.keys[nextID] = next
+	s.private, s.public, s.keyID = next.private, next.public, nextID
+	return nil
+}
+
+// DropRetiring removes a retiring key after the maximum access-token lifetime
+// has elapsed. Active and next keys cannot be removed through this method.
+func (s *Signer) DropRetiring(kid string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key, ok := s.keys[kid]
+	if !ok || key.status != KeyRetiring {
+		return errors.New("signing key is not retiring")
+	}
+	delete(s.keys, kid)
+	return nil
+}
+
 func (s *Signer) Sign(c Claims) (string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	header := map[string]string{"alg": "ES256", "kid": s.keyID, "typ": "at+jwt"}
 	h, _ := json.Marshal(header)
 	payload, _ := json.Marshal(c)
@@ -111,8 +211,9 @@ func (s *Signer) Verify(token string, now time.Time, audience string) (Claims, e
 	var header struct {
 		Alg string `json:"alg"`
 		Typ string `json:"typ"`
+		Kid string `json:"kid"`
 	}
-	if json.Unmarshal(headerRaw, &header) != nil || header.Alg != "ES256" || header.Typ != "at+jwt" {
+	if json.Unmarshal(headerRaw, &header) != nil || header.Alg != "ES256" || header.Typ != "at+jwt" || header.Kid == "" {
 		return c, errors.New("invalid token header")
 	}
 	raw, e := base64.RawURLEncoding.DecodeString(parts[1])
@@ -129,22 +230,54 @@ func (s *Signer) Verify(token string, now time.Time, audience string) (Claims, e
 	if e != nil || len(sig) != 64 {
 		return c, errors.New("invalid signature")
 	}
+	s.mu.RLock()
+	key, ok := s.keys[header.Kid]
+	s.mu.RUnlock()
+	if !ok || (key.status != KeyActive && key.status != KeyRetiring) {
+		return c, errors.New("unknown signing key")
+	}
 	hash := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
-	ok := ecdsa.Verify(s.public, hash[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:]))
+	ok = ecdsa.Verify(key.public, hash[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:]))
 	if !ok {
 		return c, errors.New("invalid signature")
 	}
 	return c, nil
 }
 func (s *Signer) JWKS() (map[string]any, error) {
-	publicBytes, err := s.public.Bytes()
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.keys))
+	for id, key := range s.keys {
+		if key.status == KeyActive || key.status == KeyRetiring {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	keys := make([]any, 0, len(ids))
+	for _, id := range ids {
+		key := s.keys[id]
+		jwk, err := publicJWK(key.public, id)
+		if err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+		keys = append(keys, jwk)
+	}
+	s.mu.RUnlock()
+	if len(keys) == 0 {
+		return nil, errors.New("no active signing key")
+	}
+	return map[string]any{"keys": keys}, nil
+}
+
+func publicJWK(public *ecdsa.PublicKey, kid string) (map[string]string, error) {
+	publicBytes, err := public.Bytes()
 	if err != nil {
 		return nil, fmt.Errorf("encode signing public key: %w", err)
 	}
 	if len(publicBytes) != 65 || publicBytes[0] != 4 {
 		return nil, errors.New("invalid P-256 public key encoding")
 	}
-	return map[string]any{"keys": []any{map[string]string{"kty": "EC", "crv": "P-256", "x": base64.RawURLEncoding.EncodeToString(publicBytes[1:33]), "y": base64.RawURLEncoding.EncodeToString(publicBytes[33:]), "use": "sig", "alg": "ES256", "kid": s.keyID}}}, nil
+	return map[string]string{"kty": "EC", "crv": "P-256", "x": base64.RawURLEncoding.EncodeToString(publicBytes[1:33]), "y": base64.RawURLEncoding.EncodeToString(publicBytes[33:]), "use": "sig", "alg": "ES256", "kid": kid}, nil
 }
 
 func (s *Signer) Issuer() string { return s.issuer }

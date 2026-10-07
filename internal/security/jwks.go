@@ -1,20 +1,40 @@
 package security
 
-import "github.com/lestrrat-go/jwx/v3/jwk"
+import (
+	"sort"
+
+	"github.com/lestrrat-go/jwx/v3/jwk"
+)
 
 // JWKSet validates that the signing key can be represented by the mandated jwx
 // implementation and returns the standards-compatible public set.
 func (s *Signer) JWKSet() (jwk.Set, error) {
-	key, err := jwk.Import(s.public)
-	if err != nil {
-		return nil, err
+	s.mu.RLock()
+	ids := make([]string, 0, len(s.keys))
+	for id, signingKey := range s.keys {
+		if signingKey.status == KeyActive || signingKey.status == KeyRetiring {
+			ids = append(ids, id)
+		}
 	}
-	_ = key.Set(jwk.KeyIDKey, s.keyID)
-	_ = key.Set(jwk.AlgorithmKey, "ES256")
-	_ = key.Set(jwk.KeyUsageKey, "sig")
+	sort.Strings(ids)
 	set := jwk.NewSet()
-	if err := set.AddKey(key); err != nil {
-		return nil, err
+	for _, id := range ids {
+		key, err := jwk.Import(s.keys[id].public)
+		if err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+		_ = key.Set(jwk.KeyIDKey, id)
+		_ = key.Set(jwk.AlgorithmKey, "ES256")
+		_ = key.Set(jwk.KeyUsageKey, "sig")
+		if err := set.AddKey(key); err != nil {
+			s.mu.RUnlock()
+			return nil, err
+		}
+	}
+	s.mu.RUnlock()
+	if len(ids) == 0 {
+		return nil, ErrNoActiveSigningKey
 	}
 	return set, nil
 }
