@@ -198,6 +198,42 @@ func TestEvaluateDeduplicatesAndPreservesInputs(t *testing.T) {
 	}
 }
 
+func TestEvaluateAggregatesAuthorityByTuplesWithoutMemberExpansion(t *testing.T) {
+	position := Node{Kind: Group, ID: "grp_ops"}
+	permission := Permission{
+		Subject: "grp_ops", Position: position, Key: "document:read",
+		Scope: Scope{Kind: GroupTree, Anchor: "grp_ops"},
+	}
+	right := Right{
+		Holder: "grp_ops", Position: position, Permissions: []string{"document:read"},
+		Anchor: position, Descendants: true, Delegate: true,
+	}
+	before := Snapshot{Permissions: []Permission{permission}, Rights: []Right{right}}
+	after := Snapshot{
+		Permissions: []Permission{permission, permission, {
+			Subject: "grp_ops", Position: position, Key: "document:write",
+			Scope: Scope{Kind: GroupOnly, Anchor: "grp_ops"},
+		}},
+		Rights: []Right{right, right, {
+			Holder: "grp_ops", Position: position, Permissions: []string{"document:read", "document:write"},
+			Anchor: position, Descendants: true, Delegate: true,
+		}},
+	}
+	result, err := Evaluate(before, after, Graph{GroupSpace: map[string]string{"grp_ops": "spc_root"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Permissions) != 1 || result.Permissions[0].Key != "document:write" {
+		t.Fatalf("permission delta = %+v, want one group tuple", result.Permissions)
+	}
+	if len(result.Rights) != 1 || !slices.Equal(result.Rights[0].Permissions, []string{"document:read", "document:write"}) || !result.Rights[0].Delegate {
+		t.Fatalf("assignment-right delta = %+v, want one delegated tuple", result.Rights)
+	}
+	if result.Permissions[0].Subject != "grp_ops" || result.Rights[0].Holder != "grp_ops" {
+		t.Fatalf("delta expanded a group tuple into members: %+v", result)
+	}
+}
+
 func TestEvaluateScopeDeltaPreservesEveryNewEngineDecision(t *testing.T) {
 	graph := Graph{
 		SpaceParent: map[string]string{"spc_child": "spc_root"},
