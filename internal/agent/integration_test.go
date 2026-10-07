@@ -91,6 +91,72 @@ func TestAgentGroupsAreUniqueNestedAndBoundedByExpiry(t *testing.T) {
 	}
 }
 
+func TestAgentGroupStructureIsDatabaseEnforced(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, spaceID := newAgentFixture(t)
+	agents := &Service{Store: st}
+
+	rootID := "grp_agent_structure_root"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status)
+		VALUES ($1, $2, 'Standard root', 'standard', 'active')
+	`, rootID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	humanAgent, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "human-owner-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var humanParent *string
+	if err := st.Pool.QueryRow(ctx, `SELECT parent_id FROM groups WHERE id = $1`, humanAgent.HomeGroupID).Scan(&humanParent); err != nil {
+		t.Fatal(err)
+	}
+	if humanParent != nil {
+		t.Fatalf("human-owned Agent group parent = %q, want top-level", *humanParent)
+	}
+
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, parent_id, kind, owner_member_id, status)
+		VALUES ('grp_agent_structure_invalid_human', $1, 'Invalid human Agent group', $2, 'agents', $3, 'active')
+	`, spaceID, rootID, owner.ID); err == nil {
+		t.Fatal("database accepted a non-top-level human Agent group")
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, parent_id, kind, owner_member_id, status)
+		VALUES ('grp_agent_structure_invalid_child', $1, 'Invalid Agent child', $2, 'agents', $3, 'active')
+	`, spaceID, rootID, humanAgent.ID); err == nil {
+		t.Fatal("database accepted an Agent group below a standard group")
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, parent_id, kind, status)
+		VALUES ('grp_agent_structure_invalid_standard', $1, 'Invalid standard child', $2, 'standard', 'active')
+	`, spaceID, humanAgent.HomeGroupID); err == nil {
+		t.Fatal("database accepted a standard group below an Agent group")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET parent_id = $1 WHERE id = $2`, rootID, humanAgent.HomeGroupID); err == nil {
+		t.Fatal("database accepted moving an Agent group")
+	}
+
+	applicationID := "mem_agent_structure_application"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, kind, type, binding_policy, status, version)
+		VALUES ($1, $2, 'Application owner', 'service', 'application', 'single', 'active', 1)
+	`, applicationID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	applicationAgent, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: applicationID, Name: "application-owner-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var applicationParent *string
+	if err := st.Pool.QueryRow(ctx, `SELECT parent_id FROM groups WHERE id = $1`, applicationAgent.HomeGroupID).Scan(&applicationParent); err != nil {
+		t.Fatal(err)
+	}
+	if applicationParent != nil {
+		t.Fatalf("application-owned Agent group parent = %q, want top-level", *applicationParent)
+	}
+}
+
 func TestAgentStopAndDeleteRevokeCredentialsAcrossSubtreeAndKeepTombstones(t *testing.T) {
 	ctx := context.Background()
 	st, _, owner, _ := newAgentFixture(t)
