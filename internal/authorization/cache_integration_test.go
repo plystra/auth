@@ -47,6 +47,19 @@ func TestAuthorizationCacheInvalidatesAcrossStoresAfterCommittedRevocation(t *te
 	if firstService.cache == nil || firstService.cacheSize() == 0 {
 		t.Fatal("initial authorization decision was not cached")
 	}
+	baselineReconnects := first.PolicyListener.InvalidationCount()
+	first.PolicyListener.Disconnect()
+	waitForStoreInvalidation(t, first, baselineReconnects+1)
+	if got := firstService.cacheSize(); got != 0 {
+		t.Fatalf("first store cache size after listener reconnect = %d, want 0", got)
+	}
+	decision, _, err = firstService.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: space.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("decision after listener reconnect = %+v, want allow", decision)
+	}
 
 	var grantID string
 	if err := first.Pool.QueryRow(ctx, `
@@ -61,15 +74,54 @@ func TestAuthorizationCacheInvalidatesAcrossStoresAfterCommittedRevocation(t *te
 		t.Fatalf("revocation through second store = %v", err)
 	}
 	waitForStoreInvalidation(t, first, baselineInvalidations+1)
-	if got := firstService.cacheSize(); got != 0 {
-		t.Fatalf("first store cache size after notification = %d, want 0", got)
-	}
+	waitForCacheClear(t, firstService)
 	decision, _, err = firstService.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: space.ID})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decision.Effect != engine.Deny {
 		t.Fatalf("decision after cross-store revocation = %+v, want deny", decision)
+	}
+}
+
+func TestAuthorizationCacheKeyIncludesSpaceAncestorVersions(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, parentID := newBindingFixture(t)
+	childID := "spc_cache_ancestor_child"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Cache child', 'cache-ancestor-child', $2)
+	`, childID, parentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		UPDATE authorization_grants
+		SET scope = 'space_tree'
+		WHERE grantee_member_id = $1 AND space_id = $2
+	`, actor.ID, parentID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Allow {
+		t.Fatalf("child decision before ancestor change = %+v, want allow", decision)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1)`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO space_envelope_entries (space_id, permission_id, mode)
+		SELECT $1, id, 'delegate' FROM permissions WHERE key = 'auth.members:read'
+	`, parentID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = svc.Check(ctx, CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: childID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision.Effect != engine.Deny || decision.Code != "ENVELOPE_EXCLUDED" {
+		t.Fatalf("child decision after ancestor envelope change = %+v, want ENVELOPE_EXCLUDED", decision)
 	}
 }
 
@@ -122,4 +174,16 @@ func waitForStoreInvalidation(t *testing.T, st *store.Store, want uint64) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("policy invalidations = %d, want at least %d", st.PolicyListener.InvalidationCount(), want)
+}
+
+func waitForCacheClear(t *testing.T, svc *Service) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if svc.cacheSize() == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("authorization cache size = %d, want 0", svc.cacheSize())
 }
