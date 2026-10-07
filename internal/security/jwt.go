@@ -22,20 +22,30 @@ import (
 )
 
 type Claims struct {
-	Issuer    string   `json:"iss"`
-	Subject   string   `json:"sub"`
-	MemberID  string   `json:"mid,omitempty"`
-	SpaceID   string   `json:"spc,omitempty"`
-	Audience  string   `json:"aud"`
-	ExpiresAt int64    `json:"exp"`
-	IssuedAt  int64    `json:"iat"`
-	JWTID     string   `json:"jti"`
-	SessionID string   `json:"sid"`
-	Assurance int      `json:"aal"`
-	AMR       []string `json:"amr"`
-	Actor     string   `json:"act,omitempty"`
-	Type      string   `json:"typ,omitempty"`
-	Scopes    []string `json:"scp,omitempty"`
+	Issuer    string      `json:"iss"`
+	Subject   string      `json:"sub"`
+	MemberID  string      `json:"mid,omitempty"`
+	SpaceID   string      `json:"spc,omitempty"`
+	Audience  string      `json:"aud"`
+	ExpiresAt int64       `json:"exp"`
+	IssuedAt  int64       `json:"iat"`
+	JWTID     string      `json:"jti"`
+	SessionID string      `json:"sid"`
+	Assurance int         `json:"aal"`
+	AMR       []string    `json:"amr"`
+	Actor     *ActorClaim `json:"act,omitempty"`
+	Type      string      `json:"typ,omitempty"`
+	Scopes    []string    `json:"scp,omitempty"`
+}
+
+// ActorClaim records the member that delegated an Agent token and recursively
+// preserves the owner chain. It intentionally contains identifiers and types,
+// never credentials or user-controlled display data.
+type ActorClaim struct {
+	Subject  string      `json:"sub"`
+	MemberID string      `json:"mid,omitempty"`
+	Type     string      `json:"typ,omitempty"`
+	Actor    *ActorClaim `json:"act,omitempty"`
 }
 
 const DefaultApplicationAudience = "default"

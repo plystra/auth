@@ -13,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
@@ -300,6 +302,69 @@ func TestRefreshCanSwitchBoundMemberAndUpdatesAccessClaims(t *testing.T) {
 		if !errors.As(err, &public) || public.Code != "PERMISSION_DENIED" {
 			t.Fatalf("revoked binding refresh error = %v, want PERMISSION_DENIED", err)
 		}
+	}
+}
+
+func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
+	ctx := context.Background()
+	database, err := sessionDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_agent_claims', 'agent-claims@example.test', 'agent-claims@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	authz := &authorization.Service{Store: st}
+	space, owner, err := authz.CreateSpace(ctx, "usr_agent_claims", "Agent Claims Space", "agent-claims-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st}
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "claims-parent", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, Name: "claims-child", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &Service{
+		Store:    st,
+		Signer:   signer,
+		HMACKeys: [][]byte{[]byte(strings.Repeat("a", 32))},
+		Settings: func(context.Context) (Settings, error) {
+			return Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := signer.Verify(tokens.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Type != "agent" || claims.Subject != child.ID || claims.MemberID != child.ID {
+		t.Fatalf("Agent access claims = %+v, want typ agent with child sub/mid", claims)
+	}
+	if claims.Actor == nil || claims.Actor.Subject != parent.ID || claims.Actor.MemberID != parent.ID || claims.Actor.Type != "agent" {
+		t.Fatalf("Agent actor claim = %+v, want parent Agent", claims.Actor)
+	}
+	if claims.Actor.Actor == nil || claims.Actor.Actor.Subject != owner.ID || claims.Actor.Actor.MemberID != owner.ID || claims.Actor.Actor.Type != "human" || claims.Actor.Actor.Actor != nil {
+		t.Fatalf("nested Agent owner claim = %+v, want terminal human owner", claims.Actor.Actor)
 	}
 }
 

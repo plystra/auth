@@ -264,7 +264,7 @@ func (s *Service) CreateAgentDelegatedAccess(ctx context.Context, memberID, spac
 	return s.createAgentAccess(ctx, memberID, spaceID, audience, actor, scopes, notAfter)
 }
 
-func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
+func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, _ string, scopes []string, notAfter int64) (Tokens, error) {
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
@@ -290,11 +290,57 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if strings.TrimSpace(audience) == "" {
 		audience = security.DefaultApplicationAudience
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: actor, Scopes: scopes, Type: "agent"})
+	ownerChain, err := s.agentOwnerClaim(ctx, memberID)
+	if err != nil {
+		return Tokens{}, err
+	}
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: ownerChain, Scopes: scopes, Type: "agent"})
 	if err != nil {
 		return Tokens{}, err
 	}
 	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(expiresAt.Sub(now) / time.Second)}, nil
+}
+
+func (s *Service) agentOwnerClaim(ctx context.Context, memberID string) (*security.ActorClaim, error) {
+	return s.agentOwnerClaimAt(ctx, memberID, map[string]struct{}{}, 0)
+}
+
+func (s *Service) agentOwnerClaimAt(ctx context.Context, memberID string, seen map[string]struct{}, depth int) (*security.ActorClaim, error) {
+	if depth >= 64 {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner chain exceeds the supported depth")
+	}
+	if _, ok := seen[memberID]; ok {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
+	}
+	seen[memberID] = struct{}{}
+	agent, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner is missing")
+	}
+	owner, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if owner.Status != "active" {
+		return nil, apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
+	}
+	claim := &security.ActorClaim{Subject: owner.ID, MemberID: owner.ID, Type: owner.Type}
+	if owner.Type == "agent" {
+		claim.Actor, err = s.agentOwnerClaimAt(ctx, owner.ID, seen, depth+1)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return claim, nil
 }
 func (s *Service) Revoke(ctx context.Context, sid string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {

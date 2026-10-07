@@ -107,7 +107,7 @@ func TestJWTVerificationRejectsAlgorithmIssuerAudienceTypeAndExpiryMismatches(t 
 }
 
 func TestJWTClaimsUseStableJSONNames(t *testing.T) {
-	payload, err := json.Marshal(Claims{Issuer: "i", Subject: "s", MemberID: "m", SpaceID: "p", Audience: "a", ExpiresAt: 1, IssuedAt: 1, JWTID: "j", SessionID: "sid", Assurance: 1, AMR: []string{"pwd"}, Actor: "a", Type: "agent", Scopes: []string{"read"}})
+	payload, err := json.Marshal(Claims{Issuer: "i", Subject: "s", MemberID: "m", SpaceID: "p", Audience: "a", ExpiresAt: 1, IssuedAt: 1, JWTID: "j", SessionID: "sid", Assurance: 1, AMR: []string{"pwd"}, Actor: &ActorClaim{Subject: "a", MemberID: "a", Type: "agent"}, Type: "agent", Scopes: []string{"read"}})
 	if err != nil {
 		t.Fatal(err)
 	}
