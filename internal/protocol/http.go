@@ -26,7 +26,7 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("oidc.metadata", "GET", "/.well-known/openid-configuration", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.metadata))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.authorize", "GET", "/oauth/authorize", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.authorize))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.token", "POST", "/oauth/token", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.token))
-	route.RegisterNonJSON(mux, route.NewSpec("oauth.revoke", "POST", "/oauth/revoke", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.revoke", "POST", "/oauth/revoke", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.revoke))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.device_authorization", "POST", "/oauth/device_authorization", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.register", "POST", "/oauth/register", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
@@ -105,6 +105,40 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, apierr.New("invalid_grant", "authorization grant is invalid or expired"))
+}
+
+func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
+	if e := r.ParseForm(); e != nil {
+		writeErr(w, apierr.New("invalid_request", "form body is invalid"))
+		return
+	}
+	raw := strings.TrimSpace(r.Form.Get("token"))
+	if raw == "" {
+		writeErr(w, apierr.New("invalid_request", "token is required"))
+		return
+	}
+	if h.Agents == nil || h.Sessions == nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
+		return
+	}
+	if strings.HasPrefix(raw, "ply_rt_") {
+		_, err := h.Agents.RevokeOAuthRefreshToken(r.Context(), raw)
+		if err != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	claims, err := h.Sessions.VerifyAccess(raw)
+	if err == nil && claims.Type == "agent" && claims.Subject != "" {
+		if err := h.Agents.RevokeOAuth(r.Context(), claims.Subject); err != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
+			return
+		}
+	}
+	// RFC 7009 intentionally hides whether an opaque or JWT token was known.
+	w.WriteHeader(http.StatusOK)
 }
 
 func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {

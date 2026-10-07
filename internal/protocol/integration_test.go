@@ -285,3 +285,123 @@ func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T)
 		t.Fatalf("inactive Agent group error code=%q, want invalid_grant", code)
 	}
 }
+
+func TestOAuthRevokeDisablesAgentAuthorizationTree(t *testing.T) {
+	ctx := context.Background()
+	database, err := protocolDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_oauth_revoke_protocol', 'oauth-revoke-protocol@example.test', 'oauth-revoke-protocol@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &authorization.Service{Store: st}
+	_, owner, err := authorizer.CreateSpace(ctx, "usr_oauth_revoke_protocol", "OAuth Revoke Space", "oauth-revoke-protocol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st, HMACKeys: [][]byte{[]byte("protocol-oauth-revoke-hmac-key-0001")}}
+	root, rootKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-root", Source: "oauth", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: root.ID, Name: "oauth-child", Source: "delegation", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := agents.CreateOAuthRefreshCredential(ctx, root.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store: st, Signer: signer, HMACKeys: [][]byte{[]byte("session-hmac-key-0000000000000001")},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: time.Hour}, nil
+		},
+	}
+	rootAccess, err := sessions.CreateAgentAccess(ctx, root.ID, owner.SpaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	childAccess, err := sessions.CreateAgentAccess(ctx, child.ID, owner.SpaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mux http.ServeMux
+	(HTTP{Agents: agents, Sessions: sessions, Authorization: authorizer}).Register(&mux)
+	revoke := func(token string) *httptest.ResponseRecorder {
+		form := url.Values{"token": {token}}
+		req := httptest.NewRequest(http.MethodPost, "/oauth/revoke", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		return res
+	}
+	accessOnly, accessOnlyKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-access-only", Source: "oauth", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accessOnlyToken, err := sessions.CreateAgentAccess(ctx, accessOnly.ID, owner.SpaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res := revoke(accessOnlyToken.AccessToken); res.Code != http.StatusOK || res.Body.Len() != 0 {
+		t.Fatalf("access-token revocation status=%d body=%q", res.Code, res.Body.String())
+	}
+	if _, active, err := sessions.Introspect(ctx, accessOnlyToken.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("access-only token after revoke active=%v err=%v", active, err)
+	}
+	if _, err := agents.AuthenticateKey(ctx, accessOnlyKey); err == nil {
+		t.Fatal("access-token revocation left OAuth Agent key usable")
+	}
+	if _, active, err := sessions.Introspect(ctx, rootAccess.AccessToken, security.DefaultApplicationAudience); err != nil || !active {
+		t.Fatalf("root access before revoke active=%v err=%v", active, err)
+	}
+	if _, active, err := sessions.Introspect(ctx, childAccess.AccessToken, security.DefaultApplicationAudience); err != nil || !active {
+		t.Fatalf("child access before revoke active=%v err=%v", active, err)
+	}
+	res := revoke(refresh)
+	if res.Code != http.StatusOK || res.Body.Len() != 0 {
+		t.Fatalf("refresh revocation status=%d body=%q", res.Code, res.Body.String())
+	}
+	if _, active, err := sessions.Introspect(ctx, rootAccess.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("root access after revoke active=%v err=%v", active, err)
+	}
+	if _, active, err := sessions.Introspect(ctx, childAccess.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("child access after revoke active=%v err=%v", active, err)
+	}
+	if _, err := agents.AuthenticateKey(ctx, rootKey); err == nil {
+		t.Fatal("revoked OAuth Agent key remained usable")
+	}
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}}
+	refreshReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(refreshForm.Encode()))
+	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	refreshRes := httptest.NewRecorder()
+	mux.ServeHTTP(refreshRes, refreshReq)
+	if refreshRes.Code != http.StatusBadRequest {
+		t.Fatalf("revoked refresh grant status=%d body=%s", refreshRes.Code, refreshRes.Body.String())
+	}
+	if res := revoke("not-a-known-token"); res.Code != http.StatusOK {
+		t.Fatalf("unknown token revocation status=%d", res.Code)
+	}
+	missing := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/oauth/revoke", strings.NewReader(""))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	mux.ServeHTTP(missing, req)
+	if missing.Code != http.StatusBadRequest {
+		t.Fatalf("missing token status=%d body=%s", missing.Code, missing.Body.String())
+	}
+}

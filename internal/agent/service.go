@@ -526,6 +526,85 @@ func (s *Service) oauthRefreshTTL(ctx context.Context) (time.Duration, error) {
 	return oauthRefreshLifetime, nil
 }
 
+// RevokeOAuthRefreshToken resolves and revokes the complete refresh-token
+// family for an OAuth Agent. Unknown, malformed, expired, or already revoked
+// tokens are deliberately reported as not found so the protocol endpoint can
+// remain idempotent without revealing credential state. Family revocation and
+// Agent suspension share one transaction so an audit failure cannot leave a
+// partially revoked authorization.
+func (s *Service) RevokeOAuthRefreshToken(ctx context.Context, raw string) (bool, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, "ply_rt_") || raw == "" {
+		return false, nil
+	}
+	found := false
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var row db.LockOAuthRefreshCredentialByHashRow
+		for _, key := range s.credentialHMACKeys() {
+			mac := hmac.New(sha256.New, key)
+			_, _ = mac.Write([]byte(raw))
+			candidate, err := q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: mac.Sum(nil)})
+			if err == nil {
+				row = candidate
+				found = true
+				break
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		if !found {
+			return nil
+		}
+		if row.FamilyID.Valid {
+			if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: row.FamilyID}); err != nil {
+				return err
+			}
+		}
+		return s.revokeOAuthTx(ctx, q, row.MemberID)
+	})
+	return found, err
+}
+
+// RevokeOAuth stops an OAuth Agent and every delegated descendant in one
+// transaction. Existing JWT access tokens become inactive through the live
+// member status checked by session introspection.
+func (s *Service) RevokeOAuth(ctx context.Context, memberID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		return s.revokeOAuthTx(ctx, q, memberID)
+	})
+}
+
+func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID string) error {
+	row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !row.Source.Valid || row.Source.String != "oauth" {
+		return nil
+	}
+	if err := q.StopAgentMember(ctx, db.StopAgentMemberParams{MemberID: memberID}); err != nil {
+		return err
+	}
+	if err := q.RevokeAgentCredentials(ctx, db.RevokeAgentCredentialsParams{MemberID: memberID}); err != nil {
+		return err
+	}
+	if group, groupErr := q.GetAgentsGroupByOwner(ctx, db.GetAgentsGroupByOwnerParams{OwnerMemberID: pgtype.Text{String: memberID, Valid: true}}); groupErr == nil {
+		if err := q.StopAgentSubtree(ctx, db.StopAgentSubtreeParams{GroupID: group.ID}); err != nil {
+			return err
+		}
+		if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: group.ID}); err != nil {
+			return err
+		}
+	} else if !errors.Is(groupErr, pgx.ErrNoRows) {
+		return groupErr
+	}
+	return audit.Write(ctx, q, "member", memberID, "agent.oauth.revoke", memberID, "success")
+}
+
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {
 	return s.mutate(ctx, ownerMemberID, memberID, "stop", func(q *db.Queries, groupID string) error {
 		return q.StopAgentSubtree(ctx, db.StopAgentSubtreeParams{GroupID: groupID})
