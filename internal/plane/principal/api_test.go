@@ -2,8 +2,12 @@ package principal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -49,6 +53,66 @@ func TestSignOutRouteDeclaresUserAccountSubject(t *testing.T) {
 		return
 	}
 	t.Fatal("sign-out route was not registered")
+}
+
+func TestMultiStepSignInRoutesAndOpenAPIContract(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	want := map[string]struct {
+		method string
+		path   string
+	}{
+		"auth.sign_in":         {method: http.MethodPost, path: "/v1/auth/sign-in"},
+		"auth.sign_in_attempt": {method: http.MethodPost, path: "/v1/auth/sign-in/{attempt_id}"},
+	}
+	for _, spec := range route.Specs() {
+		expected, ok := want[spec.Name]
+		if !ok {
+			continue
+		}
+		if spec.Method != expected.method || spec.Path != expected.path || len(spec.Subjects) != 1 || spec.Subjects[0] != route.Public || spec.Permission != "" {
+			t.Fatalf("sign-in route %q = %+v, want public %s %s", spec.Name, spec, expected.method, expected.path)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("multi-step sign-in routes missing: %v", want)
+	}
+
+	_, sourceFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	documentBytes, err := os.ReadFile(filepath.Join(filepath.Dir(sourceFile), "../../../openapi/principal.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document struct {
+		Paths      map[string]map[string]json.RawMessage `json:"paths"`
+		Components struct {
+			Schemas map[string]struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+				Required   []string                   `json:"required"`
+			} `json:"schemas"`
+		} `json:"components"`
+	}
+	if err := json.Unmarshal(documentBytes, &document); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := document.Paths["/v1/auth/sign-in"]["post"]; !ok {
+		t.Fatal("generated OpenAPI is missing POST /v1/auth/sign-in")
+	}
+	if _, ok := document.Paths["/v1/auth/sign-in/{attempt_id}"]["post"]; !ok {
+		t.Fatal("generated OpenAPI is missing POST /v1/auth/sign-in/{attempt_id}")
+	}
+	start := document.Components.Schemas["SignInStartInputBody"]
+	if _, ok := start.Properties["email"]; !ok || len(start.Required) != 1 || start.Required[0] != "email" {
+		t.Fatalf("sign-in start schema = %+v, want only required email", start)
+	}
+	attempt := document.Components.Schemas["SignInAttemptInputBody"]
+	if _, ok := attempt.Properties["password"]; !ok || len(attempt.Required) != 1 || attempt.Required[0] != "password" {
+		t.Fatalf("sign-in attempt schema = %+v, want only required password", attempt)
+	}
 }
 
 func TestAssignmentRightsRoutesDeclareHumanAgentAndMutationGuards(t *testing.T) {

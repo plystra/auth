@@ -326,6 +326,19 @@ type Session struct {
 	MemberID       pgtype.Text        `json:"member_id"`
 }
 
+type SignInAttempt struct {
+	ID              string             `json:"id"`
+	UserID          pgtype.Text        `json:"user_id"`
+	EmailNormalized string             `json:"email_normalized"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+	FailedAttempts  int32              `json:"failed_attempts"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt      pgtype.Timestamptz `json:"consumed_at"`
+	LockedAt        pgtype.Timestamptz `json:"locked_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
 type Space struct {
 	ID            string             `json:"id"`
 	Name          string             `json:"name"`

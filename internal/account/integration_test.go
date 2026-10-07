@@ -344,6 +344,121 @@ func TestLoginRehashesLegacyPasswordAndRejectsOverlongInput(t *testing.T) {
 	}
 }
 
+func TestPasswordSignInUsesShortLivedOneTimeAttempts(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	passwords := security.DefaultPasswordHasher()
+	hash, err := passwords.Hash("a sufficiently long password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_signin_attempt', 'signin-attempt@example.test', 'signin-attempt@example.test', $1, 'active')
+	`, hash); err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store:    st,
+		Signer:   signer,
+		HMACKeys: [][]byte{[]byte(strings.Repeat("h", 32))},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	accounts := &Service{Store: st, Passwords: passwords, Sessions: sessions, Settings: &space.Service{Store: st}}
+
+	known, err := accounts.BeginSignIn(ctx, LoginInput{Email: "SIGNIN-ATTEMPT@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := accounts.BeginSignIn(ctx, LoginInput{Email: "unknown-signin@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if known.NextStep != "password" || unknown.NextStep != known.NextStep || known.AttemptID == unknown.AttemptID {
+		t.Fatalf("challenge disclosure: known=%+v unknown=%+v", known, unknown)
+	}
+	if _, err := accounts.CompleteSignIn(ctx, known.AttemptID, "wrong password", nil, ""); err == nil {
+		t.Fatal("wrong password was accepted")
+	} else {
+		assertAccountError(t, err, "invalid_credentials")
+	}
+	result, err := accounts.CompleteSignIn(ctx, known.AttemptID, "a sufficiently long password", nil, "")
+	if err != nil || result.Tokens == nil || result.Tokens.AccessToken == "" {
+		t.Fatalf("password step completion = %+v, error %v", result, err)
+	}
+	if _, err := accounts.CompleteSignIn(ctx, known.AttemptID, "a sufficiently long password", nil, ""); err == nil {
+		t.Fatal("sign-in attempt was reusable")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+
+	locked, err := accounts.BeginSignIn(ctx, LoginInput{Email: "signin-attempt@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxSignInFailures; i++ {
+		if _, err := accounts.CompleteSignIn(ctx, locked.AttemptID, "wrong password", nil, ""); err == nil {
+			t.Fatal("wrong password unexpectedly succeeded")
+		} else {
+			assertAccountError(t, err, "invalid_credentials")
+		}
+	}
+	if _, err := accounts.CompleteSignIn(ctx, locked.AttemptID, "a sufficiently long password", nil, ""); err == nil {
+		t.Fatal("locked sign-in attempt accepted a password")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+
+	expired, err := accounts.BeginSignIn(ctx, LoginInput{Email: "signin-attempt@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sign_in_attempts SET expires_at = now() - interval '1 second' WHERE id = $1`, expired.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.CompleteSignIn(ctx, expired.AttemptID, "a sufficiently long password", nil, ""); err == nil {
+		t.Fatal("expired sign-in attempt accepted a password")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+
+	concurrent, err := accounts.BeginSignIn(ctx, LoginInput{Email: "signin-attempt@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, completeErr := accounts.CompleteSignIn(ctx, concurrent.AttemptID, "a sufficiently long password", nil, "")
+			results <- completeErr
+		}()
+	}
+	wg.Wait()
+	close(results)
+	var successes, rejected int
+	for completeErr := range results {
+		if completeErr == nil {
+			successes++
+		} else if hasAccountCode(completeErr, "invalid_grant") {
+			rejected++
+		} else {
+			t.Fatalf("concurrent sign-in completion error = %v", completeErr)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("concurrent sign-in completion: successes=%d rejected=%d", successes, rejected)
+	}
+}
+
 func TestLoginAttemptsAreRateLimitedByIPAccountAndPair(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)
@@ -734,6 +849,11 @@ func assertAccountError(t *testing.T, err error, code string) {
 	if !errors.As(err, &public) || public.Code != code {
 		t.Fatalf("error = %v, want code %q", err, code)
 	}
+}
+
+func hasAccountCode(err error, code string) bool {
+	var public *apierr.Error
+	return errors.As(err, &public) && public.Code == code
 }
 
 func assertAuditAction(t *testing.T, st *store.Store, action, actorID string) {

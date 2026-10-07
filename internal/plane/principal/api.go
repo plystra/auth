@@ -34,6 +34,11 @@ type AuthOutput struct {
 		Data account.AuthResult `json:"data"`
 	}
 }
+type SignInStartOutput struct {
+	Body struct {
+		Data account.SignInChallenge `json:"data"`
+	}
+}
 type RefreshInput struct {
 	Body struct {
 		RefreshToken string `json:"refresh_token"`
@@ -69,6 +74,21 @@ type PermissionsOutput struct {
 }
 type LoginInput struct {
 	Body          AuthBody
+	XForwardedFor string `header:"X-Forwarded-For"`
+	UserAgent     string `header:"User-Agent"`
+}
+type SignInStartInput struct {
+	Body struct {
+		Email string `json:"email"`
+	}
+	XForwardedFor string `header:"X-Forwarded-For"`
+	UserAgent     string `header:"User-Agent"`
+}
+type SignInAttemptInput struct {
+	AttemptID string `path:"attempt_id"`
+	Body      struct {
+		Password string `json:"password"`
+	}
 	XForwardedFor string `header:"X-Forwarded-For"`
 	UserAgent     string `header:"User-Agent"`
 }
@@ -128,6 +148,7 @@ type SessionOutput struct {
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "auth.sign_up", Method: "POST", Path: "/v1/auth/sign-up", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.register)
 	route.Register(api, route.Spec{Name: "auth.sign_in", Method: "POST", Path: "/v1/auth/sign-in", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.login)
+	route.Register(api, route.Spec{Name: "auth.sign_in_attempt", Method: "POST", Path: "/v1/auth/sign-in/{attempt_id}", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.loginAttempt)
 	route.Register(api, route.Spec{Name: "auth.refresh", Method: "POST", Path: "/v1/auth/refresh", Plane: route.Principal, Subjects: []route.Subject{route.Public}}, a.refresh)
 	route.Register(api, route.Spec{Name: "auth.me", Method: "GET", Path: "/v1/me", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.me)
 	route.Register(api, route.Spec{Name: "auth.me_permissions", Method: "GET", Path: "/v1/me/permissions", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.mePermissions)
@@ -151,14 +172,27 @@ func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) 
 	out.Body.Data = result
 	return out, nil
 }
-func (a *API) login(ctx context.Context, in *LoginInput) (*AuthOutput, error) {
+func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutput, error) {
 	ip := requestinfo.Get(ctx).IP
 	if len(ip) == 0 && in.XForwardedFor != "" {
 		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))
 	}
-	result, e := a.Accounts.Login(ctx, account.LoginInput{Email: in.Body.Email, Password: in.Body.Password, IP: ip, UserAgent: in.UserAgent})
+	result, e := a.Accounts.BeginSignIn(ctx, account.LoginInput{Email: in.Body.Email, IP: ip, UserAgent: in.UserAgent})
 	if e != nil {
 		return nil, e
+	}
+	out := &SignInStartOutput{}
+	out.Body.Data = result
+	return out, nil
+}
+func (a *API) loginAttempt(ctx context.Context, in *SignInAttemptInput) (*AuthOutput, error) {
+	ip := requestinfo.Get(ctx).IP
+	if len(ip) == 0 && in.XForwardedFor != "" {
+		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))
+	}
+	result, err := a.Accounts.CompleteSignIn(ctx, in.AttemptID, in.Body.Password, ip, in.UserAgent)
+	if err != nil {
+		return nil, err
 	}
 	out := &AuthOutput{}
 	out.Body.Data = result

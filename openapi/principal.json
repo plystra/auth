@@ -1059,6 +1059,63 @@
         ],
         "type": "object"
       },
+      "SignInAttemptInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "SignInChallenge": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "next_step": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "attempt_id",
+          "next_step",
+          "expires_at"
+        ],
+        "type": "object"
+      },
+      "SignInStartInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "type": "object"
+      },
+      "SignInStartOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/SignInChallenge"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "Space": {
         "additionalProperties": false,
         "properties": {
@@ -1344,7 +1401,69 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AuthBody"
+                "$ref": "#/components/schemas/SignInStartInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignInStartOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.sign_in"
+      }
+    },
+    "/v1/auth/sign-in/{attempt_id}": {
+      "post": {
+        "operationId": "auth.sign_in_attempt",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "attempt_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Forwarded-For",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "User-Agent",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInAttemptInputBody"
               }
             }
           },
@@ -1372,7 +1491,7 @@
             "description": "Error"
           }
         },
-        "summary": "auth.sign_in"
+        "summary": "auth.sign_in_attempt"
       }
     },
     "/v1/auth/sign-out": {
