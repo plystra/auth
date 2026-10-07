@@ -1,8 +1,10 @@
 package delta
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/plystra/auth/internal/authz/engine"
@@ -303,6 +305,453 @@ func TestEvaluateScopeDeltaPreservesEveryNewEngineDecision(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestEvaluateAuthorityDeltaMatchesRandomTreesRolesGrantsAndRights(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		spaces, groups, graph := drawGovernanceTree(t)
+		members := drawMembers(t, spaces, groups)
+		keys := []string{"document:read", "document:write", "billing:read"}
+		modes := drawEnvelopeModes(t, spaces, groups, keys)
+
+		roles := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) propertyRole {
+			position := drawNode(t, spaces, groups)
+			permissionKeys := rapid.SliceOfN(rapid.IntRange(0, len(keys)-1), 1, len(keys)).Draw(t, "role_permissions")
+			return propertyRole{Position: position, Keys: uniquePropertyKeys(permissionKeys, keys)}
+		}), 0, 5).Draw(t, "roles")
+		grants := rapid.SliceOfN(rapid.Custom(func(t *rapid.T) propertyGrant {
+			member := members[rapid.IntRange(0, len(members)-1).Draw(t, "grant_member")]
+			role := roles
+			if len(role) == 0 {
+				return propertyGrant{Member: member, Keys: []string{keys[0]}, Scope: drawPropertyScope(t, spaces, groups)}
+			}
+			selectedRole := role[rapid.IntRange(0, len(role)-1).Draw(t, "grant_role")]
+			return propertyGrant{Member: member, Keys: selectedRole.Keys, Scope: drawPropertyScope(t, spaces, groups)}
+		}), 0, 8).Draw(t, "grants")
+
+		allPermissions := expandPropertyGrants(grants, modes, graph)
+		before := choosePropertySubset(t, allPermissions, "before_permissions")
+		after := choosePropertySubset(t, allPermissions, "after_permissions")
+		before.Rights = drawPropertyRights(t, members, spaces, groups, keys, modes, graph, "before_rights")
+		after.Rights = drawPropertyRights(t, members, spaces, groups, keys, modes, graph, "after_rights")
+
+		result, err := Evaluate(before, after, graph)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantPermissions := brutePermissionDelta(before.Permissions, after.Permissions, graph)
+		if !slices.Equal(permissionSignatures(result.Permissions), permissionSignatures(wantPermissions)) {
+			t.Fatalf("permission delta mismatch: got=%v want=%v before=%+v after=%+v", permissionSignatures(result.Permissions), permissionSignatures(wantPermissions), before, after)
+		}
+		wantRights := bruteRightDelta(before.Rights, after.Rights, graph)
+		if !slices.Equal(rightSignatures(result.Rights), rightSignatures(wantRights)) {
+			t.Fatalf("assignment-right delta mismatch: got=%v want=%v before=%+v after=%+v", rightSignatures(result.Rights), rightSignatures(wantRights), before, after)
+		}
+
+		requests := propertyRequests(spaces, groups, graph, members, keys)
+		for _, request := range requests {
+			beforeAllowed := engineAllowsSnapshot(request, before.Permissions)
+			afterAllowed := engineAllowsSnapshot(request, after.Permissions)
+			withDeltaAllowed := engineAllowsSnapshot(request, append(slices.Clone(before.Permissions), result.Permissions...))
+			if afterAllowed && !beforeAllowed && !withDeltaAllowed {
+				t.Fatalf("delta lost a newly allowed decision: request=%+v delta=%+v", request, result)
+			}
+		}
+	})
+}
+
+type propertyMember struct {
+	ID       string
+	Position Node
+}
+
+type propertyRole struct {
+	Position Node
+	Keys     []string
+}
+
+type propertyGrant struct {
+	Member propertyMember
+	Keys   []string
+	Scope  Scope
+}
+
+func drawGovernanceTree(t *rapid.T) ([]Node, []Node, Graph) {
+	spaceCount := rapid.IntRange(1, 5).Draw(t, "space_count")
+	spaces := make([]Node, spaceCount)
+	graph := Graph{SpaceParent: map[string]string{}, GroupParent: map[string]string{}, GroupSpace: map[string]string{}}
+	for i := range spaces {
+		spaces[i] = Node{Kind: Space, ID: fmt.Sprintf("spc_%d", i)}
+		parent := ""
+		if i > 0 && rapid.Bool().Draw(t, "space_has_parent") {
+			parent = spaces[rapid.IntRange(0, i-1).Draw(t, "space_parent")].ID
+		}
+		graph.SpaceParent[spaces[i].ID] = parent
+	}
+	groupCount := rapid.IntRange(0, 6).Draw(t, "group_count")
+	groups := make([]Node, groupCount)
+	for i := range groups {
+		groups[i] = Node{Kind: Group, ID: fmt.Sprintf("grp_%d", i)}
+		// Keep the generated group tree in one Space so every cross-node
+		// coverage comparison is a valid governance fact rather than a
+		// malformed cross-Space reference.
+		space := spaces[0]
+		graph.GroupSpace[groups[i].ID] = space.ID
+		parent := ""
+		if i > 0 && rapid.Bool().Draw(t, "group_has_parent") {
+			candidates := make([]Node, 0, i)
+			for _, candidate := range groups[:i] {
+				if graph.GroupSpace[candidate.ID] == space.ID {
+					candidates = append(candidates, candidate)
+				}
+			}
+			if len(candidates) > 0 {
+				parent = candidates[rapid.IntRange(0, len(candidates)-1).Draw(t, "group_parent")].ID
+			}
+		}
+		graph.GroupParent[groups[i].ID] = parent
+	}
+	return spaces, groups, graph
+}
+
+func drawMembers(t *rapid.T, spaces, groups []Node) []propertyMember {
+	n := rapid.IntRange(1, 5).Draw(t, "member_count")
+	members := make([]propertyMember, n)
+	for i := range members {
+		if len(groups) > 0 && rapid.Bool().Draw(t, "member_in_group") {
+			members[i] = propertyMember{ID: fmt.Sprintf("mem_%d", i), Position: groups[rapid.IntRange(0, len(groups)-1).Draw(t, "member_group")]}
+			continue
+		}
+		members[i] = propertyMember{ID: fmt.Sprintf("mem_%d", i), Position: spaces[rapid.IntRange(0, len(spaces)-1).Draw(t, "member_space")]}
+	}
+	return members
+}
+
+func drawNode(t *rapid.T, spaces, groups []Node) Node {
+	if len(groups) > 0 && rapid.Bool().Draw(t, "node_is_group") {
+		return groups[rapid.IntRange(0, len(groups)-1).Draw(t, "node_group")]
+	}
+	return spaces[rapid.IntRange(0, len(spaces)-1).Draw(t, "node_space")]
+}
+
+func drawEnvelopeModes(t *rapid.T, spaces, groups []Node, keys []string) map[string]map[string]int {
+	modes := make(map[string]map[string]int, len(spaces)+len(groups))
+	for _, node := range append(slices.Clone(spaces), groups...) {
+		modes[node.ID] = make(map[string]int, len(keys))
+		for _, key := range keys {
+			modes[node.ID][key] = rapid.IntRange(0, 2).Draw(t, "envelope_mode")
+		}
+	}
+	return modes
+}
+
+func expandPropertyGrants(grants []propertyGrant, modes map[string]map[string]int, graph Graph) []Permission {
+	permissions := make([]Permission, 0)
+	for _, grant := range grants {
+		for _, key := range grant.Keys {
+			if effectiveEnvelopeMode(grant.Member.Position, key, modes, graph) == 0 {
+				continue
+			}
+			permissions = append(permissions, Permission{Subject: grant.Member.ID, Position: grant.Member.Position, Key: key, Scope: grant.Scope})
+		}
+	}
+	return permissions
+}
+
+func effectiveEnvelopeMode(node Node, key string, modes map[string]map[string]int, graph Graph) int {
+	mode := 2
+	if value, ok := modes[node.ID][key]; ok && value < mode {
+		mode = value
+	}
+	if node.Kind == Group {
+		for current := node.ID; current != ""; current = graph.GroupParent[current] {
+			if value := modes[current][key]; value < mode {
+				mode = value
+			}
+		}
+		spaceID := graph.GroupSpace[node.ID]
+		node = Node{Kind: Space, ID: spaceID}
+	}
+	for current := node.ID; current != ""; current = graph.SpaceParent[current] {
+		if value := modes[current][key]; value < mode {
+			mode = value
+		}
+	}
+	return mode
+}
+
+func choosePropertySubset(t *rapid.T, input []Permission, label string) Snapshot {
+	result := Snapshot{Permissions: make([]Permission, 0, len(input))}
+	for _, permission := range input {
+		if rapid.Bool().Draw(t, label) {
+			result.Permissions = append(result.Permissions, permission)
+		}
+	}
+	return result
+}
+
+func drawPropertyScope(t *rapid.T, spaces, groups []Node) Scope {
+	switch rapid.IntRange(0, 7).Draw(t, "grant_scope_kind") {
+	case 0:
+		return Scope{Kind: Self}
+	case 1:
+		return Scope{Kind: Global}
+	case 2:
+		return Scope{Kind: SpaceOnly, Anchor: spaces[rapid.IntRange(0, len(spaces)-1).Draw(t, "space_anchor")].ID}
+	case 3:
+		return Scope{Kind: SpaceTree, Anchor: spaces[rapid.IntRange(0, len(spaces)-1).Draw(t, "space_tree_anchor")].ID}
+	case 4:
+		if len(groups) == 0 {
+			return Scope{Kind: Global}
+		}
+		return Scope{Kind: GroupOnly, Anchor: groups[rapid.IntRange(0, len(groups)-1).Draw(t, "group_anchor")].ID}
+	case 5:
+		if len(groups) == 0 {
+			return Scope{Kind: Global}
+		}
+		return Scope{Kind: GroupTree, Anchor: groups[rapid.IntRange(0, len(groups)-1).Draw(t, "group_tree_anchor")].ID}
+	default:
+		return Scope{Kind: Self}
+	}
+}
+
+func drawPropertyRights(t *rapid.T, members []propertyMember, spaces, groups []Node, keys []string, modes map[string]map[string]int, graph Graph, label string) []Right {
+	count := rapid.IntRange(0, 6).Draw(t, label+"_count")
+	rights := make([]Right, 0, count)
+	for i := 0; i < count; i++ {
+		holder := members[rapid.IntRange(0, len(members)-1).Draw(t, label+"_holder")]
+		permissionIndexes := rapid.SliceOfN(rapid.IntRange(0, len(keys)-1), 1, len(keys)).Draw(t, label+"_permissions")
+		permissionKeys := uniquePropertyKeys(permissionIndexes, keys)
+		for len(permissionKeys) > 0 && effectiveEnvelopeMode(holder.Position, permissionKeys[0], modes, graph) == 0 {
+			permissionKeys = permissionKeys[1:]
+		}
+		if len(permissionKeys) == 0 {
+			continue
+		}
+		anchor := drawNode(t, spaces, groups)
+		rights = append(rights, Right{Holder: holder.ID, Position: holder.Position, Permissions: permissionKeys, Anchor: anchor, Descendants: rapid.Bool().Draw(t, label+"_descendants"), Delegate: rapid.Bool().Draw(t, label+"_delegate")})
+	}
+	return rights
+}
+
+func uniquePropertyKeys(indexes []int, keys []string) []string {
+	seen := map[string]struct{}{}
+	result := make([]string, 0, len(indexes))
+	for _, index := range indexes {
+		key := keys[index]
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, key)
+	}
+	slices.Sort(result)
+	return result
+}
+
+func brutePermissionDelta(before, after []Permission, graph Graph) []Permission {
+	result := make([]Permission, 0)
+	for _, candidate := range after {
+		covered := false
+		for _, previous := range before {
+			if previous.Subject == candidate.Subject && previous.Position == candidate.Position && previous.Key == candidate.Key && bruteScopeContains(previous.Scope, candidate.Scope, graph) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			result = append(result, candidate)
+		}
+	}
+	return normalizePermissionForTest(result)
+}
+
+func bruteScopeContains(a, b Scope, graph Graph) bool {
+	if a.Kind == b.Kind && a.Anchor == b.Anchor {
+		return true
+	}
+	if a.Kind == Global {
+		return true
+	}
+	if a.Kind == SpaceOnly && b.Kind == SpaceOnly {
+		return a.Anchor == b.Anchor
+	}
+	if a.Kind == SpaceTree && (b.Kind == SpaceOnly || b.Kind == SpaceTree) {
+		return b.Anchor == a.Anchor || isSpaceDescendant(graph, b.Anchor, a.Anchor)
+	}
+	if a.Kind == GroupTree && (b.Kind == GroupOnly || b.Kind == GroupTree) {
+		return b.Anchor == a.Anchor || isGroupDescendant(graph, b.Anchor, a.Anchor)
+	}
+	if a.Kind == SpaceOnly && (b.Kind == GroupOnly || b.Kind == GroupTree) {
+		return groupInSpace(graph, b.Anchor, a.Anchor)
+	}
+	return false
+}
+
+func bruteRightDelta(before, after []Right, graph Graph) []Right {
+	result := make([]Right, 0)
+	for _, candidate := range after {
+		covered := false
+		for _, previous := range before {
+			if bruteRightContains(previous, candidate, graph) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			result = append(result, candidate)
+		}
+	}
+	return normalizeRightForTest(result)
+}
+
+func bruteRightContains(a, b Right, graph Graph) bool {
+	if a.Holder != b.Holder || a.Position != b.Position || (b.Delegate && !a.Delegate) || (b.Descendants && !a.Descendants) {
+		return false
+	}
+	for _, key := range b.Permissions {
+		if !slices.Contains(a.Permissions, key) {
+			return false
+		}
+	}
+	if a.Anchor == b.Anchor {
+		return true
+	}
+	if a.Anchor.Kind == Space && b.Anchor.Kind == Space {
+		return a.Descendants && isSpaceDescendant(graph, b.Anchor.ID, a.Anchor.ID)
+	}
+	if a.Anchor.Kind == Group && b.Anchor.Kind == Group {
+		return a.Descendants && isGroupDescendant(graph, b.Anchor.ID, a.Anchor.ID)
+	}
+	if a.Anchor.Kind == Space && b.Anchor.Kind == Group {
+		return a.Descendants && groupInSpace(graph, b.Anchor.ID, a.Anchor.ID)
+	}
+	return false
+}
+
+func isSpaceDescendant(graph Graph, child, ancestor string) bool {
+	for current := child; current != ""; current = graph.SpaceParent[current] {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+func isGroupDescendant(graph Graph, child, ancestor string) bool {
+	for current := child; current != ""; current = graph.GroupParent[current] {
+		if current == ancestor {
+			return true
+		}
+	}
+	return false
+}
+
+func groupInSpace(graph Graph, group, space string) bool {
+	return graph.GroupSpace[group] == space
+}
+
+func normalizePermissionForTest(values []Permission) []Permission {
+	result := slices.Clone(values)
+	slices.SortFunc(result, func(a, b Permission) int {
+		return cmpString(permissionSignature(a), permissionSignature(b))
+	})
+	unique := result[:0]
+	for _, value := range result {
+		if len(unique) == 0 || permissionSignature(unique[len(unique)-1]) != permissionSignature(value) {
+			unique = append(unique, value)
+		}
+	}
+	return unique
+}
+
+func normalizeRightForTest(values []Right) []Right {
+	result := slices.Clone(values)
+	slices.SortFunc(result, func(a, b Right) int { return cmpString(rightSignature(a), rightSignature(b)) })
+	unique := result[:0]
+	for _, value := range result {
+		if len(unique) == 0 || rightSignature(unique[len(unique)-1]) != rightSignature(value) {
+			unique = append(unique, value)
+		}
+	}
+	return unique
+}
+
+func permissionSignatures(values []Permission) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, permissionSignature(value))
+	}
+	slices.Sort(result)
+	return result
+}
+
+func rightSignatures(values []Right) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		result = append(result, rightSignature(value))
+	}
+	slices.Sort(result)
+	return result
+}
+
+func permissionSignature(value Permission) string {
+	return fmt.Sprintf("%s|%s:%s|%s|%s:%s", value.Subject, value.Position.Kind, value.Position.ID, value.Key, value.Scope.Kind, value.Scope.Anchor)
+}
+
+func rightSignature(value Right) string {
+	return fmt.Sprintf("%s|%s:%s|%s|%t|%t|%s:%s", value.Holder, value.Position.Kind, value.Position.ID, strings.Join(value.Permissions, ","), value.Descendants, value.Delegate, value.Anchor.Kind, value.Anchor.ID)
+}
+
+func cmpString(a, b string) int {
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
+
+func propertyRequests(spaces, groups []Node, graph Graph, members []propertyMember, keys []string) []engine.Request {
+	requests := make([]engine.Request, 0, (len(spaces)+len(groups))*len(members)*len(keys))
+	for _, member := range members {
+		for _, space := range spaces {
+			for _, key := range keys {
+				requests = append(requests, engine.Request{MemberID: member.ID, Permission: key, ResourceSpace: space.ID, ResourceSpaceAncestors: spaceAncestorsForTest(space.ID, graph), ResourceOwner: member.ID})
+			}
+		}
+		for _, group := range groups {
+			for _, key := range keys {
+				requests = append(requests, engine.Request{MemberID: member.ID, Permission: key, ResourceSpace: graph.GroupSpace[group.ID], ResourceSpaceAncestors: spaceAncestorsForTest(graph.GroupSpace[group.ID], graph), ResourceGroup: group.ID, ResourceGroupAncestors: groupAncestorsForTest(group.ID, graph), ResourceOwner: member.ID})
+			}
+		}
+	}
+	return requests
+}
+
+func spaceAncestorsForTest(space string, graph Graph) []string {
+	ancestors := make([]string, 0)
+	for current := graph.SpaceParent[space]; current != ""; current = graph.SpaceParent[current] {
+		ancestors = append(ancestors, current)
+	}
+	return ancestors
+}
+
+func groupAncestorsForTest(group string, graph Graph) []string {
+	ancestors := make([]string, 0)
+	for current := graph.GroupParent[group]; current != ""; current = graph.GroupParent[current] {
+		ancestors = append(ancestors, current)
+	}
+	return ancestors
+}
+
+func engineAllowsSnapshot(request engine.Request, permissions []Permission) bool {
+	request.Assignments = nil
+	for _, permission := range permissions {
+		request.Assignments = append(request.Assignments, engine.Assignment{MemberID: permission.Subject, Permissions: []string{permission.Key}, Scope: engine.Scope{Kind: string(permission.Scope.Kind), Anchor: permission.Scope.Anchor}})
+	}
+	return engine.Check(request).Effect == engine.Allow
 }
 
 func engineAllows(request engine.Request, permissions []Permission) bool {
