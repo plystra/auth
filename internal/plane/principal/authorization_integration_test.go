@@ -445,6 +445,102 @@ func TestUserSessionEndpointsListAndRevokeCurrentOrAllSessions(t *testing.T) {
 	}
 }
 
+func TestRemoveCurrentMemberRevokesOnlyCurrentHumanBinding(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	other, err := authz.CreateMember(ctx, owner.ID, "usr_principal_actor", spaceID, "second identity", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "self-remove", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/me/member", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":true`) {
+		t.Fatalf("DELETE /v1/me/member = %d %s, want accepted", w.Code, w.Body.String())
+	}
+	var currentStatus, otherStatus string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM user_members WHERE user_id = $1 AND member_id = $2`, "usr_principal_actor", owner.ID).Scan(&currentStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM user_members WHERE user_id = $1 AND member_id = $2`, "usr_principal_actor", other.ID).Scan(&otherStatus); err != nil {
+		t.Fatal(err)
+	}
+	if currentStatus != "revoked" || otherStatus != "active" {
+		t.Fatalf("self removal statuses = current %q other %q, want revoked/active", currentStatus, otherStatus)
+	}
+	if _, active, err := sessions.Introspect(ctx, tokens.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("current member token after self removal = active %v err %v, want inactive", active, err)
+	}
+	otherTokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", other.ID, nil, "remaining", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := sessions.Introspect(ctx, otherTokens.AccessToken, security.DefaultApplicationAudience); err != nil || !active {
+		t.Fatalf("remaining member token = active %v err %v, want active", active, err)
+	}
+}
+
+func TestAgentCanRemoveItselfAndItsSubtreeThroughMemberEndpoint(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	root, rootKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "self-removing-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, childKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: root.ID, Name: "self-removing-child", ExpiresAt: time.Now().UTC().Add(30 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, root.ID, "self:read")
+	tokens, err := sessions.CreateAgentAccess(ctx, root.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	req := httptest.NewRequest(http.MethodDelete, "/v1/me/member", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"accepted":true`) {
+		t.Fatalf("Agent DELETE /v1/me/member = %d %s, want accepted", w.Code, w.Body.String())
+	}
+	var rootStatus, childStatus, removedGroups int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE id = $1 AND status = 'removed'`, root.ID).Scan(&rootStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE id = $1 AND status = 'removed'`, child.ID).Scan(&childStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM groups WHERE owner_member_id = $1 AND status = 'removed'`, root.ID).Scan(&removedGroups); err != nil {
+		t.Fatal(err)
+	}
+	if rootStatus != 1 || childStatus != 1 || removedGroups != 1 {
+		t.Fatalf("agent self removal tombstones = root %d child %d groups %d, want 1/1/1", rootStatus, childStatus, removedGroups)
+	}
+	if _, err := agents.AuthenticateKey(ctx, rootKey); err == nil {
+		t.Fatal("root Agent credential remained usable after self removal")
+	}
+	if _, err := agents.AuthenticateKey(ctx, childKey); err == nil {
+		t.Fatal("child Agent credential remained usable after parent self removal")
+	}
+	if _, active, err := sessions.Introspect(ctx, tokens.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+		t.Fatalf("removed Agent token = active %v err %v, want inactive", active, err)
+	}
+}
+
 func TestMeMembersHTTPEndpointReturnsOnlyActiveUserBindings(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

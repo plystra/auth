@@ -703,24 +703,24 @@
       "DataStruct": {
         "additionalProperties": false,
         "properties": {
-          "revoked": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "revoked"
-        ],
-        "type": "object"
-      },
-      "DataStruct1": {
-        "additionalProperties": false,
-        "properties": {
           "accepted": {
             "type": "boolean"
           }
         },
         "required": [
           "accepted"
+        ],
+        "type": "object"
+      },
+      "DataStruct1": {
+        "additionalProperties": false,
+        "properties": {
+          "revoked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
         ],
         "type": "object"
       },
@@ -828,7 +828,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct1"
+            "$ref": "#/components/schemas/DataStruct"
           }
         },
         "required": [
@@ -962,7 +962,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct"
+            "$ref": "#/components/schemas/DataStruct1"
           }
         },
         "required": [
@@ -2108,6 +2108,43 @@
           }
         },
         "summary": "me.agents.stop"
+      }
+    },
+    "/v1/me/member": {
+      "delete": {
+        "operationId": "auth.me_member_remove",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenericOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.me_member_remove"
       }
     },
     "/v1/me/members": {

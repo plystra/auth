@@ -164,6 +164,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.me_update", "PATCH", "/v1/me", route.Principal, "", []route.Subject{route.User}), a.updateMe)
 	route.Register(api, route.NewSpec("auth.me_permissions", "GET", "/v1/me/permissions", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.mePermissions)
 	route.Register(api, route.NewSpec("auth.me_members", "GET", "/v1/me/members", route.Principal, "", []route.Subject{route.User}), a.meMembers)
+	route.Register(api, route.NewSpec("auth.me_member_remove", "DELETE", "/v1/me/member", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.removeCurrentMember)
 	route.Register(api, route.NewSpec("auth.sign_out", "POST", "/v1/auth/sign-out", route.Principal, "", []route.Subject{route.User}), a.logout)
 	route.Register(api, route.NewSpec("auth.sessions.list", "GET", "/v1/me/sessions", route.Principal, "", []route.Subject{route.User}), a.listSessions)
 	route.Register(api, route.NewSpec("auth.sessions.revoke", "DELETE", "/v1/me/sessions/{id}", route.Principal, "", []route.Subject{route.User}), a.revokeSession)
@@ -312,6 +313,31 @@ func (a *API) meMembers(ctx context.Context, in *MembersInput) (*MembersOutput, 
 	}
 	out := &MembersOutput{}
 	out.Body.Data = members
+	return out, nil
+}
+
+func (a *API) removeCurrentMember(ctx context.Context, in *BearerInput) (*GenericOutput, error) {
+	member, userID, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	if err != nil {
+		return nil, err
+	}
+	if member.Kind == "agent" {
+		if a.Agents == nil {
+			return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
+		}
+		if err := a.Agents.Delete(ctx, member.ID, member.ID); err != nil {
+			return nil, err
+		}
+	} else {
+		if userID == "" || a.Authorization == nil {
+			return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+		}
+		if err := a.Authorization.RevokeOwnBinding(ctx, userID, member.ID); err != nil {
+			return nil, err
+		}
+	}
+	out := &GenericOutput{}
+	out.Body.Data.Accepted = true
 	return out, nil
 }
 

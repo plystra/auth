@@ -933,6 +933,36 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 	})
 }
 
+// RevokeOwnBinding removes only the calling user's binding to the current
+// member. Unlike administrative binding revocation, this self-service path
+// does not require auth.bindings:manage and does not revoke the user's other
+// member bindings.
+func (s *Service) RevokeOwnBinding(ctx context.Context, userID, memberID string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "member was not found")
+		}
+		if err != nil {
+			return err
+		}
+		binding, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && binding.Status != "active") {
+			return apierr.New("NOT_FOUND", "active user binding was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: member.SpaceID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", memberID, "member.binding.self_revoke", memberID, "success")
+	})
+}
+
 func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, memberID, policy string) error {
 	if policy != "single" && policy != "shared" {
 		return apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
