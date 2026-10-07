@@ -3,6 +3,7 @@ package route
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -45,6 +46,62 @@ type Spec struct {
 	NonJSON            bool
 }
 type Handler func(http.ResponseWriter, *http.Request)
+type HandlerMux interface {
+	Handle(string, http.Handler)
+}
+
+// Mux records every handler installed on an interaction-plane mux. Production
+// startup validates the recorded patterns against route.Spec declarations so
+// a protocol handler cannot bypass the route registry.
+type Mux struct {
+	*http.ServeMux
+	mu       sync.RWMutex
+	patterns map[string]struct{}
+}
+
+func NewMux() *Mux {
+	return &Mux{ServeMux: http.NewServeMux(), patterns: make(map[string]struct{})}
+}
+
+func (m *Mux) Handle(pattern string, handler http.Handler) {
+	m.record(pattern)
+	m.ServeMux.Handle(pattern, handler)
+}
+
+func (m *Mux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	m.record(pattern)
+	m.ServeMux.HandleFunc(pattern, handler)
+}
+
+func (m *Mux) record(pattern string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.patterns[pattern] = struct{}{}
+}
+
+// Validate rejects handlers installed without a corresponding route.Spec.
+// It is intentionally called after all JSON and protocol registrations for a
+// plane have completed.
+func Validate(mux *Mux) error {
+	if mux == nil {
+		return errors.New("route: nil mux")
+	}
+	declared := make(map[string]struct{})
+	registry.RLock()
+	for _, spec := range registry.specs {
+		declared[spec.Method+" "+spec.Path] = struct{}{}
+	}
+	registry.RUnlock()
+	mux.mu.RLock()
+	defer mux.mu.RUnlock()
+	for pattern := range mux.patterns {
+		if _, ok := declared[pattern]; !ok {
+			return fmt.Errorf("route: handler %q has no route.Spec declaration", pattern)
+		}
+	}
+	return nil
+}
+
 type OriginPolicy func(context.Context, string) (bool, error)
 type CredentialFailureAuditor func(context.Context, Plane, string, string) error
 
@@ -86,7 +143,7 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 		return nil, apierr.WithRequestID(public, requestinfo.Get(ctx).ID)
 	})
 }
-func RegisterNonJSON(mux *http.ServeMux, spec Spec, handler http.Handler) {
+func RegisterNonJSON(mux HandlerMux, spec Spec, handler http.Handler) {
 	if !spec.NonJSON {
 		panic("route: non-json route must set NonJSON")
 	}

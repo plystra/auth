@@ -213,9 +213,9 @@ func serve(ctx context.Context) error {
 			})
 		})
 	}
-	principalMux := http.NewServeMux()
-	serverMux := http.NewServeMux()
-	opsMux := http.NewServeMux()
+	principalMux := route.NewMux()
+	serverMux := route.NewMux()
+	opsMux := route.NewMux()
 	pcfg := route.HumaConfig("Plystra Auth principal", "1.0.0")
 	pcfg.Info.Description = "User and agent authentication"
 	scfg := route.HumaConfig("Plystra Auth server", "1.0.0")
@@ -225,6 +225,15 @@ func serve(ctx context.Context) error {
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, signer)
+	for name, mux := range map[string]*route.Mux{
+		"principal": principalMux,
+		"server":    serverMux,
+		"ops":       opsMux,
+	} {
+		if err := route.Validate(mux); err != nil {
+			return fmt.Errorf("validate %s routes: %w", name, err)
+		}
+	}
 	health := http.NewServeMux()
 	registerHealth(health, func(ctx context.Context) error {
 		return checkReadiness(ctx, st.Pool.Ping, func(ctx context.Context) error {
@@ -326,7 +335,7 @@ func checkReadiness(ctx context.Context, ping, migrations func(context.Context) 
 	return signingKey()
 }
 
-func registerJWKS(mux *http.ServeMux, signer *security.Signer) {
+func registerJWKS(mux route.HandlerMux, signer *security.Signer) {
 	route.RegisterNonJSON(mux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jwks, err := signer.JWKS()

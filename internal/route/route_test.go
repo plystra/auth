@@ -130,6 +130,30 @@ func TestRouteRegistrationRejectsIncompleteSpecs(t *testing.T) {
 	})
 }
 
+func TestMuxRejectsHandlersOutsideRouteRegistry(t *testing.T) {
+	mux := NewMux()
+	mux.Handle("GET /unregistered", http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err := Validate(mux); err == nil || !strings.Contains(err.Error(), "GET /unregistered") {
+		t.Fatalf("Validate error = %v, want unregistered handler failure", err)
+	}
+}
+
+func TestMuxAcceptsDeclaredJSONAndNonJSONHandlers(t *testing.T) {
+	mux := NewMux()
+	api := humago.New(mux, HumaConfig("route mux test", "1.0.0"))
+	Register(api, Spec{
+		Name: "route.mux.json", Method: http.MethodGet, Path: "/mux-json",
+		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
+	}, func(context.Context, *struct{}) (*struct{}, error) { return &struct{}{}, nil })
+	RegisterNonJSON(mux, Spec{
+		Name: "route.mux.protocol", Method: http.MethodGet, Path: "/mux-protocol",
+		Plane: Principal, Subjects: []Subject{Public}, NonJSON: true,
+	}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	if err := Validate(mux); err != nil {
+		t.Fatalf("Validate returned error for declared handlers: %v", err)
+	}
+}
+
 func assertRoutePanic(t *testing.T, fn func()) {
 	t.Helper()
 	defer func() {

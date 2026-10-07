@@ -22,7 +22,7 @@ type HTTP struct {
 	Authorization *authorization.Service
 }
 
-func (h HTTP) Register(mux *http.ServeMux) {
+func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.metadata", Method: "GET", Path: "/.well-known/oauth-authorization-server", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.metadata))
 	route.RegisterNonJSON(mux, route.Spec{Name: "oidc.metadata", Method: "GET", Path: "/.well-known/openid-configuration", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.metadata))
 	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.authorize", Method: "GET", Path: "/oauth/authorize", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.authorize))
