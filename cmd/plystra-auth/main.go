@@ -150,7 +150,6 @@ func serve(ctx context.Context) error {
 	}
 	defer st.Close()
 	tasks := jobs.New(ctx)
-	defer func() { _ = tasks.Shutdown(context.Background()) }()
 	var signer *security.Signer
 	signingKeyEncryptionKey, e := decodeDataKey(c.SigningKeyEncryptionKey)
 	if e != nil {
