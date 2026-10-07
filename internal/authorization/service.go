@@ -1067,15 +1067,51 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 
 func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grantID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID); err != nil {
-			return err
-		}
 		row, err := q.GetGrantInSpace(ctx, db.GetGrantInSpaceParams{ID: grantID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "grant was not found in this Space")
 			}
 			return err
+		}
+		// Resolve the grant's actual grantee before checking authorization. A
+		// group-scoped manager may revoke grants for that group, while a
+		// Space-wide grant is required for members in multiple groups or with no
+		// unique group. This keeps revoke decisions on the same resource facts as
+		// create and other target-specific management operations.
+		resourceGroup := ""
+		var targetMemberID string
+		if row.GranteeGroupID.Valid {
+			if _, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: row.GranteeGroupID.String, SpaceID: spaceID}); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return apierr.New("NOT_FOUND", "grant grantee was not found in this Space")
+				}
+				return err
+			}
+			resourceGroup = row.GranteeGroupID.String
+		} else if row.GranteeMemberID.Valid {
+			targetMemberID = row.GranteeMemberID.String
+			resourceGroup, err = resourceGroupForMemberTx(ctx, q, targetMemberID, spaceID)
+			if err != nil {
+				return err
+			}
+		} else {
+			return apierr.New("NOT_FOUND", "grant grantee was not found")
+		}
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, resourceGroup); err != nil {
+			return err
+		}
+		decision, err := s.CheckTx(ctx, q, CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.grants:assign", ResourceSpace: spaceID, ResourceGroup: resourceGroup,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.grants:assign"}}
 		}
 		if err := q.RevokeGrant(ctx, db.RevokeGrantParams{ID: grantID}); err != nil {
 			return err

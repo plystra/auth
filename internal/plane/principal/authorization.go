@@ -390,7 +390,10 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 }
 
 func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.grants:assign")
+	// Revoke resolves the grant and its grantee inside the same transaction as
+	// the authorization check. Do not pre-authorize against the whole Space,
+	// because a group-scoped grant must be checked against its target group.
+	actor, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
 	}

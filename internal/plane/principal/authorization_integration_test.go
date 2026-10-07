@@ -438,6 +438,83 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 	}
 }
 
+func TestGrantRevokeManagementUsesGrantTargetGroupFacts(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	target, err := authz.CreateMember(ctx, actor.ID, "", spaceID, "group revoke target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside, err := authz.CreateMember(ctx, actor.ID, "", spaceID, "space revoke target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID := "grp_revoke_scope"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status) VALUES ($1, $2, 'Grant revoke scope', 'standard', 'active')
+	`, groupID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO group_members (group_id, member_id) VALUES ($1, $2), ($1, $3)
+	`, groupID, actor.ID, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	groupGrant, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+	if err != nil {
+		t.Fatalf("create group target grant: %v", err)
+	}
+	spaceGrant, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, outside.ID, []string{"auth.members:read"}, "space", spaceID)
+	if err != nil {
+		t.Fatalf("create Space target grant: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by)
+		VALUES ('grt_revoke_scope_manager', $1, '["auth.grants:assign"]'::jsonb, $2, 'group_tree', $3, $2)
+	`, spaceID, actor.ID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	groupDecision, _, err := authz.Check(ctx, authorization.CheckRequest{
+		MemberID: actor.ID, Permission: "auth.grants:assign", ResourceSpace: spaceID, ResourceGroup: groupID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groupDecision.Effect != engine.Allow {
+		t.Fatalf("group target authz.check = %+v, want allow", groupDecision)
+	}
+	spaceDecision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: actor.ID, Permission: "auth.grants:assign", ResourceSpace: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spaceDecision.Effect != engine.Deny || spaceDecision.Code != "SCOPE_OUT_OF_BOUNDS" {
+		t.Fatalf("Space target authz.check = %+v, want SCOPE_OUT_OF_BOUNDS", spaceDecision)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	if _, err := api.revokeGrant(ctx, &revokeGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, GrantID: groupGrant.ID}); err != nil {
+		t.Fatalf("group-scoped manager could not revoke a group target grant: %v", err)
+	}
+	var revoked bool
+	if err := st.Pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM authorization_grants WHERE id = $1`, groupGrant.ID).Scan(&revoked); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Fatal("group target grant was not revoked")
+	}
+	if _, err := api.revokeGrant(ctx, &revokeGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, GrantID: spaceGrant.ID}); err == nil {
+		t.Fatal("group-scoped manager revoked a grant outside its target group")
+	} else {
+		assertPrincipalError(t, err, spaceDecision.Code)
+	}
+}
+
 func TestMemberInMultipleGroupsRequiresSpaceWideManagement(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
