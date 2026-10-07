@@ -341,6 +341,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputInvitationResponseBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/InvitationResponse"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputListAssignmentRightBody": {
         "additionalProperties": false,
         "properties": {
@@ -589,6 +601,22 @@
         },
         "required": [
           "name"
+        ],
+        "type": "object"
+      },
+      "CreateInvitationInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "email"
         ],
         "type": "object"
       },
@@ -890,6 +918,35 @@
             "type": "string"
           }
         },
+        "type": "object"
+      },
+      "InvitationResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "email_normalized": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "space_id",
+          "email_normalized",
+          "expires_at",
+          "token"
+        ],
         "type": "object"
       },
       "LogoutInputBody": {
@@ -2790,6 +2847,61 @@
           }
         },
         "summary": "groups.move"
+      }
+    },
+    "/v1/spaces/{id}/invitations": {
+      "post": {
+        "operationId": "invitations.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputInvitationResponseBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "invitations.create"
       }
     },
     "/v1/spaces/{id}/members": {

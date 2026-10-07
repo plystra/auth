@@ -19,6 +19,7 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -233,6 +234,40 @@ func TestGroupCreationManagementEndpointCreatesStandardRoot(t *testing.T) {
 	}
 	if kind != "standard" || status != "active" {
 		t.Fatalf("endpoint-created group = kind %q status %q, want standard active", kind, status)
+	}
+}
+
+func TestInvitationCreationManagementEndpointStoresOnlyTokenHash(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}, Invitations: &invitation.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/invitations", strings.NewReader(`{"email":"Invitee@Example.Test"}`))
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	route.Middleware(route.Principal, mux).ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"email_normalized":"invitee@example.test"`) || !strings.Contains(w.Body.String(), `"token":"iv_`) {
+		t.Fatalf("POST invitation = %d %s, want one-time token response", w.Code, w.Body.String())
+	}
+	var tokenHash []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT token_hash FROM invitation_tokens WHERE email_normalized = 'invitee@example.test'`).Scan(&tokenHash); err != nil {
+		t.Fatal(err)
+	}
+	if len(tokenHash) != 32 || strings.Contains(w.Body.String(), string(tokenHash)) {
+		t.Fatalf("invitation token storage or response is unsafe: hash length=%d response=%s", len(tokenHash), w.Body.String())
+	}
+	var audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'invitation.create' AND actor_id = $1`, owner.ID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("invitation audit rows = %d, want 1", audits)
 	}
 }
 

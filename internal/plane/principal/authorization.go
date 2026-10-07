@@ -10,6 +10,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
+	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
@@ -158,6 +159,23 @@ type createGroupInput struct {
 	}
 }
 
+type createInvitationInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		Email     string    `json:"email"`
+		ExpiresAt time.Time `json:"expires_at,omitempty"`
+	}
+}
+
+type invitationResponse struct {
+	ID              string    `json:"id"`
+	SpaceID         string    `json:"space_id"`
+	EmailNormalized string    `json:"email_normalized"`
+	ExpiresAt       time.Time `json:"expires_at"`
+	Token           string    `json:"token"`
+}
+
 type authorizationDataOutput[T any] struct {
 	Body struct {
 		Data T `json:"data"`
@@ -195,6 +213,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
 	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
+	route.Register(api, route.NewSpec("invitations.create", "POST", "/v1/spaces/{id}/invitations", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}), a.createInvitation)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
@@ -536,6 +555,25 @@ func (a *API) createGroup(ctx context.Context, in *createGroupInput) (*authoriza
 	}
 	out := &authorizationDataOutput[authorization.Group]{}
 	out.Body.Data = group
+	return out, nil
+}
+
+func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (*authorizationDataOutput[invitationResponse], error) {
+	if a.Invitations == nil {
+		return nil, apierr.New("UNAVAILABLE", "invitation service is unavailable")
+	}
+	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	if err != nil {
+		return nil, err
+	}
+	created, token, err := a.Invitations.CreateForActor(ctx, "member", actor.ID, invitation.CreateInput{
+		SpaceID: in.ID, Email: in.Body.Email, ExpiresAt: in.Body.ExpiresAt,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[invitationResponse]{}
+	out.Body.Data = invitationResponse{ID: created.ID, SpaceID: created.SpaceID, EmailNormalized: created.EmailNormalized, ExpiresAt: created.ExpiresAt, Token: token}
 	return out, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/store"
@@ -42,6 +43,17 @@ type Invitation struct {
 // Create creates a single-use invitation token. The raw token is returned only
 // to the caller; the database stores its one-way digest.
 func (s *Service) Create(ctx context.Context, in CreateInput) (Invitation, string, error) {
+	return s.create(ctx, "", "", in)
+}
+
+// CreateForActor records the invitation issuance in the same transaction as
+// the hashed token. The caller must authorize the actor against the target
+// Space before invoking this method.
+func (s *Service) CreateForActor(ctx context.Context, actorType, actorID string, in CreateInput) (Invitation, string, error) {
+	return s.create(ctx, actorType, actorID, in)
+}
+
+func (s *Service) create(ctx context.Context, actorType, actorID string, in CreateInput) (Invitation, string, error) {
 	if s == nil || s.Store == nil {
 		return Invitation{}, "", errors.New("invitation store is required")
 	}
@@ -75,7 +87,13 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Invitation, strin
 			MemberID:        memberID,
 			TokenHash:       hash, ExpiresAt: pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		if strings.TrimSpace(actorID) != "" {
+			return audit.Write(ctx, q, actorType, actorID, "invitation.create", row.ID, "success")
+		}
+		return nil
 	})
 	if err != nil {
 		return Invitation{}, "", err

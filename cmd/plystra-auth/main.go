@@ -27,6 +27,7 @@ import (
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
+	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/observability"
@@ -182,7 +183,7 @@ func serve(ctx context.Context) error {
 	}
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
 	apps := &application.Service{Store: st}
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: &invitation.Service{Store: st}}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {

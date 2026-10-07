@@ -11,6 +11,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
@@ -23,6 +24,7 @@ type API struct {
 	Signer        *security.Signer
 	Authorization *authorization.Service
 	Agents        *agent.Service
+	Invitations   *invitation.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
