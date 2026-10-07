@@ -125,14 +125,15 @@ func TestEvaluateAssignmentRightCoverage(t *testing.T) {
 	if err != nil || len(result.Rights) != 1 {
 		t.Fatalf("group right cannot cover a Space right = %+v, %v", result, err)
 	}
-	parent := Right{Holder: "mem_parent", Position: Node{Kind: Space, ID: "spc_root"}, Permissions: []string{"document:read"}, Anchor: Node{Kind: Space, ID: "spc_root"}, Descendants: true, Delegate: true, ExpiresAt: time.Now().UTC().Add(time.Hour)}
+	base := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	parent := Right{Holder: "mem_parent", Position: Node{Kind: Space, ID: "spc_root"}, Permissions: []string{"document:read"}, Anchor: Node{Kind: Space, ID: "spc_root"}, Descendants: true, Delegate: true, ExpiresAt: base.Add(time.Hour)}
 	candidate := parent
-	candidate.ExpiresAt = time.Now().UTC().Add(2 * time.Hour)
+	candidate.ExpiresAt = base.Add(2 * time.Hour)
 	result, err = Evaluate(Snapshot{Rights: []Right{parent}}, Snapshot{Rights: []Right{candidate}}, graph)
 	if err != nil || len(result.Rights) != 1 {
 		t.Fatalf("assignment right outliving its parent = %+v, %v", result, err)
 	}
-	candidate.ExpiresAt = time.Now().UTC().Add(30 * time.Minute)
+	candidate.ExpiresAt = base.Add(30 * time.Minute)
 	result, err = Evaluate(Snapshot{Rights: []Right{parent}}, Snapshot{Rights: []Right{candidate}}, graph)
 	if err != nil || len(result.Rights) != 0 {
 		t.Fatalf("assignment right within parent expiry = %+v, %v", result, err)
