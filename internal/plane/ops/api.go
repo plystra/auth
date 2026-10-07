@@ -86,6 +86,10 @@ type OperatorDisableInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
 }
+type UserActionInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
 type OperatorOutput struct {
 	Body struct {
 		Data operator.Operator `json:"data"`
@@ -112,6 +116,8 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.Spec{Name: "ops.operators.create", Method: "POST", Path: "/ops/v1/operators", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.createOperator)
 	route.Register(api, route.Spec{Name: "ops.operators.update", Method: "PATCH", Path: "/ops/v1/operators/{id}", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.updateOperator)
 	route.Register(api, route.Spec{Name: "ops.operators.disable", Method: "POST", Path: "/ops/v1/operators/{id}/disable", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.disableOperator)
+	route.Register(api, route.Spec{Name: "ops.users.suspend", Method: "POST", Path: "/ops/v1/users/{id}/suspend", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.suspendUser)
+	route.Register(api, route.Spec{Name: "ops.users.sign_out_all", Method: "POST", Path: "/ops/v1/users/{id}/sign-out-all", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.signOutAllUserSessions)
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)
@@ -201,6 +207,39 @@ func (a *API) disableOperator(ctx context.Context, in *OperatorDisableInput) (*A
 		return nil, err
 	}
 	if err = a.Operators.Disable(ctx, token, in.ID, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+func (a *API) suspendUser(ctx context.Context, in *UserActionInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(struct {
+		ID string `json:"id"`
+	}{ID: in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Operators.SuspendUser(ctx, token, in.ID, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+
+func (a *API) signOutAllUserSessions(ctx context.Context, in *UserActionInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(struct {
+		ID string `json:"id"`
+	}{ID: in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Operators.SignOutAllUserSessions(ctx, token, in.ID, digest); err != nil {
 		return nil, err
 	}
 	return accepted(), nil

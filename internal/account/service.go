@@ -220,30 +220,36 @@ func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) 
 // and audit record share one transaction so no session survives a committed
 // state change.
 func (s *Service) SetUserStatus(ctx context.Context, actorType, actorID, userID, status string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		return SetUserStatusTx(ctx, q, actorType, actorID, userID, status)
+	})
+}
+
+// SetUserStatusTx is the transaction-aware form used by the operations plane.
+// The caller owns the surrounding transaction and its operator-session audit.
+func SetUserStatusTx(ctx context.Context, q *db.Queries, actorType, actorID, userID, status string) error {
 	if status != "pending" && status != "active" && status != "suspended" && status != "disabled" {
 		return apierr.New("VALIDATION_FAILED", "user status is invalid")
 	}
-	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "user was not found")
-		}
-		if err != nil {
+	user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("NOT_FOUND", "user was not found")
+	}
+	if err != nil {
+		return err
+	}
+	if err := q.SetUserStatus(ctx, db.SetUserStatusParams{ID: user.ID, Status: status}); err != nil {
+		return err
+	}
+	if status == "suspended" || status == "disabled" {
+		if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: user.ID}); err != nil {
 			return err
 		}
-		if err := q.SetUserStatus(ctx, db.SetUserStatusParams{ID: user.ID, Status: status}); err != nil {
+		if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: user.ID}); err != nil {
 			return err
 		}
-		if status == "suspended" || status == "disabled" {
-			if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: user.ID}); err != nil {
-				return err
-			}
-			if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: user.ID}); err != nil {
-				return err
-			}
-		}
-		return audit.Write(ctx, q, actorType, actorID, "user.status.update", user.ID, "success")
-	})
+	}
+	return audit.Write(ctx, q, actorType, actorID, "user.status.update", user.ID, "success")
 }
 
 func toPublicUser(id, email string, verified bool, status string, createdAt time.Time) User {

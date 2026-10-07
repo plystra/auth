@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
@@ -53,6 +54,7 @@ var knownCapabilities = map[string]struct{}{
 	"ops:settings:write":   {},
 	"ops:operators:read":   {},
 	"ops:operators:manage": {},
+	"ops:users:manage":     {},
 }
 
 type Operator struct {
@@ -306,7 +308,7 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 
 func (s *Service) StepUp(ctx context.Context, raw, code, operation string, digest []byte) error {
 	switch operation {
-	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable":
+	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.users.suspend", "ops.users.sign_out_all":
 	default:
 		return s.failure(ctx, "", "ops.auth.step_up", apierr.New("VALIDATION_FAILED", "An implemented operation and its request digest are required."))
 	}
@@ -325,6 +327,29 @@ func (s *Service) StepUp(ctx context.Context, raw, code, operation string, diges
 		}
 		_, err := q.StepUpOperatorSession(ctx, db.StepUpOperatorSessionParams{ID: current.ID, Operation: nullable(operation), Digest: digest})
 		return err
+	})
+}
+
+func (s *Service) SuspendUser(ctx context.Context, raw, userID string, digest []byte) error {
+	return s.Run(ctx, raw, "ops.users.suspend", "ops:users:manage", digest, func(q *db.Queries, current Session) error {
+		return account.SetUserStatusTx(ctx, q, "operator", current.UserID, userID, "suspended")
+	})
+}
+
+func (s *Service) SignOutAllUserSessions(ctx context.Context, raw, userID string, digest []byte) error {
+	return s.Run(ctx, raw, "ops.users.sign_out_all", "ops:users:manage", digest, func(q *db.Queries, current Session) error {
+		if _, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID}); errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "user was not found")
+		} else if err != nil {
+			return err
+		}
+		if err := q.RevokeUserSessions(ctx, db.RevokeUserSessionsParams{UserID: userID}); err != nil {
+			return err
+		}
+		if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: userID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "operator", current.UserID, "user.sessions.revoke", userID, "success")
 	})
 }
 

@@ -211,6 +211,51 @@ func TestOperatorMutationRollsBackWhenAuditFails(t *testing.T) {
 	}
 }
 
+func TestOperatorCanSuspendUserAndRevokeAllCredentials(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	insertOperator(t, st, "usr_status_operator", "status-operator", `["ops:users:manage"]`)
+	insertOperator(t, st, "usr_status_target", "status-target", `[]`)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO sessions (id, user_id, token_hash, expires_at)
+		VALUES ('ses_operator_status', 'usr_status_target', decode(repeat('55', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO refresh_tokens (id, session_id, family_id, token_hash, expires_at)
+		VALUES ('rft_operator_status', 'ses_operator_status', 'rtf_operator_status', decode(repeat('66', 32), 'hex'), now() + interval '1 hour')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	key := []byte(strings.Repeat("h", 32))
+	raw := insertOperatorSession(t, st, "usr_status_operator", key, nil)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SuspendUser(ctx, raw, "usr_status_target", nil); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM users WHERE id = 'usr_status_target'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "suspended" {
+		t.Fatalf("user status = %q, want suspended", status)
+	}
+	var activeSessions, activeRefreshTokens int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE id = 'ses_operator_status' AND revoked_at IS NULL`).Scan(&activeSessions); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = 'rft_operator_status' AND revoked_at IS NULL`).Scan(&activeRefreshTokens); err != nil {
+		t.Fatal(err)
+	}
+	if activeSessions != 0 || activeRefreshTokens != 0 {
+		t.Fatalf("credentials after operator suspension: sessions=%d refresh_tokens=%d", activeSessions, activeRefreshTokens)
+	}
+}
+
 func newOperatorStore(t *testing.T) *store.Store {
 	t.Helper()
 	database, err := operatorDB.Clone(context.Background())
