@@ -218,7 +218,7 @@ func TestPlaneMaintenanceDoesNotAffectOtherPlanes(t *testing.T) {
 			for {
 				response, err := http.Get(test.url)
 				if err == nil {
-					defer response.Body.Close()
+					defer func() { _ = response.Body.Close() }()
 					if response.StatusCode != test.want {
 						t.Fatalf("status = %d, want %d", response.StatusCode, test.want)
 					}

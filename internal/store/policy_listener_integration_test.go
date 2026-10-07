@@ -31,7 +31,7 @@ func TestPolicyListenerInvalidatesOnCommitAndReconnect(t *testing.T) {
 
 	var notified atomic.Bool
 	listener := store.NewPolicyListener(ctx, st.Pool, func() { notified.Store(true) })
-	defer listener.Close(context.Background())
+	defer func() { _ = listener.Close(context.Background()) }()
 	waitForInvalidations(t, listener, 1)
 
 	if _, err := st.Pool.Exec(ctx, `SELECT pg_notify('auth_policy', 'spc_test')`); err != nil {
