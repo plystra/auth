@@ -42,6 +42,12 @@ func (s *Store) Close() {
 }
 func (s *Store) Queries() *db.Queries { return db.New(s.Pool) }
 func (s *Store) InTx(ctx context.Context, fn func(*db.Queries) error) error {
+	if request := requestTransaction(ctx); request != nil {
+		if request.closed {
+			return fmt.Errorf("request transaction is closed")
+		}
+		return request.inTx(ctx, fn)
+	}
 	// The store is the single permitted transaction boundary.
 	tx, err := s.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {

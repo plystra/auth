@@ -94,6 +94,73 @@ func (q *Queries) CanManageAgent(ctx context.Context, arg CanManageAgentParams) 
 	return can_manage, err
 }
 
+const claimStaleIdempotencyKey = `-- name: ClaimStaleIdempotencyKey :one
+UPDATE idempotency_keys
+SET state = 'pending', status_code = NULL, response_headers = '{}'::jsonb,
+    response_body = NULL, request_hash = $1,
+    updated_at = now(), expires_at = $2
+WHERE id = $3
+  AND state = 'pending'
+  AND updated_at < now() - interval '1 minute'
+RETURNING id, scope_hash, method, path, idempotency_key, request_hash, state,
+          status_code, response_headers, response_body, created_at, updated_at, expires_at
+`
+
+type ClaimStaleIdempotencyKeyParams struct {
+	RequestHash []byte             `json:"request_hash"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID          string             `json:"id"`
+}
+
+func (q *Queries) ClaimStaleIdempotencyKey(ctx context.Context, arg ClaimStaleIdempotencyKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, claimStaleIdempotencyKey, arg.RequestHash, arg.ExpiresAt, arg.ID)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.ScopeHash,
+		&i.Method,
+		&i.Path,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.State,
+		&i.StatusCode,
+		&i.ResponseHeaders,
+		&i.ResponseBody,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const completeIdempotencyKey = `-- name: CompleteIdempotencyKey :execrows
+UPDATE idempotency_keys
+SET state = 'completed', status_code = $1,
+    response_headers = $2, response_body = $3,
+    updated_at = now()
+WHERE id = $4 AND state = 'pending' AND expires_at > now()
+`
+
+type CompleteIdempotencyKeyParams struct {
+	StatusCode      pgtype.Int4 `json:"status_code"`
+	ResponseHeaders []byte      `json:"response_headers"`
+	ResponseBody    []byte      `json:"response_body"`
+	ID              string      `json:"id"`
+}
+
+func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempotencyKeyParams) (int64, error) {
+	result, err := q.db.Exec(ctx, completeIdempotencyKey,
+		arg.StatusCode,
+		arg.ResponseHeaders,
+		arg.ResponseBody,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = $1::bigint, last_used_at = now()
 WHERE id = $2 AND counter < $1::bigint RETURNING id
@@ -578,6 +645,32 @@ func (q *Queries) DeleteAgentSubtree(ctx context.Context, arg DeleteAgentSubtree
 	return err
 }
 
+const deleteExpiredIdempotencyKey = `-- name: DeleteExpiredIdempotencyKey :exec
+DELETE FROM idempotency_keys
+WHERE scope_hash = $1
+  AND method = $2
+  AND path = $3
+  AND idempotency_key = $4
+  AND expires_at <= now()
+`
+
+type DeleteExpiredIdempotencyKeyParams struct {
+	ScopeHash      string `json:"scope_hash"`
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (q *Queries) DeleteExpiredIdempotencyKey(ctx context.Context, arg DeleteExpiredIdempotencyKeyParams) error {
+	_, err := q.db.Exec(ctx, deleteExpiredIdempotencyKey,
+		arg.ScopeHash,
+		arg.Method,
+		arg.Path,
+		arg.IdempotencyKey,
+	)
+	return err
+}
+
 const getAgentCredentialByPrefix = `-- name: GetAgentCredentialByPrefix :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
@@ -831,6 +924,50 @@ func (q *Queries) GetGroupInSpace(ctx context.Context, arg GetGroupInSpaceParams
 		&i.OwnerMemberID,
 		&i.Status,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getIdempotencyKey = `-- name: GetIdempotencyKey :one
+SELECT id, scope_hash, method, path, idempotency_key, request_hash, state,
+       status_code, response_headers, response_body, created_at, updated_at, expires_at
+FROM idempotency_keys
+WHERE scope_hash = $1
+  AND method = $2
+  AND path = $3
+  AND idempotency_key = $4
+  AND expires_at > now()
+`
+
+type GetIdempotencyKeyParams struct {
+	ScopeHash      string `json:"scope_hash"`
+	Method         string `json:"method"`
+	Path           string `json:"path"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+func (q *Queries) GetIdempotencyKey(ctx context.Context, arg GetIdempotencyKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, getIdempotencyKey,
+		arg.ScopeHash,
+		arg.Method,
+		arg.Path,
+		arg.IdempotencyKey,
+	)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.ScopeHash,
+		&i.Method,
+		&i.Path,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.State,
+		&i.StatusCode,
+		&i.ResponseHeaders,
+		&i.ResponseBody,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
 	)
 	return i, err
 }
@@ -1114,6 +1251,58 @@ type GrantRolePermissionParams struct {
 func (q *Queries) GrantRolePermission(ctx context.Context, arg GrantRolePermissionParams) error {
 	_, err := q.db.Exec(ctx, grantRolePermission, arg.RoleID, arg.PermissionID)
 	return err
+}
+
+const insertIdempotencyKey = `-- name: InsertIdempotencyKey :one
+INSERT INTO idempotency_keys (
+    id, scope_hash, method, path, idempotency_key, request_hash, expires_at
+)
+VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7
+)
+ON CONFLICT (scope_hash, method, path, idempotency_key) DO NOTHING
+RETURNING id, scope_hash, method, path, idempotency_key, request_hash, state,
+          status_code, response_headers, response_body, created_at, updated_at, expires_at
+`
+
+type InsertIdempotencyKeyParams struct {
+	ID             string             `json:"id"`
+	ScopeHash      string             `json:"scope_hash"`
+	Method         string             `json:"method"`
+	Path           string             `json:"path"`
+	IdempotencyKey string             `json:"idempotency_key"`
+	RequestHash    []byte             `json:"request_hash"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotencyKeyParams) (IdempotencyKey, error) {
+	row := q.db.QueryRow(ctx, insertIdempotencyKey,
+		arg.ID,
+		arg.ScopeHash,
+		arg.Method,
+		arg.Path,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+		arg.ExpiresAt,
+	)
+	var i IdempotencyKey
+	err := row.Scan(
+		&i.ID,
+		&i.ScopeHash,
+		&i.Method,
+		&i.Path,
+		&i.IdempotencyKey,
+		&i.RequestHash,
+		&i.State,
+		&i.StatusCode,
+		&i.ResponseHeaders,
+		&i.ResponseBody,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ExpiresAt,
+	)
+	return i, err
 }
 
 const linkUserMember = `-- name: LinkUserMember :exec

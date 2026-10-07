@@ -20,6 +20,7 @@ import (
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
+	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
@@ -174,6 +175,39 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	opsAPI := &ops.API{Settings: settings, Operators: opsSvc}
+	validateCredential := func(ctx context.Context, plane, raw string) error {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return nil
+		}
+		parts := strings.Fields(raw)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+			return apierr.New("UNAUTHENTICATED", "a valid bearer credential is required")
+		}
+		raw = parts[1]
+		switch route.Plane(plane) {
+		case route.Principal:
+			if strings.HasPrefix(raw, "ply_ag_") {
+				_, err := agentSvc.AuthenticateKey(ctx, raw)
+				return err
+			}
+			_, active, err := sessionSvc.Introspect(ctx, raw, security.DefaultApplicationAudience)
+			if err != nil {
+				return err
+			}
+			if !active {
+				return apierr.New("UNAUTHENTICATED", "the access token is no longer active")
+			}
+			return nil
+		case route.Server:
+			_, err := apps.AuthenticateKey(ctx, raw)
+			return err
+		case route.Ops:
+			return opsSvc.Validate(ctx, raw)
+		default:
+			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "credential plane is not supported")
+		}
+	}
 	principalMux := http.NewServeMux()
 	serverMux := http.NewServeMux()
 	opsMux := http.NewServeMux()
@@ -207,7 +241,7 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicy(route.Principal, principalMux, principalOriginPolicy), "principal"), otelhttp.NewHandler(route.Middleware(route.Server, serverMux), "server"), otelhttp.NewHandler(route.Middleware(route.Ops, opsMux), "ops"), health)
+	servers := planeServers(c, ":8090", otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, principalMux, principalOriginPolicy, st, validateCredential), "principal"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Server, serverMux, st, validateCredential), "server"), otelhttp.NewHandler(route.MiddlewareWithIdempotency(route.Ops, opsMux, st, validateCredential), "ops"), health)
 	errs := make(chan error, len(servers))
 	for _, srv := range servers {
 		go func(srv *http.Server) { slog.Info("starting listener", "addr", srv.Addr); errs <- srv.ListenAndServe() }(srv)

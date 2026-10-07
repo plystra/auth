@@ -306,6 +306,47 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 	return nil
 }
 
+// Validate checks an operations credential without touching its session or
+// writing an audit event. HTTP idempotency uses it before replaying a stored
+// response so revocation and expiry remain effective.
+func (s *Service) Validate(ctx context.Context, raw string) error {
+	if !strings.HasPrefix(raw, "ply_ops_") {
+		return apierr.New("CREDENTIAL_PLANE_MISMATCH", "An operations session is required.")
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(raw, "ply_ops_"))
+	if err != nil || len(b) != 32 {
+		return invalidCredentials()
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		var row db.OperatorSession
+		found := false
+		for _, key := range s.HMACKeys {
+			row, err = q.LockOperatorSession(ctx, db.LockOperatorSessionParams{TokenHash: hashWithKey(raw, key)})
+			if err == nil {
+				found = true
+				break
+			}
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+		}
+		if !found {
+			return invalidCredentials()
+		}
+		op, err := q.LockOperatorIdentity(ctx, db.LockOperatorIdentityParams{UserID: row.UserID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return invalidCredentials()
+		}
+		if err != nil {
+			return err
+		}
+		if !op.Active || op.DisabledAt.Valid || row.AssuranceLevel < 2 {
+			return invalidCredentials()
+		}
+		return nil
+	})
+}
+
 func (s *Service) StepUp(ctx context.Context, raw, code, operation string, digest []byte) error {
 	switch operation {
 	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.users.suspend", "ops.users.sign_out_all", "ops.users.require_password_reset":

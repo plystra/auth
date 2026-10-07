@@ -1,14 +1,18 @@
 package route
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/idempotency"
 )
 
 func TestServerMiddlewareRejectsBrowserOrigin(t *testing.T) {
@@ -156,4 +160,119 @@ func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
 	if !strings.Contains(body, `"code":"UNAVAILABLE"`) || strings.Contains(body, "database connection details") {
 		t.Fatalf("response = %s, want sanitized UNAVAILABLE error", body)
 	}
+}
+
+type fakeIdempotencyManager struct {
+	mu           sync.Mutex
+	hash         []byte
+	completed    *idempotency.Response
+	reservations int
+}
+
+type fakeIdempotencyTx struct {
+	manager *fakeIdempotencyManager
+	closed  bool
+}
+
+func (m *fakeIdempotencyManager) BeginIdempotency(context.Context) (idempotency.Transaction, error) {
+	return &fakeIdempotencyTx{manager: m}, nil
+}
+
+func (t *fakeIdempotencyTx) Context(ctx context.Context) context.Context { return ctx }
+
+func (t *fakeIdempotencyTx) Reserve(_ context.Context, in idempotency.Request) (idempotency.Reservation, error) {
+	t.manager.mu.Lock()
+	defer t.manager.mu.Unlock()
+	if t.manager.hash == nil {
+		t.manager.hash = append([]byte(nil), in.RequestHash...)
+		t.manager.reservations++
+		return idempotency.Reservation{ID: "idk_test"}, nil
+	}
+	if !bytes.Equal(t.manager.hash, in.RequestHash) {
+		return idempotency.Reservation{Conflict: true}, nil
+	}
+	if t.manager.completed != nil {
+		return idempotency.Reservation{Replay: true, StatusCode: t.manager.completed.StatusCode, Headers: t.manager.completed.Headers, Body: t.manager.completed.Body}, nil
+	}
+	return idempotency.Reservation{InProgress: true}, nil
+}
+
+func (t *fakeIdempotencyTx) Complete(_ context.Context, _ string, response idempotency.Response) error {
+	t.manager.mu.Lock()
+	defer t.manager.mu.Unlock()
+	copyResponse := response
+	copyResponse.Body = append([]byte(nil), response.Body...)
+	t.manager.completed = &copyResponse
+	return nil
+}
+
+func (t *fakeIdempotencyTx) Commit(context.Context) error   { t.closed = true; return nil }
+func (t *fakeIdempotencyTx) Rollback(context.Context) error { t.closed = true; return nil }
+
+func TestIdempotencyValidatesCredentialBeforeReplayAndReusesCommittedResponse(t *testing.T) {
+	manager := &fakeIdempotencyManager{}
+	calls := 0
+	validate := func(_ context.Context, _ string, raw string) error {
+		if raw != "Bearer valid" {
+			return apierr.New("UNAUTHENTICATED", "credential is inactive")
+		}
+		return nil
+	}
+	handler := MiddlewareWithIdempotency(Principal, managerHandler(&calls), manager, validate)
+	request := func(body, authorization string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "http://auth.test/v1/members", strings.NewReader(body))
+		req.Header.Set("Idempotency-Key", "member-create-1")
+		req.Header.Set("Authorization", authorization)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+	first := request(`{"name":"one"}`, "Bearer valid")
+	if first.Code != http.StatusCreated || calls != 1 {
+		t.Fatalf("first response = (%d, calls=%d), want created and one call", first.Code, calls)
+	}
+	replay := request(`{"name":"one"}`, "Bearer valid")
+	if replay.Code != http.StatusCreated || replay.Header().Get("Idempotency-Replayed") != "true" || calls != 1 {
+		t.Fatalf("replay = (%d, replay=%q, calls=%d)", replay.Code, replay.Header().Get("Idempotency-Replayed"), calls)
+	}
+	invalid := request(`{"name":"one"}`, "Bearer revoked")
+	if invalid.Code != http.StatusUnauthorized || !strings.Contains(invalid.Body.String(), "UNAUTHENTICATED") || calls != 1 {
+		t.Fatalf("invalid credential replay = (%d, %s, calls=%d)", invalid.Code, invalid.Body.String(), calls)
+	}
+	conflict := request(`{"name":"two"}`, "Bearer valid")
+	if conflict.Code != http.StatusConflict || !strings.Contains(conflict.Body.String(), "IDEMPOTENCY_KEY_REUSED") || calls != 1 {
+		t.Fatalf("changed request = (%d, %s, calls=%d)", conflict.Code, conflict.Body.String(), calls)
+	}
+}
+
+func TestIdempotencyRejectsInvalidKeyAndOversizedBody(t *testing.T) {
+	manager := &fakeIdempotencyManager{}
+	calls := 0
+	handler := MiddlewareWithIdempotency(Principal, managerHandler(&calls), manager, nil)
+	invalid := httptest.NewRequest(http.MethodPost, "http://auth.test/v1/members", strings.NewReader(`{}`))
+	invalid.Header.Set("Idempotency-Key", "bad\nkey")
+	invalidResponse := httptest.NewRecorder()
+	handler.ServeHTTP(invalidResponse, invalid)
+	if invalidResponse.Code != http.StatusBadRequest || !strings.Contains(invalidResponse.Body.String(), "IDEMPOTENCY_KEY_INVALID") {
+		t.Fatalf("invalid key response = (%d, %s)", invalidResponse.Code, invalidResponse.Body.String())
+	}
+	oversized := httptest.NewRequest(http.MethodPost, "http://auth.test/v1/members", strings.NewReader(strings.Repeat("x", maxIdempotencyBody+1)))
+	oversized.Header.Set("Idempotency-Key", "large-body")
+	oversizedResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oversizedResponse, oversized)
+	if oversizedResponse.Code != http.StatusRequestEntityTooLarge || !strings.Contains(oversizedResponse.Body.String(), "REQUEST_BODY_TOO_LARGE") {
+		t.Fatalf("oversized body response = (%d, %s)", oversizedResponse.Code, oversizedResponse.Body.String())
+	}
+	if calls != 0 || manager.reservations != 0 {
+		t.Fatalf("handler/reservation ran for invalid idempotency input: calls=%d reservations=%d", calls, manager.reservations)
+	}
+}
+
+func managerHandler(calls *int) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*calls++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"created":true}`))
+	})
 }

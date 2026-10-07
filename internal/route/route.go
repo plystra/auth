@@ -10,6 +10,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/idempotency"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/requestinfo"
 )
@@ -116,14 +117,22 @@ func WithPlane(ctx context.Context, p Plane) context.Context {
 	return context.WithValue(ctx, planeKey{}, p)
 }
 func Middleware(p Plane, next http.Handler) http.Handler {
-	return middleware(p, next, nil)
+	return middleware(p, next, nil, nil, nil)
 }
 
 func MiddlewareWithOriginPolicy(p Plane, next http.Handler, policy OriginPolicy) http.Handler {
-	return middleware(p, next, policy)
+	return middleware(p, next, policy, nil, nil)
 }
 
-func middleware(p Plane, next http.Handler, originPolicy OriginPolicy) http.Handler {
+func MiddlewareWithIdempotency(p Plane, next http.Handler, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
+	return middleware(p, next, nil, manager, validate)
+}
+
+func MiddlewareWithOriginPolicyAndIdempotency(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
+	return middleware(p, next, policy, manager, validate)
+}
+
+func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if id == "" || len(id) > 128 {
@@ -164,6 +173,11 @@ func middleware(p Plane, next http.Handler, originPolicy OriginPolicy) http.Hand
 				return
 			}
 		}
-		next.ServeHTTP(w, r.WithContext(ctx))
+		request := r.WithContext(ctx)
+		if manager != nil && isWriteMethod(r.Method) {
+			serveIdempotent(w, request, next, p, manager, validate)
+			return
+		}
+		next.ServeHTTP(w, request)
 	})
 }
