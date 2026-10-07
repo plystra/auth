@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/store"
@@ -131,6 +132,41 @@ func TestTOTPConcurrentVerificationConsumesTheTimeStepOnce(t *testing.T) {
 	}
 	if successes != 1 || rejected != 1 {
 		t.Fatalf("concurrent TOTP verification: successes=%d rejected=%d", successes, rejected)
+	}
+}
+
+func TestTOTPInvalidAttemptsAreRateLimitedWithoutStoringIdentity(t *testing.T) {
+	ctx := context.Background()
+	st := newFactorStore(t)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_factor_rate', 'factor-rate@example.test', 'factor-rate@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	factors := &Service{Store: st, DataKey: secretKey(), Limiter: &store.RateLimiter{Store: st}}
+	enrollment, err := factors.BeginTOTP(ctx, "usr_factor_rate", "factor-rate@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 5; attempt++ {
+		err := factors.VerifyTOTP(ctx, "usr_factor_rate", enrollment.FactorID, "abcdef")
+		if !errors.Is(err, ErrInvalidCode) {
+			t.Fatalf("invalid TOTP attempt %d error = %v, want ErrInvalidCode", attempt, err)
+		}
+	}
+	err = factors.VerifyTOTP(ctx, "usr_factor_rate", enrollment.FactorID, "abcdef")
+	var rateErr *apierr.Error
+	if !errors.As(err, &rateErr) || rateErr.Code != "rate_limited" {
+		t.Fatalf("sixth invalid TOTP attempt error = %v, want rate_limited", err)
+	}
+	var bucketKey string
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT bucket_key, count FROM rate_limit_buckets`).Scan(&bucketKey, &count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 6 || strings.Contains(bucketKey, "usr_factor_rate") || strings.Contains(bucketKey, enrollment.FactorID) || len(bucketKey) != 43 {
+		t.Fatalf("TOTP failure bucket leaked identity or has wrong count/key: key=%q count=%d", bucketKey, count)
 	}
 }
 

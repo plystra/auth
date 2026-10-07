@@ -151,11 +151,12 @@ func serve(ctx context.Context) error {
 	settings := &space.Service{Store: st}
 	authorizationSvc := &authorization.Service{Store: st}
 	agentSvc := &agent.Service{Store: st}
+	limiter := &store.RateLimiter{Store: st}
 	dataKey, e := decodeDataKey(c.DataKey)
 	if e != nil {
 		return e
 	}
-	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey)}
+	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter}
 	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	sessionSvc.Settings = func(ctx context.Context) (session.Settings, error) {
 		v, e := settings.Get(ctx)
@@ -164,7 +165,6 @@ func serve(ctx context.Context) error {
 		}
 		return session.Settings{AccessTTL: v.AccessTokenTTL, RefreshTTL: v.RefreshTokenTTL, RefreshIdleTTL: v.RefreshIdleTTL}, nil
 	}
-	limiter := &store.RateLimiter{Store: st}
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
 	apps := &application.Service{Store: st}
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc}

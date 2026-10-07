@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/secret"
@@ -24,6 +25,7 @@ import (
 type Service struct {
 	Store   *store.Store
 	DataKey secret.String
+	Limiter *store.RateLimiter
 }
 type Enrollment struct {
 	FactorID string        `json:"factor_id"`
@@ -92,9 +94,21 @@ func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userI
 	return Enrollment{FactorID: string(id), Secret: secret.New(raw), URI: uri}, nil
 }
 func (s *Service) VerifyTOTP(ctx context.Context, userID, factorID, code string) error {
-	return s.Store.InTx(ctx, func(q *db.Queries) error {
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		return s.VerifyTOTPTx(ctx, q, userID, factorID, code, time.Now().UTC())
 	})
+	if !errors.Is(err, ErrInvalidCode) || s.Limiter == nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte("plystra-auth-totp-failure:" + userID + ":" + factorID))
+	allowed, limitErr := s.Limiter.Allow(ctx, base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
+	if limitErr != nil {
+		return limitErr
+	}
+	if !allowed {
+		return apierr.New("rate_limited", "too many one-time code attempts")
+	}
+	return err
 }
 
 // VerifyTOTPTx consumes the time step while holding factor locks so concurrent
