@@ -300,6 +300,27 @@ func TestSQLCUsesMigrationSchemaAndGeneratedDBOutput(t *testing.T) {
 	}
 }
 
+func TestSQLCGeneratesQueriesIntoDomainDBPackages(t *testing.T) {
+	root := repositoryRoot(t)
+	config, err := os.ReadFile(filepath.Join(root, "sqlc.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(config)
+	for _, domain := range []string{
+		"account", "session", "space", "audit", "application", "agent", "factor",
+		"member", "grant", "authorization", "store", "operator", "invitation", "idempotency",
+	} {
+		path := "internal/" + domain + "/db"
+		if !strings.Contains(source, "out: \""+path+"\"") {
+			t.Errorf("sqlc.yaml is missing domain output %q", path)
+		}
+		if _, err := os.Stat(filepath.Join(root, path, "db.go")); err != nil {
+			t.Errorf("generated domain sqlc output %s/db.go is missing: %v", path, err)
+		}
+	}
+}
+
 func TestSchemaSnapshotContainsMigrationDerivedAuthorizationTables(t *testing.T) {
 	root := repositoryRoot(t)
 	snapshot, err := os.ReadFile(filepath.Join(root, "schema", "schema.sql"))

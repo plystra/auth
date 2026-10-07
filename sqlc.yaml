@@ -32,6 +32,272 @@ sql:
         emit_empty_slices: true
         query_parameter_limit: 0
 
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/account/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/account/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/session/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/session/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/space/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/space/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/audit/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/audit/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/application/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/application/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/agent"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/agent/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/factor"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/factor/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/member"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/member/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/grant"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/grant/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/authorization/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/authorization/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/store"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/store/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/operator/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/operator/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/invitation/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/invitation/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/idempotency"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/idempotency/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
 
 
 
