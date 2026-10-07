@@ -336,7 +336,7 @@ func checkReadiness(ctx context.Context, ping, migrations func(context.Context) 
 }
 
 func registerJWKS(mux route.HandlerMux, signer *security.Signer) {
-	route.RegisterNonJSON(mux, route.Spec{Name: "jwks", Method: "GET", Path: "/.well-known/jwks.json", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	route.RegisterNonJSON(mux, route.NewSpec("jwks", "GET", "/.well-known/jwks.json", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		jwks, err := signer.JWKS()
 		if err != nil {

@@ -138,6 +138,41 @@ func TestAgentsGuideMapsChangesToSourcesAndVerification(t *testing.T) {
 	}
 }
 
+func TestRouteDeclarationsUseCompileTimeConstructor(t *testing.T) {
+	root := repositoryRoot(t)
+	var compositeLiterals []string
+	needle := "route." + "Spec{"
+	err := filepath.Walk(filepath.Join(root, "internal"), func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || filepath.Ext(path) != ".go" {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(data), needle) {
+			compositeLiterals = append(compositeLiterals, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(compositeLiterals) != 0 {
+		t.Fatalf("route.Spec composite literals bypass NewSpec: %v", compositeLiterals)
+	}
+	routeSource, err := os.ReadFile(filepath.Join(root, "internal", "route", "route.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(routeSource), "func NewSpec(name, method, path string, plane Plane, permission string, subjects []Subject") {
+		t.Fatal("route.NewSpec does not require all declaration fields")
+	}
+}
+
 func TestMakeDevUsesDockerComposeDevelopmentStack(t *testing.T) {
 	root := repositoryRoot(t)
 	makefile, err := os.ReadFile(filepath.Join(root, "Makefile"))

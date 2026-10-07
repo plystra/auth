@@ -78,12 +78,12 @@ type agentAcceptedOutput struct {
 }
 
 func (a *API) registerAgentRoutes(api huma.API) {
-	route.Register(api, route.Spec{Name: "me.agents.list", Method: "GET", Path: "/v1/me/agents", Plane: route.Principal, Permission: "self:read", Subjects: []route.Subject{route.HumanAgent}}, a.listAgents)
-	route.Register(api, route.Spec{Name: "me.agents.create", Method: "POST", Path: "/v1/me/agents", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}, StepUp: true, AuthoritativeCheck: true}, a.createAgent)
-	route.Register(api, route.Spec{Name: "me.agents.rotate", Method: "POST", Path: "/v1/me/agents/{id}/rotate", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.rotateAgent)
-	route.Register(api, route.Spec{Name: "me.agents.grants.replace", Method: "PUT", Path: "/v1/me/agents/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.replaceAgentGrants)
-	route.Register(api, route.Spec{Name: "me.agents.stop", Method: "POST", Path: "/v1/me/agents/{id}/stop", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}}, a.stopAgent)
-	route.Register(api, route.Spec{Name: "me.agents.delete", Method: "DELETE", Path: "/v1/me/agents/{id}", Plane: route.Principal, Permission: "auth.agents:create", Subjects: []route.Subject{route.HumanAgent}}, a.deleteAgent)
+	route.Register(api, route.NewSpec("me.agents.list", "GET", "/v1/me/agents", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.listAgents)
+	route.Register(api, route.NewSpec("me.agents.create", "POST", "/v1/me/agents", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAgent)
+	route.Register(api, route.NewSpec("me.agents.rotate", "POST", "/v1/me/agents/{id}/rotate", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateAgent)
+	route.Register(api, route.NewSpec("me.agents.grants.replace", "PUT", "/v1/me/agents/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.replaceAgentGrants)
+	route.Register(api, route.NewSpec("me.agents.stop", "POST", "/v1/me/agents/{id}/stop", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.stopAgent)
+	route.Register(api, route.NewSpec("me.agents.delete", "DELETE", "/v1/me/agents/{id}", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.deleteAgent)
 }
 
 func (a *API) listAgents(ctx context.Context, in *agentsListInput) (*agentsListOutput, error) {

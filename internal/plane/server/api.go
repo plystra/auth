@@ -159,10 +159,10 @@ type resolvedSubject struct {
 }
 
 func (a *API) Register(api huma.API) {
-	route.Register(api, route.Spec{Name: "authz.check", Method: "POST", Path: "/server/v1/authz/check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.check)
-	route.Register(api, route.Spec{Name: "authz.batch_check", Method: "POST", Path: "/server/v1/authz/batch-check", Plane: route.Server, Permission: "auth.authz:check", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true, MaxBodyBytes: 256 * 1024}, a.batchCheck)
-	route.Register(api, route.Spec{Name: "authz.explain", Method: "POST", Path: "/server/v1/authz/explain", Plane: route.Server, Permission: "auth.authz:explain", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.explain)
-	route.Register(api, route.Spec{Name: "tokens.introspect", Method: "POST", Path: "/server/v1/tokens/introspect", Plane: route.Server, Permission: "auth.tokens:introspect", Subjects: []route.Subject{route.HumanAgent}}, a.introspect)
+	route.Register(api, route.NewSpec("authz.check", "POST", "/server/v1/authz/check", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.check)
+	route.Register(api, route.NewSpec("authz.batch_check", "POST", "/server/v1/authz/batch-check", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(256*1024)), a.batchCheck)
+	route.Register(api, route.NewSpec("authz.explain", "POST", "/server/v1/authz/explain", route.Server, "auth.authz:explain", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.explain)
+	route.Register(api, route.NewSpec("tokens.introspect", "POST", "/server/v1/tokens/introspect", route.Server, "auth.tokens:introspect", []route.Subject{route.HumanAgent}), a.introspect)
 }
 
 func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {

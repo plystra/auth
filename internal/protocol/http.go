@@ -23,17 +23,17 @@ type HTTP struct {
 }
 
 func (h HTTP) Register(mux route.HandlerMux) {
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.metadata", Method: "GET", Path: "/.well-known/oauth-authorization-server", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.metadata))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oidc.metadata", Method: "GET", Path: "/.well-known/openid-configuration", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.metadata))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.authorize", Method: "GET", Path: "/oauth/authorize", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.authorize))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.token", Method: "POST", Path: "/oauth/token", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.token))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.revoke", Method: "POST", Path: "/oauth/revoke", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.device_authorization", Method: "POST", Path: "/oauth/device_authorization", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.register", Method: "POST", Path: "/oauth/register", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.Spec{Name: "oauth.userinfo", Method: "GET", Path: "/oauth/userinfo", Plane: route.Principal, Subjects: []route.Subject{route.HumanAgent}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.Spec{Name: "scim.users", Method: "GET", Path: "/scim/v2/{dir_id}/Users", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.scimUsers))
-	route.RegisterNonJSON(mux, route.Spec{Name: "sso.start", Method: "GET", Path: "/v1/sso/{connection_id}/start", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.Spec{Name: "sso.callback", Method: "POST", Path: "/v1/sso/{connection_id}/callback", Plane: route.Principal, Subjects: []route.Subject{route.Public}, NonJSON: true}, http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.metadata", "GET", "/.well-known/oauth-authorization-server", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.metadata))
+	route.RegisterNonJSON(mux, route.NewSpec("oidc.metadata", "GET", "/.well-known/openid-configuration", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.metadata))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.authorize", "GET", "/oauth/authorize", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.authorize))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.token", "POST", "/oauth/token", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.token))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.revoke", "POST", "/oauth/revoke", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.device_authorization", "POST", "/oauth/device_authorization", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.register", "POST", "/oauth/register", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.users", "GET", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 }
 func (h HTTP) metadata(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(h.Issuer, "/")

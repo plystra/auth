@@ -33,7 +33,10 @@ const (
 	User       Subject = "U"
 )
 
-type Spec struct {
+// Declaration is the immutable metadata snapshot exposed by Specs. Callers
+// create route declarations through NewSpec so all required fields are
+// present at compile time.
+type Declaration struct {
 	Name               string
 	Method             string
 	Path               string
@@ -45,6 +48,49 @@ type Spec struct {
 	MaxBodyBytes       int64
 	NonJSON            bool
 }
+
+// Spec can only be created by NewSpec. Its unexported method prevents callers
+// from constructing a partial declaration or implementing the contract
+// outside this package.
+type Spec interface {
+	declaration() Declaration
+}
+
+type declaredSpec struct{ value Declaration }
+
+func (s declaredSpec) declaration() Declaration { return s.value }
+
+type SpecOption func(*Declaration)
+
+func WithStepUp() SpecOption {
+	return func(spec *Declaration) { spec.StepUp = true }
+}
+
+func WithAuthoritativeCheck() SpecOption {
+	return func(spec *Declaration) { spec.AuthoritativeCheck = true }
+}
+
+func WithMaxBodyBytes(size int64) SpecOption {
+	return func(spec *Declaration) { spec.MaxBodyBytes = size }
+}
+
+func WithNonJSON() SpecOption {
+	return func(spec *Declaration) { spec.NonJSON = true }
+}
+
+func NewSpec(name, method, path string, plane Plane, permission string, subjects []Subject, options ...SpecOption) Spec {
+	value := Declaration{
+		Name: name, Method: method, Path: path, Plane: plane,
+		Permission: permission, Subjects: append([]Subject(nil), subjects...),
+	}
+	for _, option := range options {
+		if option != nil {
+			option(&value)
+		}
+	}
+	return declaredSpec{value: value}
+}
+
 type Handler func(http.ResponseWriter, *http.Request)
 type HandlerMux interface {
 	Handle(string, http.Handler)
@@ -107,31 +153,35 @@ type CredentialFailureAuditor func(context.Context, Plane, string, string) error
 
 var registry struct {
 	sync.RWMutex
-	specs []Spec
+	specs []Declaration
 }
 
-func Specs() []Spec {
+func Specs() []Declaration {
 	registry.RLock()
 	defer registry.RUnlock()
-	out := make([]Spec, len(registry.specs))
+	out := make([]Declaration, len(registry.specs))
 	copy(out, registry.specs)
+	for i := range out {
+		out[i].Subjects = append([]Subject(nil), out[i].Subjects...)
+	}
 	return out
 }
 func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *I) (*O, error)) {
-	if spec.Name == "" || spec.Method == "" || spec.Path == "" || spec.Plane == "" || len(spec.Subjects) == 0 {
+	declaration, ok := getDeclaration(spec)
+	if !ok || declaration.Name == "" || declaration.Method == "" || declaration.Path == "" || declaration.Plane == "" || len(declaration.Subjects) == 0 {
 		panic("route: incomplete route.Spec")
 	}
-	if spec.Permission == "" && !contains(spec.Subjects, Public) && !userOnly(spec.Subjects) {
+	if declaration.Permission == "" && !contains(declaration.Subjects, Public) && !userOnly(declaration.Subjects) {
 		panic("route: non-public route requires permission")
 	}
 	registry.Lock()
-	registry.specs = append(registry.specs, spec)
+	registry.specs = append(registry.specs, declaration)
 	registry.Unlock()
-	maxBodyBytes := spec.MaxBodyBytes
+	maxBodyBytes := declaration.MaxBodyBytes
 	if maxBodyBytes == 0 {
 		maxBodyBytes = 64 * 1024
 	}
-	huma.Register(api, huma.Operation{OperationID: spec.Name, Method: spec.Method, Path: spec.Path, Summary: spec.Name, MaxBodyBytes: maxBodyBytes}, func(ctx context.Context, input *I) (*O, error) {
+	huma.Register(api, huma.Operation{OperationID: declaration.Name, Method: declaration.Method, Path: declaration.Path, Summary: declaration.Name, MaxBodyBytes: maxBodyBytes}, func(ctx context.Context, input *I) (*O, error) {
 		out, err := handler(ctx, input)
 		if err == nil {
 			return out, nil
@@ -144,16 +194,24 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	})
 }
 func RegisterNonJSON(mux HandlerMux, spec Spec, handler http.Handler) {
-	if !spec.NonJSON {
+	declaration, ok := getDeclaration(spec)
+	if !ok || !declaration.NonJSON {
 		panic("route: non-json route must set NonJSON")
 	}
-	if spec.Name == "" || spec.Method == "" || spec.Path == "" || spec.Plane == "" {
+	if declaration.Name == "" || declaration.Method == "" || declaration.Path == "" || declaration.Plane == "" {
 		panic("route: incomplete route.Spec")
 	}
 	registry.Lock()
-	registry.specs = append(registry.specs, spec)
+	registry.specs = append(registry.specs, declaration)
 	registry.Unlock()
-	mux.Handle(spec.Method+" "+spec.Path, handler)
+	mux.Handle(declaration.Method+" "+declaration.Path, handler)
+}
+
+func getDeclaration(spec Spec) (Declaration, bool) {
+	if spec == nil {
+		return Declaration{}, false
+	}
+	return spec.declaration(), true
 }
 func contains(ss []Subject, want Subject) bool {
 	for _, s := range ss {

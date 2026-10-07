@@ -107,18 +107,18 @@ type OperatorCreateOutput struct {
 }
 
 func (a *API) Register(api huma.API) {
-	route.Register(api, route.Spec{Name: "ops.auth.sign_in", Method: "POST", Path: "/ops/v1/auth/sign-in", Plane: route.Ops, Subjects: []route.Subject{route.Public}}, a.signIn)
-	route.Register(api, route.Spec{Name: "ops.auth.step_up", Method: "POST", Path: "/ops/v1/auth/step-up", Plane: route.Ops, Permission: "ops:session", Subjects: []route.Subject{route.Human}}, a.stepUp)
-	route.Register(api, route.Spec{Name: "ops.auth.sign_out", Method: "POST", Path: "/ops/v1/auth/sign-out", Plane: route.Ops, Permission: "ops:session", Subjects: []route.Subject{route.Human}}, a.signOut)
-	route.Register(api, route.Spec{Name: "ops.settings.get", Method: "GET", Path: "/ops/v1/settings", Plane: route.Ops, Permission: "ops:settings:read", Subjects: []route.Subject{route.Human}}, a.get)
-	route.Register(api, route.Spec{Name: "ops.settings.update", Method: "PATCH", Path: "/ops/v1/settings", Plane: route.Ops, Permission: "ops:settings:write", Subjects: []route.Subject{route.Human}, StepUp: true}, a.update)
-	route.Register(api, route.Spec{Name: "ops.operators.list", Method: "GET", Path: "/ops/v1/operators", Plane: route.Ops, Permission: "ops:operators:read", Subjects: []route.Subject{route.Human}}, a.listOperators)
-	route.Register(api, route.Spec{Name: "ops.operators.create", Method: "POST", Path: "/ops/v1/operators", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.createOperator)
-	route.Register(api, route.Spec{Name: "ops.operators.update", Method: "PATCH", Path: "/ops/v1/operators/{id}", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.updateOperator)
-	route.Register(api, route.Spec{Name: "ops.operators.disable", Method: "POST", Path: "/ops/v1/operators/{id}/disable", Plane: route.Ops, Permission: "ops:operators:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.disableOperator)
-	route.Register(api, route.Spec{Name: "ops.users.suspend", Method: "POST", Path: "/ops/v1/users/{id}/suspend", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.suspendUser)
-	route.Register(api, route.Spec{Name: "ops.users.sign_out_all", Method: "POST", Path: "/ops/v1/users/{id}/sign-out-all", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.signOutAllUserSessions)
-	route.Register(api, route.Spec{Name: "ops.users.require_password_reset", Method: "POST", Path: "/ops/v1/users/{id}/require-password-reset", Plane: route.Ops, Permission: "ops:users:manage", Subjects: []route.Subject{route.Human}, StepUp: true}, a.requirePasswordReset)
+	route.Register(api, route.NewSpec("ops.auth.sign_in", "POST", "/ops/v1/auth/sign-in", route.Ops, "", []route.Subject{route.Public}), a.signIn)
+	route.Register(api, route.NewSpec("ops.auth.step_up", "POST", "/ops/v1/auth/step-up", route.Ops, "ops:session", []route.Subject{route.Human}), a.stepUp)
+	route.Register(api, route.NewSpec("ops.auth.sign_out", "POST", "/ops/v1/auth/sign-out", route.Ops, "ops:session", []route.Subject{route.Human}), a.signOut)
+	route.Register(api, route.NewSpec("ops.settings.get", "GET", "/ops/v1/settings", route.Ops, "ops:settings:read", []route.Subject{route.Human}), a.get)
+	route.Register(api, route.NewSpec("ops.settings.update", "PATCH", "/ops/v1/settings", route.Ops, "ops:settings:write", []route.Subject{route.Human}, route.WithStepUp()), a.update)
+	route.Register(api, route.NewSpec("ops.operators.list", "GET", "/ops/v1/operators", route.Ops, "ops:operators:read", []route.Subject{route.Human}), a.listOperators)
+	route.Register(api, route.NewSpec("ops.operators.create", "POST", "/ops/v1/operators", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createOperator)
+	route.Register(api, route.NewSpec("ops.operators.update", "PATCH", "/ops/v1/operators/{id}", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.updateOperator)
+	route.Register(api, route.NewSpec("ops.operators.disable", "POST", "/ops/v1/operators/{id}/disable", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.disableOperator)
+	route.Register(api, route.NewSpec("ops.users.suspend", "POST", "/ops/v1/users/{id}/suspend", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.suspendUser)
+	route.Register(api, route.NewSpec("ops.users.sign_out_all", "POST", "/ops/v1/users/{id}/sign-out-all", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.signOutAllUserSessions)
+	route.Register(api, route.NewSpec("ops.users.require_password_reset", "POST", "/ops/v1/users/{id}/require-password-reset", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.requirePasswordReset)
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)

@@ -101,33 +101,35 @@ func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
 }
 
 func TestRouteRegistrationRejectsIncompleteSpecs(t *testing.T) {
-	valid := Spec{
-		Name: "route.test", Method: http.MethodGet, Path: "/test",
-		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
-	}
 	cases := []struct {
-		name   string
-		mutate func(*Spec)
+		name string
+		spec Spec
 	}{
-		{name: "name", mutate: func(spec *Spec) { spec.Name = "" }},
-		{name: "method", mutate: func(spec *Spec) { spec.Method = "" }},
-		{name: "path", mutate: func(spec *Spec) { spec.Path = "" }},
-		{name: "plane", mutate: func(spec *Spec) { spec.Plane = "" }},
-		{name: "subjects", mutate: func(spec *Spec) { spec.Subjects = nil }},
+		{name: "name", spec: NewSpec("", http.MethodGet, "/test", Principal, "self:read", []Subject{Human})},
+		{name: "method", spec: NewSpec("route.test", "", "/test", Principal, "self:read", []Subject{Human})},
+		{name: "path", spec: NewSpec("route.test", http.MethodGet, "", Principal, "self:read", []Subject{Human})},
+		{name: "plane", spec: NewSpec("route.test", http.MethodGet, "/test", "", "self:read", []Subject{Human})},
+		{name: "subjects", spec: NewSpec("route.test", http.MethodGet, "/test", Principal, "self:read", nil)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := valid
-			tc.mutate(&spec)
 			assertRoutePanic(t, func() {
-				Register[struct{}, struct{}](nil, spec, nil)
+				Register[struct{}, struct{}](nil, tc.spec, nil)
 			})
 		})
 	}
 
 	assertRoutePanic(t, func() {
-		RegisterNonJSON(http.NewServeMux(), Spec{NonJSON: true}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+		RegisterNonJSON(http.NewServeMux(), NewSpec("", "", "", "", "", nil, WithNonJSON()), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	})
+}
+
+func TestNewSpecExposesCompleteDeclarationSnapshot(t *testing.T) {
+	spec := NewSpec("route.complete", http.MethodPost, "/complete", Server, "auth.test:write", []Subject{HumanAgent}, WithStepUp(), WithAuthoritativeCheck(), WithMaxBodyBytes(1234))
+	declaration, ok := getDeclaration(spec)
+	if !ok || declaration.Name != "route.complete" || declaration.Method != http.MethodPost || declaration.Path != "/complete" || declaration.Plane != Server || declaration.Permission != "auth.test:write" || len(declaration.Subjects) != 1 || !declaration.StepUp || !declaration.AuthoritativeCheck || declaration.MaxBodyBytes != 1234 {
+		t.Fatalf("declaration = %+v, want complete constructor snapshot", declaration)
+	}
 }
 
 func TestMuxRejectsHandlersOutsideRouteRegistry(t *testing.T) {
@@ -141,14 +143,8 @@ func TestMuxRejectsHandlersOutsideRouteRegistry(t *testing.T) {
 func TestMuxAcceptsDeclaredJSONAndNonJSONHandlers(t *testing.T) {
 	mux := NewMux()
 	api := humago.New(mux, HumaConfig("route mux test", "1.0.0"))
-	Register(api, Spec{
-		Name: "route.mux.json", Method: http.MethodGet, Path: "/mux-json",
-		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
-	}, func(context.Context, *struct{}) (*struct{}, error) { return &struct{}{}, nil })
-	RegisterNonJSON(mux, Spec{
-		Name: "route.mux.protocol", Method: http.MethodGet, Path: "/mux-protocol",
-		Plane: Principal, Subjects: []Subject{Public}, NonJSON: true,
-	}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	Register(api, NewSpec("route.mux.json", http.MethodGet, "/mux-json", Principal, "self:read", []Subject{Human}), func(context.Context, *struct{}) (*struct{}, error) { return &struct{}{}, nil })
+	RegisterNonJSON(mux, NewSpec("route.mux.protocol", http.MethodGet, "/mux-protocol", Principal, "", []Subject{Public}, WithNonJSON()), http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	if err := Validate(mux); err != nil {
 		t.Fatalf("Validate returned error for declared handlers: %v", err)
 	}
@@ -167,10 +163,7 @@ func assertRoutePanic(t *testing.T, fn func()) {
 func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
 	mux := http.NewServeMux()
 	api := humago.New(mux, HumaConfig("route test", "1.0.0"))
-	Register(api, Spec{
-		Name: "route.internal-error", Method: http.MethodGet, Path: "/internal-error",
-		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
-	}, func(context.Context, *struct{}) (*struct{}, error) {
+	Register(api, NewSpec("route.internal-error", http.MethodGet, "/internal-error", Principal, "self:read", []Subject{Human}), func(context.Context, *struct{}) (*struct{}, error) {
 		return nil, errors.New("database connection details must not escape")
 	})
 
