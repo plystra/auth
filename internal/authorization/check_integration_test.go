@@ -410,6 +410,16 @@ func TestDeletedAgentIsGrantlessButRemainsResolvableForOwnerSelfScope(t *testing
 	if activeGroupGrants != 0 {
 		t.Fatalf("deleted Agent group retained %d active grants", activeGroupGrants)
 	}
+	var auditCount int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM audit_logs
+		WHERE action = 'agent.delete' AND resource_id = $1
+	`, created.ID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("deleted Agent audit references = %d, want 1", auditCount)
+	}
 	decision, _, err := svc.Check(ctx, CheckRequest{
 		MemberID: owner.ID, Permission: "resource:tombstone-self", ResourceSpace: spaceID, ResourceOwner: created.ID,
 	})
