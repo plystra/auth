@@ -28,6 +28,7 @@ type Service struct {
 	Store              *store.Store
 	MaxDelegationDepth int
 	HMACKeys           [][]byte
+	RefreshTTL         func(context.Context) (time.Duration, error)
 	hmacOnce           sync.Once
 	ephemeralHMACKey   []byte
 }
@@ -329,8 +330,12 @@ func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (s
 // is never returned again after this call.
 func (s *Service) CreateOAuthRefreshCredential(ctx context.Context, memberID string, expiresAt time.Time) (string, error) {
 	now := time.Now().UTC()
+	refreshTTL, err := s.oauthRefreshTTL(ctx)
+	if err != nil {
+		return "", err
+	}
 	if expiresAt.IsZero() {
-		expiresAt = now.Add(oauthRefreshLifetime)
+		expiresAt = now.Add(refreshTTL)
 	}
 	if !expiresAt.After(now) {
 		return "", apierr.New("VALIDATION_FAILED", "OAuth refresh credential expiry must be in the future")
@@ -382,6 +387,10 @@ func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credentia
 		return Credential{}, "", apierr.New("invalid_grant", "OAuth refresh token is invalid")
 	}
 	now := time.Now().UTC()
+	refreshTTL, err := s.oauthRefreshTTL(ctx)
+	if err != nil {
+		return Credential{}, "", err
+	}
 	next, prefix, hash, err := s.generateOAuthRefreshCredential()
 	if err != nil {
 		return Credential{}, "", err
@@ -430,7 +439,7 @@ func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credentia
 		if _, err := q.MarkAgentCredentialUsed(ctx, db.MarkAgentCredentialUsedParams{ID: row.ID}); err != nil {
 			return err
 		}
-		expiresAt := now.Add(oauthRefreshLifetime)
+		expiresAt := now.Add(refreshTTL)
 		if row.ExpiresAt.Time.Before(expiresAt) {
 			expiresAt = row.ExpiresAt.Time
 		}
@@ -460,6 +469,20 @@ func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credentia
 		return Credential{}, "", apierr.New("invalid_grant", "OAuth refresh token replayed")
 	}
 	return out, next, nil
+}
+
+func (s *Service) oauthRefreshTTL(ctx context.Context) (time.Duration, error) {
+	if s.RefreshTTL != nil {
+		ttl, err := s.RefreshTTL(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if ttl <= 0 {
+			return 0, apierr.New("UNAVAILABLE", "OAuth refresh TTL is not configured")
+		}
+		return ttl, nil
+	}
+	return oauthRefreshLifetime, nil
 }
 
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {

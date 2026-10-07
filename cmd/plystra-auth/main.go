@@ -167,6 +167,13 @@ func serve(ctx context.Context) error {
 	settings := &space.Service{Store: st}
 	authorizationSvc := &authorization.Service{Store: st, MaxDelegationDepth: c.AgentDelegationMaxDepth}
 	agentSvc := &agent.Service{Store: st, MaxDelegationDepth: c.AgentDelegationMaxDepth, HMACKeys: parseKeys(c.SessionHMACKeys)}
+	agentSvc.RefreshTTL = func(ctx context.Context) (time.Duration, error) {
+		v, err := settings.Get(ctx)
+		if err != nil {
+			return 0, err
+		}
+		return v.RefreshTokenTTL, nil
+	}
 	if err := st.Jobs.RegisterAgentExpiry(agentSvc); err != nil {
 		return fmt.Errorf("configure agent expiry job: %w", err)
 	}

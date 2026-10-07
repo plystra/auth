@@ -189,6 +189,35 @@ func TestOAuthRefreshCredentialsRotateWithHMACAndRevokeOnReplay(t *testing.T) {
 	}
 }
 
+func TestOAuthRefreshCredentialUsesRuntimeRefreshTTL(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	configured := 90 * time.Minute
+	agents := &Service{
+		Store: st, HMACKeys: [][]byte{[]byte("oauth-refresh-runtime-ttl-key-00001")},
+		RefreshTTL: func(context.Context) (time.Duration, error) { return configured, nil },
+	}
+	ag, _, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "oauth-runtime-ttl-agent", Source: "oauth", ExpiresAt: time.Now().UTC().Add(3 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := agents.CreateOAuthRefreshCredential(ctx, ag.ID, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expires time.Time
+	if err := st.Pool.QueryRow(ctx, `SELECT expires_at FROM agent_credentials WHERE member_id = $1 AND kind = 'oauth_refresh'`, ag.ID).Scan(&expires); err != nil {
+		t.Fatal(err)
+	}
+	remaining := time.Until(expires)
+	if remaining < configured-time.Minute || remaining > configured+time.Minute {
+		t.Fatalf("OAuth refresh expiry remaining = %s, want runtime TTL %s", remaining, configured)
+	}
+	if _, _, err := agents.RotateOAuthRefresh(ctx, raw); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func hmacSHA256(key []byte, value string) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))
