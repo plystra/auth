@@ -5,8 +5,10 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/plystra/auth/internal/route"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otelprom "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
@@ -29,7 +31,7 @@ func New() (*Provider, error) {
 		return nil, err
 	}
 	meters := sdkmetric.NewMeterProvider(sdkmetric.WithReader(exporter))
-	traces := sdktrace.NewTracerProvider()
+	traces := NewTracerProvider()
 	requests, err := meters.Meter("github.com/plystra/auth").Int64Counter(
 		"plystra.auth.http.requests",
 		metric.WithDescription("HTTP requests handled by each interaction plane."),
@@ -39,8 +41,27 @@ func New() (*Provider, error) {
 		_ = traces.Shutdown(context.Background())
 		return nil, err
 	}
+	otel.SetMeterProvider(meters)
+	otel.SetTracerProvider(traces)
 	return &Provider{MeterProvider: meters, TracerProvider: traces, Registry: registry, requests: requests}, nil
 }
+
+func NewTracerProvider(options ...sdktrace.TracerProviderOption) *sdktrace.TracerProvider {
+	options = append(options, sdktrace.WithSpanProcessor(planeSpanProcessor{}))
+	return sdktrace.NewTracerProvider(options...)
+}
+
+type planeSpanProcessor struct{}
+
+func (planeSpanProcessor) OnStart(ctx context.Context, span sdktrace.ReadWriteSpan) {
+	if plane := route.ContextPlane(ctx); plane != "" {
+		span.SetAttributes(attribute.String("plane", string(plane)))
+	}
+}
+
+func (planeSpanProcessor) OnEnd(sdktrace.ReadOnlySpan)      {}
+func (planeSpanProcessor) Shutdown(context.Context) error   { return nil }
+func (planeSpanProcessor) ForceFlush(context.Context) error { return nil }
 
 func (p *Provider) MetricsHandler() http.Handler {
 	return promhttp.HandlerFor(p.Registry, promhttp.HandlerOpts{})

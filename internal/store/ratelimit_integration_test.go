@@ -11,8 +11,13 @@ import (
 
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/idempotency"
+	"github.com/plystra/auth/internal/observability"
+	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var rateLimitDB *testdb.Harness
@@ -285,4 +290,46 @@ func TestConcurrentIdempotencyReservationsHaveOneBusinessOwner(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("concurrent reservation did not resolve after first commit")
 	}
+}
+
+func TestDatabaseTraceInheritsInteractionPlaneAttribute(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := observability.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	previous := otel.GetTracerProvider()
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		_ = provider.Shutdown(context.Background())
+		otel.SetTracerProvider(previous)
+	})
+	ctx := context.Background()
+	database, err := rateLimitDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	requestCtx, span := provider.Tracer("test").Start(route.WithPlane(ctx, route.Server), "request")
+	var result int
+	if err := st.Pool.QueryRow(requestCtx, `SELECT 1`).Scan(&result); err != nil {
+		t.Fatal(err)
+	}
+	span.End()
+	if result != 1 {
+		t.Fatalf("query result = %d, want 1", result)
+	}
+	if err := provider.ForceFlush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, span := range exporter.GetSpans() {
+		for _, attr := range span.Attributes {
+			if string(attr.Key) == "plane" && attr.Value.AsString() == "server" {
+				return
+			}
+		}
+	}
+	t.Fatal("database spans did not inherit the server plane attribute")
 }

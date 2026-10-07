@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/exaring/otelpgx"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/migrations"
 	"github.com/pressly/goose/v3"
+	"go.opentelemetry.io/otel"
 )
 
 type Store struct{ Pool *pgxpool.Pool }
@@ -25,6 +27,10 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 		return nil, fmt.Errorf("database config: %w", err)
 	}
 	cfg.MaxConnLifetime = 30 * time.Minute
+	cfg.ConnConfig.Tracer = otelpgx.NewTracer(
+		otelpgx.WithTracerProvider(otel.GetTracerProvider()),
+		otelpgx.WithMeterProvider(otel.GetMeterProvider()),
+	)
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
