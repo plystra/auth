@@ -155,6 +155,56 @@ func (q *Queries) ListActiveAssignRightsForHolder(ctx context.Context, arg ListA
 	return items, nil
 }
 
+const listAssignRightsInSpace = `-- name: ListAssignRightsInSpace :many
+SELECT ar.id, ar.holder_member_id, ar.permission_keys, ar.anchor_space_id, ar.anchor_group_id,
+    ar.covers_subtree, ar.can_redelegate, ar.source, ar.parent_id, ar.granted_by_operator_user_id,
+    ar.expires_at, ar.revoked_at, ar.created_at
+FROM assign_rights ar
+LEFT JOIN groups g ON g.id = ar.anchor_group_id
+WHERE ar.revoked_at IS NULL
+  AND (ar.expires_at IS NULL OR ar.expires_at > now())
+  AND (ar.anchor_space_id = $1 OR g.space_id = $1)
+ORDER BY ar.created_at, ar.id
+`
+
+type ListAssignRightsInSpaceParams struct {
+	SpaceID pgtype.Text `json:"space_id"`
+}
+
+func (q *Queries) ListAssignRightsInSpace(ctx context.Context, arg ListAssignRightsInSpaceParams) ([]AssignRight, error) {
+	rows, err := q.db.Query(ctx, listAssignRightsInSpace, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AssignRight{}
+	for rows.Next() {
+		var i AssignRight
+		if err := rows.Scan(
+			&i.ID,
+			&i.HolderMemberID,
+			&i.PermissionKeys,
+			&i.AnchorSpaceID,
+			&i.AnchorGroupID,
+			&i.CoversSubtree,
+			&i.CanRedelegate,
+			&i.Source,
+			&i.ParentID,
+			&i.GrantedByOperatorUserID,
+			&i.ExpiresAt,
+			&i.RevokedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDefaultAssignablePermissionKeys = `-- name: ListDefaultAssignablePermissionKeys :many
 SELECT key FROM permissions
 WHERE status = 'active' AND delegable = true

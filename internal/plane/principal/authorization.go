@@ -3,6 +3,7 @@ package principal
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/account"
@@ -63,6 +64,31 @@ type revokeGrantInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
 	GrantID       string `path:"grant_id"`
+}
+
+type assignmentRightsInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
+
+type assignmentRightPathInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	RightID       string `path:"ar_id"`
+}
+
+type createAssignmentRightInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		HolderMemberID string     `json:"holder_member_id"`
+		Permissions    []string   `json:"permissions"`
+		AnchorSpaceID  string     `json:"anchor_space_id,omitempty"`
+		AnchorGroupID  string     `json:"anchor_group_id,omitempty"`
+		CoversSubtree  bool       `json:"covers_subtree"`
+		CanRedelegate  bool       `json:"can_redelegate"`
+		ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	}
 }
 
 type memberPathInput struct {
@@ -128,6 +154,9 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.Spec{Name: "roles.create", Method: "POST", Path: "/v1/spaces/{id}/roles", Plane: route.Principal, Permission: "auth.roles:manage", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createRole)
 	route.Register(api, route.Spec{Name: "grants.create", Method: "POST", Path: "/v1/spaces/{id}/grants", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}, AuthoritativeCheck: true}, a.createGrant)
 	route.Register(api, route.Spec{Name: "grants.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/grants/{grant_id}", Plane: route.Principal, Permission: "auth.grants:assign", Subjects: []route.Subject{route.HumanAgent}}, a.revokeGrant)
+	route.Register(api, route.Spec{Name: "assignment_rights.list", Method: "GET", Path: "/v1/spaces/{id}/assign-rights", Plane: route.Principal, Permission: "auth.assign_rights:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.listAssignmentRights)
+	route.Register(api, route.Spec{Name: "assignment_rights.create", Method: "POST", Path: "/v1/spaces/{id}/assign-rights", Plane: route.Principal, Permission: "auth.assign_rights:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true, AuthoritativeCheck: true}, a.createAssignmentRight)
+	route.Register(api, route.Spec{Name: "assignment_rights.revoke", Method: "DELETE", Path: "/v1/spaces/{id}/assign-rights/{ar_id}", Plane: route.Principal, Permission: "auth.assign_rights:manage", Subjects: []route.Subject{route.HumanAgent}, StepUp: true}, a.revokeAssignmentRight)
 }
 
 func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authorizationDataOutput[createdSpaceData], error) {
@@ -373,6 +402,49 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 	return out, nil
 }
 
+func (a *API) listAssignmentRights(ctx context.Context, in *assignmentRightsInput) (*authorizationDataOutput[[]authorization.AssignmentRight], error) {
+	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage"); err != nil {
+		return nil, err
+	}
+	rights, err := a.Authorization.ListAssignmentRights(ctx, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[[]authorization.AssignmentRight]{}
+	out.Body.Data = rights
+	return out, nil
+}
+
+func (a *API) createAssignmentRight(ctx context.Context, in *createAssignmentRightInput) (*authorizationDataOutput[authorization.AssignmentRight], error) {
+	resourceSpace := in.ID
+	resourceGroup := in.Body.AnchorGroupID
+	if in.Body.AnchorGroupID == "" && in.Body.AnchorSpaceID != "" {
+		resourceSpace = in.Body.AnchorSpaceID
+	}
+	actor, err := a.actorForNode(ctx, in.Authorization, resourceSpace, resourceGroup, "auth.assign_rights:manage")
+	if err != nil {
+		return nil, err
+	}
+	right, err := a.Authorization.CreateAssignmentRight(ctx, actor.ID, in.ID, in.Body.HolderMemberID, in.Body.Permissions, in.Body.AnchorSpaceID, in.Body.AnchorGroupID, in.Body.CoversSubtree, in.Body.CanRedelegate, in.Body.ExpiresAt)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[authorization.AssignmentRight]{}
+	out.Body.Data = right
+	return out, nil
+}
+
+func (a *API) revokeAssignmentRight(ctx context.Context, in *assignmentRightPathInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.RevokeAssignmentRight(ctx, actor.ID, in.ID, in.RightID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
 func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
 	return a.actorForSpaceTarget(ctx, authorizationHeader, spaceID, permission, "")
 }
@@ -385,33 +457,27 @@ func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spac
 	return a.actorForSpaceTargetWithSelf(ctx, authorizationHeader, spaceID, permission, targetMemberID, false)
 }
 
+func (a *API) actorForNode(ctx context.Context, authorizationHeader, spaceID, groupID, permission string) (authorization.Member, error) {
+	member, err := a.resolvePrincipalMember(ctx, authorizationHeader, spaceID)
+	if err != nil {
+		return authorization.Member{}, err
+	}
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID})
+	if err != nil {
+		return authorization.Member{}, err
+	}
+	if decision.Effect != engine.Allow {
+		return authorization.Member{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+	}
+	return member, nil
+}
+
 func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string, self bool) (authorization.Member, error) {
 	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
 		return authorization.Member{}, err
 	}
-	if a.Authorization == nil {
-		return authorization.Member{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
-	}
-	var member authorization.Member
-	if claims.Type == "agent" {
-		memberID := claims.MemberID
-		if memberID == "" {
-			memberID = claims.Subject
-		}
-		member, err = a.Authorization.GetMemberAnySpace(ctx, memberID)
-	} else if claims.MemberID != "" {
-		bound, boundErr := a.Authorization.UserBoundToMember(ctx, claims.Subject, claims.MemberID)
-		if boundErr != nil {
-			return authorization.Member{}, boundErr
-		}
-		if !bound {
-			return authorization.Member{}, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
-		}
-		member, err = a.Authorization.GetMemberAnySpace(ctx, claims.MemberID)
-	} else {
-		member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
-	}
+	member, err := a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
 	if err != nil {
 		return authorization.Member{}, err
 	}
@@ -432,6 +498,44 @@ func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHead
 	}
 	if decision.Effect != engine.Allow {
 		return authorization.Member{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+	}
+	return member, nil
+}
+
+func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, spaceID string) (authorization.Member, error) {
+	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	if err != nil {
+		return authorization.Member{}, err
+	}
+	return a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
+}
+
+func (a *API) resolvePrincipalMemberClaims(ctx context.Context, claims security.Claims, spaceID string) (authorization.Member, error) {
+	if a.Authorization == nil {
+		return authorization.Member{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
+	}
+	var member authorization.Member
+	var err error
+	if claims.Type == "agent" {
+		memberID := claims.MemberID
+		if memberID == "" {
+			memberID = claims.Subject
+		}
+		member, err = a.Authorization.GetMemberAnySpace(ctx, memberID)
+	} else if claims.MemberID != "" {
+		bound, boundErr := a.Authorization.UserBoundToMember(ctx, claims.Subject, claims.MemberID)
+		if boundErr != nil {
+			return authorization.Member{}, boundErr
+		}
+		if !bound {
+			return authorization.Member{}, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
+		}
+		member, err = a.Authorization.GetMemberAnySpace(ctx, claims.MemberID)
+	} else {
+		member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+	}
+	if err != nil {
+		return authorization.Member{}, err
 	}
 	return member, nil
 }

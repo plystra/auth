@@ -140,6 +140,17 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err != nil {
 			return err
 		}
+		if row.AnchorSpaceID.Valid {
+			if row.AnchorSpaceID.String != spaceID {
+				return apierr.New("NOT_FOUND", "assignment right was not found in this Space")
+			}
+		} else if row.AnchorGroupID.Valid {
+			if _, groupErr := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: row.AnchorGroupID.String, SpaceID: spaceID}); errors.Is(groupErr, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "assignment right was not found in this Space")
+			} else if groupErr != nil {
+				return groupErr
+			}
+		}
 		anchorSpace := spaceID
 		if row.AnchorSpaceID.Valid {
 			anchorSpace = row.AnchorSpaceID.String
@@ -155,6 +166,25 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		}
 		return audit.Write(ctx, q, "member", actorMemberID, "assign_right.revoke", rightID, "success")
 	})
+}
+
+// ListAssignmentRights returns active, non-expired rights anchored directly
+// in the requested Space or in one of its groups. Authorization is performed
+// by the caller against the requested Space before this display-only read.
+func (s *Service) ListAssignmentRights(ctx context.Context, spaceID string) ([]AssignmentRight, error) {
+	rows, err := s.Store.Queries().ListAssignRightsInSpace(ctx, db.ListAssignRightsInSpaceParams{SpaceID: pgtype.Text{String: spaceID, Valid: true}})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AssignmentRight, 0, len(rows))
+	for _, row := range rows {
+		var permissions []string
+		if err := json.Unmarshal(row.PermissionKeys, &permissions); err != nil {
+			return nil, err
+		}
+		out = append(out, assignmentRightFromRow(row, uniqueSorted(permissions)))
+	}
+	return out, nil
 }
 
 func assignmentAnchorTx(ctx context.Context, q *db.Queries, spaceID, anchorSpaceID, anchorGroupID string) (string, string, error) {

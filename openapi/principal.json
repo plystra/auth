@@ -187,6 +187,57 @@
         ],
         "type": "object"
       },
+      "AssignmentRight": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
+          "anchor_space_id": {
+            "type": "string"
+          },
+          "can_redelegate": {
+            "type": "boolean"
+          },
+          "covers_subtree": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "holder_member_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "holder_member_id",
+          "permissions",
+          "covers_subtree",
+          "can_redelegate",
+          "source"
+        ],
+        "type": "object"
+      },
       "AuthBody": {
         "additionalProperties": false,
         "properties": {
@@ -242,6 +293,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputAssignmentRightBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/AssignmentRight"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputCreatedSpaceDataBody": {
         "additionalProperties": false,
         "properties": {
@@ -259,6 +322,24 @@
         "properties": {
           "data": {
             "$ref": "#/components/schemas/Grant"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "AuthorizationDataOutputListAssignmentRightBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/AssignmentRight"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
           }
         },
         "required": [
@@ -410,6 +491,46 @@
           "member_id",
           "email",
           "status"
+        ],
+        "type": "object"
+      },
+      "CreateAssignmentRightInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
+          "anchor_space_id": {
+            "type": "string"
+          },
+          "can_redelegate": {
+            "type": "boolean"
+          },
+          "covers_subtree": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "holder_member_id": {
+            "type": "string"
+          },
+          "permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "holder_member_id",
+          "permissions",
+          "covers_subtree",
+          "can_redelegate"
         ],
         "type": "object"
       },
@@ -1901,6 +2022,157 @@
           }
         },
         "summary": "spaces.get"
+      }
+    },
+    "/v1/spaces/{id}/assign-rights": {
+      "get": {
+        "operationId": "assignment_rights.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputListAssignmentRightBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "assignment_rights.list"
+      },
+      "post": {
+        "operationId": "assignment_rights.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAssignmentRightInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputAssignmentRightBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "assignment_rights.create"
+      }
+    },
+    "/v1/spaces/{id}/assign-rights/{ar_id}": {
+      "delete": {
+        "operationId": "assignment_rights.revoke",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "ar_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputAcceptedDataBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "assignment_rights.revoke"
       }
     },
     "/v1/spaces/{id}/children": {

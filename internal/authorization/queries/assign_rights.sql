@@ -48,3 +48,14 @@ SELECT id, holder_member_id, permission_keys, anchor_space_id, anchor_group_id,
     expires_at, revoked_at, created_at
 FROM assign_rights
 WHERE id = sqlc.arg(id);
+
+-- name: ListAssignRightsInSpace :many
+SELECT ar.id, ar.holder_member_id, ar.permission_keys, ar.anchor_space_id, ar.anchor_group_id,
+    ar.covers_subtree, ar.can_redelegate, ar.source, ar.parent_id, ar.granted_by_operator_user_id,
+    ar.expires_at, ar.revoked_at, ar.created_at
+FROM assign_rights ar
+LEFT JOIN groups g ON g.id = ar.anchor_group_id
+WHERE ar.revoked_at IS NULL
+  AND (ar.expires_at IS NULL OR ar.expires_at > now())
+  AND (ar.anchor_space_id = sqlc.arg(space_id) OR g.space_id = sqlc.arg(space_id))
+ORDER BY ar.created_at, ar.id;

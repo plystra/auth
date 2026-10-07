@@ -633,6 +633,85 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	}
 }
 
+func TestAssignmentRightManagementEndpointsUseAuthorizationEngineAndPreserveGrants(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
+	target, err := authz.CreateMember(ctx, actor.ID, "", spaceID, "delegated member", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	create := &createAssignmentRightInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	create.Body.HolderMemberID = target.ID
+	create.Body.Permissions = []string{"auth.members:manage"}
+	rightOut, err := api.createAssignmentRight(ctx, create)
+	if err != nil {
+		t.Fatalf("assignment-right endpoint create = %v", err)
+	}
+	if rightOut.Body.Data.ID == "" || rightOut.Body.Data.ParentID == "" {
+		t.Fatalf("created assignment right = %+v", rightOut.Body.Data)
+	}
+	listOut, err := api.listAssignmentRights(ctx, &assignmentRightsInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID})
+	if err != nil {
+		t.Fatalf("assignment-right endpoint list = %v", err)
+	}
+	if len(listOut.Body.Data) != 2 {
+		t.Fatalf("assignment-right list = %d entries, want system and delegated rights", len(listOut.Body.Data))
+	}
+	if _, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
+		t.Fatalf("create existing grant = %v", err)
+	}
+	if _, err := api.revokeAssignmentRight(ctx, &assignmentRightPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, RightID: rightOut.Body.Data.ID}); err != nil {
+		t.Fatalf("assignment-right endpoint revoke = %v", err)
+	}
+	listOut, err = api.listAssignmentRights(ctx, &assignmentRightsInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listOut.Body.Data) != 1 || listOut.Body.Data[0].Source != "system" {
+		t.Fatalf("active assignment-right list after revoke = %+v", listOut.Body.Data)
+	}
+	var grants int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, target.ID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 1 {
+		t.Fatalf("revoking assignment right removed %d existing grants", grants)
+	}
+}
+
+func TestAssignmentRightManagementEndpointRejectsAgentDeltaUntilOwnerAwareCoverageExists(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_principal_actor", Name: "assignment-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, created.ID, "auth.assign_rights:manage")
+	target, err := authz.CreateMember(ctx, owner.ID, "", spaceID, "delegated member", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	create := &createAssignmentRightInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	create.Body.HolderMemberID = target.ID
+	create.Body.Permissions = []string{"auth.members:manage"}
+	if _, err := api.createAssignmentRight(ctx, create); err == nil {
+		t.Fatal("Agent created an assignment right before owner-aware delta coverage was implemented")
+	} else {
+		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	}
+}
+
 func TestAgentManagementRequiresVerifiedApprovalFact(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

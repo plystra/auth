@@ -50,3 +50,31 @@ func TestSignOutRouteDeclaresUserAccountSubject(t *testing.T) {
 	}
 	t.Fatal("sign-out route was not registered")
 }
+
+func TestAssignmentRightsRoutesDeclareHumanAgentAndMutationGuards(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	want := map[string]struct {
+		method string
+		path   string
+		stepUp bool
+		delta  bool
+	}{
+		"assignment_rights.list":   {"GET", "/v1/spaces/{id}/assign-rights", true, false},
+		"assignment_rights.create": {"POST", "/v1/spaces/{id}/assign-rights", true, true},
+		"assignment_rights.revoke": {"DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", true, false},
+	}
+	for _, spec := range route.Specs() {
+		expected, ok := want[spec.Name]
+		if !ok {
+			continue
+		}
+		if spec.Method != expected.method || spec.Path != expected.path || spec.Permission != "auth.assign_rights:manage" || spec.StepUp != expected.stepUp || spec.AuthoritativeCheck != expected.delta || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("assignment-right route %q = %+v, want method=%s path=%s H/A step_up=%v delta=%v", spec.Name, spec, expected.method, expected.path, expected.stepUp, expected.delta)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("assignment-right routes missing: %v", want)
+	}
+}
