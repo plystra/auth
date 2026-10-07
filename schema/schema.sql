@@ -1181,3 +1181,12 @@ DROP TRIGGER IF EXISTS groups_agent_structure_guard ON groups;
 CREATE TRIGGER groups_agent_structure_guard
     BEFORE INSERT OR UPDATE OF kind, owner_member_id, parent_id ON groups
     FOR EACH ROW EXECUTE FUNCTION enforce_agent_group_structure();
+
+
+ALTER TABLE factors ADD COLUMN IF NOT EXISTS secret_hash bytea;
+
+ALTER TABLE factors DROP CONSTRAINT IF EXISTS factors_backup_code_storage_check;
+ALTER TABLE factors ADD CONSTRAINT factors_backup_code_storage_check CHECK (
+    (kind = 'backup_code' AND secret_hash IS NOT NULL AND secret_ciphertext IS NULL)
+    OR kind <> 'backup_code'
+);

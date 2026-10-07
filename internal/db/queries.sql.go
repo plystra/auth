@@ -197,6 +197,21 @@ func (q *Queries) CompleteIdempotencyKey(ctx context.Context, arg CompleteIdempo
 	return result.RowsAffected(), nil
 }
 
+const consumeBackupCode = `-- name: ConsumeBackupCode :exec
+UPDATE factors SET last_used_at = now()
+WHERE id = $1 AND user_id = $2 AND kind = 'backup_code' AND last_used_at IS NULL
+`
+
+type ConsumeBackupCodeParams struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) ConsumeBackupCode(ctx context.Context, arg ConsumeBackupCodeParams) error {
+	_, err := q.db.Exec(ctx, consumeBackupCode, arg.ID, arg.UserID)
+	return err
+}
+
 const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = $1::bigint, last_used_at = now()
 WHERE id = $2 AND counter < $1::bigint RETURNING id
@@ -405,6 +420,57 @@ func (q *Queries) CreateAgentsGroup(ctx context.Context, arg CreateAgentsGroupPa
 	return i, err
 }
 
+const createBackupCode = `-- name: CreateBackupCode :one
+INSERT INTO factors (id, user_id, kind, name, secret_hash)
+VALUES ($1, $2, 'backup_code', $3, $4)
+RETURNING id, user_id, kind, name, secret_ciphertext, secret_hash, credential_id, public_key, counter, created_at, last_used_at
+`
+
+type CreateBackupCodeParams struct {
+	ID         string `json:"id"`
+	UserID     string `json:"user_id"`
+	Name       string `json:"name"`
+	SecretHash []byte `json:"secret_hash"`
+}
+
+type CreateBackupCodeRow struct {
+	ID               string             `json:"id"`
+	UserID           string             `json:"user_id"`
+	Kind             string             `json:"kind"`
+	Name             string             `json:"name"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	SecretHash       []byte             `json:"secret_hash"`
+	CredentialID     []byte             `json:"credential_id"`
+	PublicKey        []byte             `json:"public_key"`
+	Counter          int64              `json:"counter"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) CreateBackupCode(ctx context.Context, arg CreateBackupCodeParams) (CreateBackupCodeRow, error) {
+	row := q.db.QueryRow(ctx, createBackupCode,
+		arg.ID,
+		arg.UserID,
+		arg.Name,
+		arg.SecretHash,
+	)
+	var i CreateBackupCodeRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Kind,
+		&i.Name,
+		&i.SecretCiphertext,
+		&i.SecretHash,
+		&i.CredentialID,
+		&i.PublicKey,
+		&i.Counter,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const createFactor = `-- name: CreateFactor :one
 INSERT INTO factors (id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, 0)) RETURNING id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at
 `
@@ -420,7 +486,20 @@ type CreateFactorParams struct {
 	Counter          interface{} `json:"counter"`
 }
 
-func (q *Queries) CreateFactor(ctx context.Context, arg CreateFactorParams) (Factor, error) {
+type CreateFactorRow struct {
+	ID               string             `json:"id"`
+	UserID           string             `json:"user_id"`
+	Kind             string             `json:"kind"`
+	Name             string             `json:"name"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	CredentialID     []byte             `json:"credential_id"`
+	PublicKey        []byte             `json:"public_key"`
+	Counter          int64              `json:"counter"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) CreateFactor(ctx context.Context, arg CreateFactorParams) (CreateFactorRow, error) {
 	row := q.db.QueryRow(ctx, createFactor,
 		arg.ID,
 		arg.UserID,
@@ -431,7 +510,7 @@ func (q *Queries) CreateFactor(ctx context.Context, arg CreateFactorParams) (Fac
 		arg.PublicKey,
 		arg.Counter,
 	)
-	var i Factor
+	var i CreateFactorRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,
@@ -693,6 +772,19 @@ type DeleteAgentSubtreeParams struct {
 
 func (q *Queries) DeleteAgentSubtree(ctx context.Context, arg DeleteAgentSubtreeParams) error {
 	_, err := q.db.Exec(ctx, deleteAgentSubtree, arg.GroupID)
+	return err
+}
+
+const deleteBackupCodes = `-- name: DeleteBackupCodes :exec
+DELETE FROM factors WHERE user_id = $1 AND kind = 'backup_code'
+`
+
+type DeleteBackupCodesParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) DeleteBackupCodes(ctx context.Context, arg DeleteBackupCodesParams) error {
+	_, err := q.db.Exec(ctx, deleteBackupCodes, arg.UserID)
 	return err
 }
 
@@ -1289,6 +1381,54 @@ func (q *Queries) GetSpaceEnvelopePermission(ctx context.Context, arg GetSpaceEn
 	return mode, err
 }
 
+const getUnusedBackupCodeByHash = `-- name: GetUnusedBackupCodeByHash :one
+SELECT id, user_id, kind, name, secret_ciphertext, secret_hash, credential_id, public_key, counter, created_at, last_used_at
+FROM factors
+WHERE user_id = $1
+  AND kind = 'backup_code'
+  AND secret_hash = $2
+  AND last_used_at IS NULL
+FOR UPDATE
+`
+
+type GetUnusedBackupCodeByHashParams struct {
+	UserID     string `json:"user_id"`
+	SecretHash []byte `json:"secret_hash"`
+}
+
+type GetUnusedBackupCodeByHashRow struct {
+	ID               string             `json:"id"`
+	UserID           string             `json:"user_id"`
+	Kind             string             `json:"kind"`
+	Name             string             `json:"name"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	SecretHash       []byte             `json:"secret_hash"`
+	CredentialID     []byte             `json:"credential_id"`
+	PublicKey        []byte             `json:"public_key"`
+	Counter          int64              `json:"counter"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) GetUnusedBackupCodeByHash(ctx context.Context, arg GetUnusedBackupCodeByHashParams) (GetUnusedBackupCodeByHashRow, error) {
+	row := q.db.QueryRow(ctx, getUnusedBackupCodeByHash, arg.UserID, arg.SecretHash)
+	var i GetUnusedBackupCodeByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Kind,
+		&i.Name,
+		&i.SecretCiphertext,
+		&i.SecretHash,
+		&i.CredentialID,
+		&i.PublicKey,
+		&i.Counter,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+	)
+	return i, err
+}
+
 const getUserMemberBinding = `-- name: GetUserMemberBinding :one
 SELECT user_id, member_id, status, expires_at, revoked_at
 FROM user_members WHERE user_id = $1 AND member_id = $2
@@ -1582,15 +1722,28 @@ type ListFactorsParams struct {
 	UserID string `json:"user_id"`
 }
 
-func (q *Queries) ListFactors(ctx context.Context, arg ListFactorsParams) ([]Factor, error) {
+type ListFactorsRow struct {
+	ID               string             `json:"id"`
+	UserID           string             `json:"user_id"`
+	Kind             string             `json:"kind"`
+	Name             string             `json:"name"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	CredentialID     []byte             `json:"credential_id"`
+	PublicKey        []byte             `json:"public_key"`
+	Counter          int64              `json:"counter"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) ListFactors(ctx context.Context, arg ListFactorsParams) ([]ListFactorsRow, error) {
 	rows, err := q.db.Query(ctx, listFactors, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Factor{}
+	items := []ListFactorsRow{}
 	for rows.Next() {
-		var i Factor
+		var i ListFactorsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.UserID,
@@ -2223,7 +2376,7 @@ func (q *Queries) LockRoleInSpace(ctx context.Context, arg LockRoleInSpaceParams
 }
 
 const lockTOTPFactors = `-- name: LockTOTPFactors :many
-SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at FROM factors WHERE user_id = $1 AND kind = 'totp' ORDER BY id FOR UPDATE
+SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at, secret_hash FROM factors WHERE user_id = $1 AND kind = 'totp' ORDER BY id FOR UPDATE
 `
 
 type LockTOTPFactorsParams struct {
@@ -2250,6 +2403,7 @@ func (q *Queries) LockTOTPFactors(ctx context.Context, arg LockTOTPFactorsParams
 			&i.Counter,
 			&i.CreatedAt,
 			&i.LastUsedAt,
+			&i.SecretHash,
 		); err != nil {
 			return nil, err
 		}

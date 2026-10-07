@@ -19,4 +19,5 @@ type Factor struct {
 	Counter          int64              `json:"counter"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+	SecretHash       []byte             `json:"secret_hash"`
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
@@ -169,6 +170,57 @@ func (s *Service) GenerateBackupCodes(count int) ([]string, error) {
 	}
 	return out, nil
 }
+
+// GenerateBackupCodesForUser replaces every existing backup code in one
+// transaction. The plaintext values are returned only to the caller; the
+// database receives SHA-256 digests and never receives a usable code.
+func (s *Service) GenerateBackupCodesForUser(ctx context.Context, userID string, count int) ([]string, error) {
+	codes, err := s.GenerateBackupCodes(count)
+	if err != nil {
+		return nil, err
+	}
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := q.DeleteBackupCodes(ctx, db.DeleteBackupCodesParams{UserID: userID}); err != nil {
+			return err
+		}
+		for i, code := range codes {
+			if _, err := q.CreateBackupCode(ctx, db.CreateBackupCodeParams{
+				ID:         string(ids.New[ids.FactorID]("fac")),
+				UserID:     userID,
+				Name:       fmt.Sprintf("backup-%02d", i+1),
+				SecretHash: BackupCodeDigest(code),
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return codes, nil
+}
+
+// ConsumeBackupCode atomically marks one matching code as used. A consumed or
+// replaced code is indistinguishable from an invalid code to callers.
+func (s *Service) ConsumeBackupCode(ctx context.Context, userID, code string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return ErrInvalidCode
+	}
+	hash := BackupCodeDigest(code)
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.GetUnusedBackupCodeByHash(ctx, db.GetUnusedBackupCodeByHashParams{UserID: userID, SecretHash: hash})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrInvalidCode
+		}
+		if err != nil {
+			return err
+		}
+		return q.ConsumeBackupCode(ctx, db.ConsumeBackupCodeParams{ID: row.ID, UserID: userID})
+	})
+}
+
 func BackupCodeDigest(code string) []byte {
 	sum := sha256.Sum256([]byte(strings.ToUpper(strings.TrimSpace(code))))
 	return sum[:]

@@ -170,6 +170,85 @@ func TestTOTPInvalidAttemptsAreRateLimitedWithoutStoringIdentity(t *testing.T) {
 	}
 }
 
+func TestBackupCodesAreSingleUseAndRegenerationRevokesOldCodes(t *testing.T) {
+	ctx := context.Background()
+	st := newFactorStore(t)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_factor_backup', 'factor-backup@example.test', 'factor-backup@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	factors := &Service{Store: st, DataKey: secretKey()}
+	oldCodes, err := factors.GenerateBackupCodesForUser(ctx, "usr_factor_backup", 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(oldCodes) != 6 {
+		t.Fatalf("generated %d backup codes, want 6", len(oldCodes))
+	}
+	var stored, plaintextCiphertexts, hashes int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*), count(*) FILTER (WHERE secret_ciphertext IS NOT NULL), count(*) FILTER (WHERE secret_hash IS NOT NULL)
+		FROM factors WHERE user_id = 'usr_factor_backup' AND kind = 'backup_code'
+	`).Scan(&stored, &plaintextCiphertexts, &hashes); err != nil {
+		t.Fatal(err)
+	}
+	if stored != 6 || plaintextCiphertexts != 0 || hashes != 6 {
+		t.Fatalf("backup code storage = stored %d plaintext_ciphertexts %d hashes %d", stored, plaintextCiphertexts, hashes)
+	}
+	if err := factors.ConsumeBackupCode(ctx, "usr_factor_backup", oldCodes[0]); err != nil {
+		t.Fatalf("first backup code use failed: %v", err)
+	}
+	if err := factors.ConsumeBackupCode(ctx, "usr_factor_backup", oldCodes[0]); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("replayed backup code error = %v, want ErrInvalidCode", err)
+	}
+
+	newCodes, err := factors.GenerateBackupCodesForUser(ctx, "usr_factor_backup", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := factors.ConsumeBackupCode(ctx, "usr_factor_backup", oldCodes[1]); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("replaced backup code error = %v, want ErrInvalidCode", err)
+	}
+	if err := factors.ConsumeBackupCode(ctx, "usr_factor_backup", newCodes[0]); err != nil {
+		t.Fatalf("new backup code use failed: %v", err)
+	}
+	concurrentCodes, err := factors.GenerateBackupCodesForUser(ctx, "usr_factor_backup", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := make(chan error, 2)
+	for range 2 {
+		go func() { results <- factors.ConsumeBackupCode(ctx, "usr_factor_backup", concurrentCodes[0]) }()
+	}
+	var successes, rejected int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, ErrInvalidCode):
+			rejected++
+		default:
+			t.Fatalf("concurrent backup code use returned unexpected error: %v", err)
+		}
+	}
+	if successes != 1 || rejected != 1 {
+		t.Fatalf("concurrent backup code use: successes=%d rejected=%d, want one each", successes, rejected)
+	}
+	var active int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM factors
+		WHERE user_id = 'usr_factor_backup' AND kind = 'backup_code' AND last_used_at IS NULL
+	`).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 4 {
+		t.Fatalf("active regenerated backup codes = %d, want 4", active)
+	}
+}
+
 func verifyAt(ctx context.Context, st *store.Store, factors *Service, userID, factorID, code string, now time.Time) error {
 	return st.InTx(ctx, func(q *db.Queries) error {
 		return factors.VerifyTOTPTx(ctx, q, userID, factorID, code, now)
