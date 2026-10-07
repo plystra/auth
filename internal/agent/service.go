@@ -2,11 +2,14 @@ package agent
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -23,6 +26,9 @@ const maxLifetime = 90 * 24 * time.Hour
 type Service struct {
 	Store              *store.Store
 	MaxDelegationDepth int
+	HMACKeys           [][]byte
+	hmacOnce           sync.Once
+	ephemeralHMACKey   []byte
 }
 
 const defaultMaxDelegationDepth = 8
@@ -92,7 +98,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 	if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
 		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
 	}
-	raw, prefix, hash, err := generateCredential()
+	raw, prefix, hash, err := s.generateCredential()
 	if err != nil {
 		return Agent{}, "", err
 	}
@@ -281,7 +287,7 @@ func (s *Service) Get(ctx context.Context, memberID string) (Agent, error) {
 }
 
 func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (string, error) {
-	raw, prefix, hash, err := generateCredential()
+	raw, prefix, hash, err := s.generateCredential()
 	if err != nil {
 		return "", err
 	}
@@ -426,8 +432,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, 
 		}
 		return Credential{}, err
 	}
-	sum := sha256.Sum256([]byte(parts[1]))
-	if !equal(sum[:], row.SecretHash) || row.RevokedAt.Valid || !row.ExpiresAt.Time.After(time.Now().UTC()) || row.MemberStatus != "active" {
+	if !s.matchesCredentialHash(parts[1], row.SecretHash) || row.RevokedAt.Valid || !row.ExpiresAt.Time.After(time.Now().UTC()) || row.MemberStatus != "active" {
 		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
 	}
 	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -438,26 +443,47 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, 
 	return Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Prefix: row.Prefix, SecretHash: row.SecretHash, ExpiresAt: row.ExpiresAt.Time, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}, nil
 }
 
-func generateCredential() (string, string, []byte, error) {
+func (s *Service) generateCredential() (string, string, []byte, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", "", nil, err
 	}
 	raw := base64.RawURLEncoding.EncodeToString(b)
 	prefix := "ply_ag_" + raw[:12]
-	sum := sha256.Sum256([]byte(raw))
-	return prefix + "." + raw, prefix, sum[:], nil
+	return prefix + "." + raw, prefix, s.hashCredential(raw), nil
 }
 
-func equal(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
+func (s *Service) matchesCredentialHash(raw string, want []byte) bool {
+	for _, key := range s.credentialHMACKeys() {
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(raw))
+		if subtle.ConstantTimeCompare(mac.Sum(nil), want) == 1 {
+			return true
+		}
 	}
-	var v byte
-	for i := range a {
-		v |= a[i] ^ b[i]
+	return false
+}
+
+func (s *Service) hashCredential(raw string) []byte {
+	keys := s.credentialHMACKeys()
+	mac := hmac.New(sha256.New, keys[0])
+	_, _ = mac.Write([]byte(raw))
+	return mac.Sum(nil)
+}
+
+func (s *Service) credentialHMACKeys() [][]byte {
+	if len(s.HMACKeys) > 0 {
+		return s.HMACKeys
 	}
-	return v == 0
+	// Tests and embedded callers may construct Service as a zero-value helper.
+	// Production wiring always supplies the deployment session HMAC key ring.
+	s.hmacOnce.Do(func() {
+		s.ephemeralHMACKey = make([]byte, 32)
+		if _, err := rand.Read(s.ephemeralHMACKey); err != nil {
+			panic("generate ephemeral Agent credential HMAC key: " + err.Error())
+		}
+	})
+	return [][]byte{s.ephemeralHMACKey}
 }
 
 func pgTime(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }

@@ -1,10 +1,14 @@
 package agent
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +93,52 @@ func TestAgentGroupsAreUniqueNestedAndBoundedByExpiry(t *testing.T) {
 	if ownerGroups != 1 {
 		t.Fatalf("active owner agent groups = %d, want 1", ownerGroups)
 	}
+}
+
+func TestAgentCredentialsUseHMACHashesAndRotateKeys(t *testing.T) {
+	ctx := context.Background()
+	st, _, owner, _ := newAgentFixture(t)
+	oldKey := []byte("agent-credential-hmac-key-00000001")
+	newKey := []byte("agent-credential-hmac-key-00000002")
+	agents := &Service{Store: st, HMACKeys: [][]byte{oldKey}}
+	ag, raw, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "hmac-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := strings.SplitN(raw, ".", 2)[1]
+	var stored []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE member_id = $1`, ag.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	want := hmacSHA256(oldKey, secret)
+	if !bytes.Equal(stored, want) {
+		t.Fatalf("stored Agent credential hash = %x, want HMAC-SHA256 %x", stored, want)
+	}
+	plainHash := sha256.Sum256([]byte(secret))
+	if bytes.Equal(stored, plainHash[:]) {
+		t.Fatal("Agent credential hash is a plain SHA-256 digest, want HMAC")
+	}
+	rotating := &Service{Store: st, HMACKeys: [][]byte{newKey, oldKey}}
+	if _, err := rotating.AuthenticateKey(ctx, raw); err != nil {
+		t.Fatalf("credential issued with previous HMAC key was not accepted during rotation: %v", err)
+	}
+	rotated, err := rotating.Rotate(ctx, owner.ID, ag.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotatedSecret := strings.SplitN(rotated, ".", 2)[1]
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM agent_credentials WHERE member_id = $1 AND revoked_at IS NULL`, ag.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(stored, hmacSHA256(newKey, rotatedSecret)) {
+		t.Fatal("rotated Agent credential was not hashed with the current HMAC key")
+	}
+}
+
+func hmacSHA256(key []byte, value string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil)
 }
 
 func TestAgentDelegationDepthUsesConfiguredLimit(t *testing.T) {
