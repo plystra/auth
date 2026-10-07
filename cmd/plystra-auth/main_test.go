@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/plystra/auth/internal/config"
+	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 )
@@ -202,7 +203,7 @@ func TestShutdownServersHonorsTimeoutForInFlightRequests(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("request did not start")
 	}
-	err := shutdownServers([]*http.Server{server.Config}, 20*time.Millisecond)
+	err := shutdownServers([]*http.Server{server.Config}, jobs.New(context.Background()), 20*time.Millisecond)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
 	}
@@ -238,7 +239,9 @@ func TestShutdownServersWaitsForInFlightRequestsBeforeTimeout(t *testing.T) {
 	}
 
 	shutdownDone := make(chan error, 1)
-	go func() { shutdownDone <- shutdownServers([]*http.Server{server.Config}, time.Second) }()
+	go func() {
+		shutdownDone <- shutdownServers([]*http.Server{server.Config}, jobs.New(context.Background()), time.Second)
+	}()
 	time.Sleep(20 * time.Millisecond)
 	close(release)
 	select {
@@ -252,4 +255,48 @@ func TestShutdownServersWaitsForInFlightRequestsBeforeTimeout(t *testing.T) {
 	if err := <-requestDone; err != nil {
 		t.Fatalf("in-flight request error = %v", err)
 	}
+}
+
+func TestShutdownServersWaitsForInFlightTasks(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	tasks := jobs.New(context.Background())
+	if !tasks.Start(func(ctx context.Context) {
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+	}) {
+		t.Fatal("task was not accepted before shutdown")
+	}
+	<-started
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- shutdownServers(nil, tasks, time.Second) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not wait for the in-flight task")
+	}
+	if tasks.Start(func(context.Context) {}) {
+		t.Fatal("task started after shutdown")
+	}
+}
+
+func TestShutdownServersHonorsTaskTimeout(t *testing.T) {
+	tasks := jobs.New(context.Background())
+	release := make(chan struct{})
+	if !tasks.Start(func(context.Context) { <-release }) {
+		t.Fatal("task was not accepted before shutdown")
+	}
+	err := shutdownServers(nil, tasks, 20*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown error = %v, want deadline exceeded", err)
+	}
+	close(release)
 }

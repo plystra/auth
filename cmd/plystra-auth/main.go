@@ -27,6 +27,7 @@ import (
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
+	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/observability"
 	"github.com/plystra/auth/internal/operator"
@@ -148,6 +149,8 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	defer st.Close()
+	tasks := jobs.New(ctx)
+	defer func() { _ = tasks.Shutdown(context.Background()) }()
 	var signer *security.Signer
 	signingKeyEncryptionKey, e := decodeDataKey(c.SigningKeyEncryptionKey)
 	if e != nil {
@@ -273,18 +276,23 @@ func serve(ctx context.Context) error {
 			return e
 		}
 	}
-	if err := shutdownServers(servers, c.ShutdownTimeout); err != nil {
+	if err := shutdownServers(servers, tasks, c.ShutdownTimeout); err != nil {
 		slog.Warn("graceful shutdown timed out", "error", err)
 	}
 	return nil
 }
 
-func shutdownServers(servers []*http.Server, timeout time.Duration) error {
+func shutdownServers(servers []*http.Server, tasks *jobs.Runner, timeout time.Duration) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	var firstErr error
+	errs := make(chan error, len(servers)+1)
 	for _, srv := range servers {
-		if err := srv.Shutdown(shutdownCtx); err != nil && firstErr == nil {
+		go func(server *http.Server) { errs <- server.Shutdown(shutdownCtx) }(srv)
+	}
+	go func() { errs <- tasks.Shutdown(shutdownCtx) }()
+	var firstErr error
+	for range len(servers) + 1 {
+		if err := <-errs; err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
