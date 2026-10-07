@@ -385,6 +385,15 @@ type Member struct {
 	Status        string `json:"status"`
 }
 
+type Group struct {
+	ID       string `json:"id"`
+	SpaceID  string `json:"space_id"`
+	Name     string `json:"name"`
+	ParentID string `json:"parent_id,omitempty"`
+	Kind     string `json:"kind"`
+	Status   string `json:"status"`
+}
+
 type Binding struct {
 	UserID    string `json:"user_id"`
 	MemberID  string `json:"member_id"`
@@ -428,6 +437,7 @@ var administratorPermissions = []string{
 	"auth.spaces:manage",
 	"auth.members:read",
 	"auth.members:manage",
+	"auth.groups:manage",
 	"auth.bindings:manage",
 	"auth.roles:manage",
 	"auth.grants:assign",

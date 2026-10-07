@@ -12,9 +12,105 @@ import (
 	"github.com/plystra/auth/internal/authz/delta"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/ids"
 )
 
 const maxGroupDepth = 16
+
+// CreateGroup creates a standard group in a Space. The Space or requested
+// parent is resolved and locked before the authorization decision, so a
+// caller cannot authorize one node and write another. Root creation is
+// serialized by the Space row lock; the database-level unique-root invariant
+// remains a separate schema task tracked in the roadmap.
+func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name, parentGroupID string) (Group, error) {
+	actorMemberID = strings.TrimSpace(actorMemberID)
+	spaceID = strings.TrimSpace(spaceID)
+	name = strings.TrimSpace(name)
+	parentGroupID = strings.TrimSpace(parentGroupID)
+	if actorMemberID == "" || spaceID == "" || name == "" || len(name) > 128 {
+		return Group{}, apierr.New("VALIDATION_FAILED", "group fields are invalid")
+	}
+
+	var out Group
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
+		// Lock the governing Space and, when present, the complete parent chain
+		// in the same stable order used by all authorization-backed mutations.
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, parentGroupID); err != nil {
+			return err
+		}
+		space, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "Space was not found")
+		}
+		if err != nil {
+			return err
+		}
+
+		if parentGroupID != "" {
+			parent, parentErr := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: parentGroupID, SpaceID: spaceID})
+			if errors.Is(parentErr, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "parent group was not found in this Space")
+			}
+			if parentErr != nil {
+				return parentErr
+			}
+			if parent.Kind != "standard" {
+				return apierr.New("PERMISSION_DENIED", "Agent-owned groups cannot have manual child groups")
+			}
+			if parent.Status != "active" {
+				return apierr.New("GROUP_INACTIVE", "parent group is not active")
+			}
+			depth, depthErr := groupDepthTx(ctx, q, parentGroupID, spaceID)
+			if depthErr != nil {
+				return depthErr
+			}
+			if depth >= maxGroupDepth {
+				return apierr.New("VALIDATION_FAILED", "group tree exceeds the maximum depth")
+			}
+		} else {
+			count, countErr := q.CountStandardRootGroups(ctx, db.CountStandardRootGroupsParams{SpaceID: spaceID})
+			if countErr != nil {
+				return countErr
+			}
+			if count != 0 {
+				return apierr.New("CONFLICT", "the Space already has a standard root group")
+			}
+		}
+
+		decision, checkErr := s.CheckTx(ctx, q, CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.groups:manage", ResourceSpace: spaceID, ResourceGroup: parentGroupID,
+		})
+		if checkErr != nil {
+			return checkErr
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.groups:manage"}}
+		}
+
+		row, createErr := q.CreateStandardGroup(ctx, db.CreateStandardGroupParams{
+			ID: string(ids.New[ids.GroupID]("grp")), SpaceID: space.ID, Name: name,
+			ParentID: pgtype.Text{String: parentGroupID, Valid: parentGroupID != ""},
+		})
+		if createErr != nil {
+			return normalizeDBError(createErr)
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: space.ID}); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "group.create", row.ID, "success"); err != nil {
+			return err
+		}
+		out = Group{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, Status: row.Status}
+		if row.ParentID.Valid {
+			out.ParentID = row.ParentID.String
+		}
+		return nil
+	})
+	return out, err
+}
 
 // AddMemberToGroup applies the group-membership change and its authority
 // delta in one transaction. The target group is a resource fact for both

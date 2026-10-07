@@ -149,6 +149,15 @@ type groupMoveInput struct {
 	}
 }
 
+type createGroupInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		Name          string `json:"name"`
+		ParentGroupID string `json:"parent_group_id,omitempty"`
+	}
+}
+
 type authorizationDataOutput[T any] struct {
 	Body struct {
 		Data T `json:"data"`
@@ -185,6 +194,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.listAssignmentRights)
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
+	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
@@ -512,6 +522,21 @@ func (a *API) revokeAssignmentRight(ctx context.Context, in *assignmentRightPath
 		return nil, err
 	}
 	return acceptedResponse(), nil
+}
+
+func (a *API) createGroup(ctx context.Context, in *createGroupInput) (*authorizationDataOutput[authorization.Group], error) {
+	parentGroupID := strings.TrimSpace(in.Body.ParentGroupID)
+	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, parentGroupID, "auth.groups:manage")
+	if err != nil {
+		return nil, err
+	}
+	group, err := a.Authorization.CreateGroup(ctx, actor.ID, in.ID, in.Body.Name, parentGroupID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[authorization.Group]{}
+	out.Body.Data = group
+	return out, nil
 }
 
 func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {

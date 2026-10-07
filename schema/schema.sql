@@ -1019,3 +1019,13 @@ CREATE TRIGGER group_envelope_entries_auth_policy_mutation
 AFTER INSERT OR UPDATE OR DELETE ON group_envelope_entries
 FOR EACH ROW
 EXECUTE FUNCTION bump_space_policy_for_envelope();
+
+
+-- Existing administrator roles must retain the built-in permission required by
+-- the standard-group management endpoint introduced after the initial seed.
+INSERT INTO role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM roles r
+CROSS JOIN permissions p
+WHERE r.name = 'administrator' AND p.key = 'auth.groups:manage'
+ON CONFLICT DO NOTHING;

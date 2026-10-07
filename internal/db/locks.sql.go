@@ -11,6 +11,71 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countStandardRootGroups = `-- name: CountStandardRootGroups :one
+SELECT count(*)::bigint
+FROM groups
+WHERE space_id = $1
+  AND kind = 'standard'
+  AND parent_id IS NULL
+  AND status <> 'removed'
+`
+
+type CountStandardRootGroupsParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) CountStandardRootGroups(ctx context.Context, arg CountStandardRootGroupsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countStandardRootGroups, arg.SpaceID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const createStandardGroup = `-- name: CreateStandardGroup :one
+INSERT INTO groups (id, space_id, name, parent_id, kind, status)
+VALUES ($1, $2, $3, $4, 'standard', 'active')
+RETURNING id, space_id, name, parent_id, kind, owner_member_id, status, created_at
+`
+
+type CreateStandardGroupParams struct {
+	ID       string      `json:"id"`
+	SpaceID  string      `json:"space_id"`
+	Name     string      `json:"name"`
+	ParentID pgtype.Text `json:"parent_id"`
+}
+
+type CreateStandardGroupRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	ParentID      pgtype.Text        `json:"parent_id"`
+	Kind          string             `json:"kind"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	Status        string             `json:"status"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) CreateStandardGroup(ctx context.Context, arg CreateStandardGroupParams) (CreateStandardGroupRow, error) {
+	row := q.db.QueryRow(ctx, createStandardGroup,
+		arg.ID,
+		arg.SpaceID,
+		arg.Name,
+		arg.ParentID,
+	)
+	var i CreateStandardGroupRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ParentID,
+		&i.Kind,
+		&i.OwnerMemberID,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const lockGroupInSpaceForAuthorization = `-- name: LockGroupInSpaceForAuthorization :one
 SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
 FROM groups

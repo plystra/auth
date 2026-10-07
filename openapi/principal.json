@@ -329,6 +329,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputGroupBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Group"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputListAssignmentRightBody": {
         "additionalProperties": false,
         "properties": {
@@ -562,6 +574,21 @@
         "required": [
           "grantee_member_id",
           "role_id"
+        ],
+        "type": "object"
+      },
+      "CreateGroupInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "parent_group_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
         ],
         "type": "object"
       },
@@ -822,6 +849,37 @@
           "grantee_member_id",
           "scope",
           "granted_by"
+        ],
+        "type": "object"
+      },
+      "Group": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "parent_id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "space_id",
+          "name",
+          "kind",
+          "status"
         ],
         "type": "object"
       },
@@ -2479,6 +2537,61 @@
           }
         },
         "summary": "grants.revoke"
+      }
+    },
+    "/v1/spaces/{id}/groups": {
+      "post": {
+        "operationId": "groups.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateGroupInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputGroupBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "groups.create"
       }
     },
     "/v1/spaces/{id}/groups/{group_id}/members/{mid}": {

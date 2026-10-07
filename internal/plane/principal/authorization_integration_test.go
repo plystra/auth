@@ -154,6 +154,33 @@ func TestGroupMembershipManagementEndpointUsesTargetGroupFacts(t *testing.T) {
 	}
 }
 
+func TestGroupCreationManagementEndpointCreatesStandardRoot(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/groups", strings.NewReader(`{"name":"Operations"}`))
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	route.Middleware(route.Principal, mux).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("POST group creation = %d %s, want 200", w.Code, w.Body.String())
+	}
+	var kind, status string
+	if err := st.Pool.QueryRow(ctx, `SELECT kind, status FROM groups WHERE space_id = $1 AND name = 'Operations'`, spaceID).Scan(&kind, &status); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "standard" || status != "active" {
+		t.Fatalf("endpoint-created group = kind %q status %q, want standard active", kind, status)
+	}
+}
+
 func TestGroupMoveManagementEndpointUsesTargetFacts(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

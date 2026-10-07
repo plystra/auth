@@ -158,6 +158,21 @@ func TestGroupMembershipRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.
 	t.Fatal("group membership route was not registered")
 }
 
+func TestGroupCreationRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "groups.create" {
+			continue
+		}
+		if spec.Method != http.MethodPost || spec.Path != "/v1/spaces/{id}/groups" || spec.Permission != "auth.groups:manage" || !spec.AuthoritativeCheck || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("group creation route = %+v, want POST H/A auth.groups:manage authoritative check", spec)
+		}
+		return
+	}
+	t.Fatal("group creation route was not registered")
+}
+
 func TestGroupMoveRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T) {
 	api := &API{}
 	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
