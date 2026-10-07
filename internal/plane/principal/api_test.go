@@ -142,3 +142,18 @@ func TestAssignmentRightsRoutesDeclareHumanAgentAndMutationGuards(t *testing.T) 
 		t.Fatalf("assignment-right routes missing: %v", want)
 	}
 }
+
+func TestGroupMembershipRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "groups.members.add" {
+			continue
+		}
+		if spec.Method != http.MethodPut || spec.Path != "/v1/spaces/{id}/groups/{group_id}/members/{mid}" || spec.Permission != "auth.groups:manage" || !spec.AuthoritativeCheck || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("group membership route = %+v, want PUT H/A auth.groups:manage authoritative check", spec)
+		}
+		return
+	}
+	t.Fatal("group membership route was not registered")
+}

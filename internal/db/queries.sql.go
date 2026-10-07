@@ -27,6 +27,29 @@ func (q *Queries) AddAgentToGroup(ctx context.Context, arg AddAgentToGroupParams
 	return err
 }
 
+const addGroupMember = `-- name: AddGroupMember :exec
+INSERT INTO group_members (group_id, member_id, space_id, source)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (group_id, member_id) DO NOTHING
+`
+
+type AddGroupMemberParams struct {
+	GroupID  string `json:"group_id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+	Source   string `json:"source"`
+}
+
+func (q *Queries) AddGroupMember(ctx context.Context, arg AddGroupMemberParams) error {
+	_, err := q.db.Exec(ctx, addGroupMember,
+		arg.GroupID,
+		arg.MemberID,
+		arg.SpaceID,
+		arg.Source,
+	)
+	return err
+}
+
 const assignRole = `-- name: AssignRole :exec
 INSERT INTO member_roles (member_id, role_id, granted_by) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
 `
@@ -924,6 +947,36 @@ func (q *Queries) GetGroupInSpace(ctx context.Context, arg GetGroupInSpaceParams
 		&i.OwnerMemberID,
 		&i.Status,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getGroupMember = `-- name: GetGroupMember :one
+SELECT group_id, member_id, space_id, source
+FROM group_members
+WHERE group_id = $1 AND member_id = $2
+`
+
+type GetGroupMemberParams struct {
+	GroupID  string `json:"group_id"`
+	MemberID string `json:"member_id"`
+}
+
+type GetGroupMemberRow struct {
+	GroupID  string `json:"group_id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+	Source   string `json:"source"`
+}
+
+func (q *Queries) GetGroupMember(ctx context.Context, arg GetGroupMemberParams) (GetGroupMemberRow, error) {
+	row := q.db.QueryRow(ctx, getGroupMember, arg.GroupID, arg.MemberID)
+	var i GetGroupMemberRow
+	err := row.Scan(
+		&i.GroupID,
+		&i.MemberID,
+		&i.SpaceID,
+		&i.Source,
 	)
 	return i, err
 }

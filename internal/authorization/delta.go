@@ -89,6 +89,23 @@ func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, m
 	return permissionSnapshot(assignments, memberID, position, principalKind), nil
 }
 
+func (s *Service) grantAuthoritySnapshotAtPositionTx(ctx context.Context, q *db.Queries, memberID, spaceID, principalKind string, position delta.Node) (delta.Snapshot, error) {
+	if principalKind == "human" {
+		bindings, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
+		if err != nil {
+			return delta.Snapshot{}, err
+		}
+		if bindings == 0 {
+			return delta.Snapshot{}, nil
+		}
+	}
+	assignments, _, err := s.assignmentsQueries(ctx, q, memberID)
+	if err != nil {
+		return delta.Snapshot{}, err
+	}
+	return permissionSnapshot(assignments, memberID, position, principalKind), nil
+}
+
 func memberPositionTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (delta.Node, error) {
 	groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
 	if err != nil {

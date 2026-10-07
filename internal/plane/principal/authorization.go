@@ -122,6 +122,13 @@ type memberPatchInput struct {
 	}
 }
 
+type groupMemberPathInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	GroupID       string `path:"group_id"`
+	MemberID      string `path:"mid"`
+}
+
 type authorizationDataOutput[T any] struct {
 	Body struct {
 		Data T `json:"data"`
@@ -157,6 +164,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.listAssignmentRights)
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
+	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
 }
 
 func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authorizationDataOutput[createdSpaceData], error) {
@@ -337,6 +345,17 @@ func acceptedResponse() *authorizationDataOutput[acceptedData] {
 	out := &authorizationDataOutput[acceptedData]{}
 	out.Body.Data.Accepted = true
 	return out
+}
+
+func (a *API) addGroupMember(ctx context.Context, in *groupMemberPathInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.AddMemberToGroup(ctx, actor.ID, in.ID, in.GroupID, in.MemberID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
 }
 
 func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Role], error) {

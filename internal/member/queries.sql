@@ -84,6 +84,16 @@ WHERE gm.member_id = sqlc.arg(member_id)
   AND g.status = 'active'
 ORDER BY g.id;
 
+-- name: GetGroupMember :one
+SELECT group_id, member_id, space_id, source
+FROM group_members
+WHERE group_id = sqlc.arg(group_id) AND member_id = sqlc.arg(member_id);
+
+-- name: AddGroupMember :exec
+INSERT INTO group_members (group_id, member_id, space_id, source)
+VALUES (sqlc.arg(group_id), sqlc.arg(member_id), sqlc.arg(space_id), sqlc.arg(source))
+ON CONFLICT (group_id, member_id) DO NOTHING;
+
 -- name: LockMemberInSpace :one
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members
