@@ -73,6 +73,52 @@ func TestGrantCreationRejectsPositiveDeltaDespiteMatchingActorPermissionKey(t *t
 	}
 }
 
+func TestMemberAndGroupManagementCannotElevateAuthority(t *testing.T) {
+	for _, managerPermission := range []string{"auth.members:manage", "auth.groups:manage"} {
+		t.Run(managerPermission, func(t *testing.T) {
+			ctx := context.Background()
+			st, svc, actor, spaceID := newBindingFixture(t)
+			target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Elevation target", "human", "single")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actor.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `
+				INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+				VALUES ('grt_manager_only', $1, jsonb_build_array($2::text), $3, 'space', $1, $3)
+			`, spaceID, managerPermission, actor.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			if _, err := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err == nil {
+				t.Fatal("member/group manager created a grant without auth.grants:assign")
+			} else {
+				assertAPIErrorCode(t, err, "NO_MATCHING_PERMISSION")
+			}
+			if _, err := svc.CreateAssignmentRight(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:manage"}, spaceID, "", false, false, nil); err == nil {
+				t.Fatal("member/group manager created an assignment right without auth.assign_rights:manage")
+			} else {
+				assertAPIErrorCode(t, err, "NO_MATCHING_PERMISSION")
+			}
+			var grants, rights int
+			if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, target.ID).Scan(&grants); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM assign_rights WHERE holder_member_id = $1 AND revoked_at IS NULL`, target.ID).Scan(&rights); err != nil {
+				t.Fatal(err)
+			}
+			if grants != 0 || rights != 0 {
+				t.Fatalf("manager-only elevation persisted grants=%d rights=%d", grants, rights)
+			}
+		})
+	}
+}
+
 func TestGrantCreationCoversPositiveDeltaWithAssignmentRight(t *testing.T) {
 	for _, kind := range []string{"inline", "role"} {
 		t.Run(kind, func(t *testing.T) {
