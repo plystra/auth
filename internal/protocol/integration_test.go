@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/security"
@@ -117,6 +118,77 @@ func TestOAuthRefreshGrantUsesAgentAccessTokenRenewal(t *testing.T) {
 	}
 	if next := request(firstBody.RefreshToken); next.Code != http.StatusBadRequest {
 		t.Fatalf("family token after replay status = %d, want 400", next.Code)
+	}
+}
+
+func TestOAuthUserinfoReturnsUserAndAgentSubjects(t *testing.T) {
+	ctx := context.Background()
+	database, err := protocolDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status, email_verified_at, display_name, avatar_url)
+		VALUES ('usr_userinfo_protocol', 'userinfo@example.test', 'userinfo@example.test', 'test-password-hash', 'active', now(), 'Info User', 'https://cdn.test/avatar.png')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &authorization.Service{Store: st}
+	_, owner, err := authorizer.CreateSpace(ctx, "usr_userinfo_protocol", "Userinfo Space", "userinfo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st, HMACKeys: [][]byte{[]byte("protocol-userinfo-hmac-key-0001")}}
+	ag, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "userinfo-agent", Source: "oauth", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store: st, Signer: signer, HMACKeys: [][]byte{[]byte("session-hmac-key-0000000000000001")},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	accounts := &account.Service{Store: st}
+	var mux http.ServeMux
+	(HTTP{Agents: agents, Accounts: accounts, Sessions: sessions}).Register(&mux)
+	userTokens, err := sessions.CreateForMember(ctx, "usr_userinfo_protocol", "", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTokens, err := sessions.CreateAgentAccess(ctx, ag.ID, owner.SpaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(token string) (int, map[string]any) {
+		req := httptest.NewRequest(http.MethodGet, "/oauth/userinfo", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		var body map[string]any
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
+			t.Fatalf("userinfo response is not JSON: %v", err)
+		}
+		return res.Code, body
+	}
+	if status, body := request(userTokens.AccessToken); status != http.StatusOK || body["sub"] != "usr_userinfo_protocol" || body["email"] != "userinfo@example.test" || body["email_verified"] != true || body["name"] != "Info User" || body["picture"] != "https://cdn.test/avatar.png" {
+		t.Fatalf("user userinfo status=%d body=%v", status, body)
+	}
+	if status, body := request(agentTokens.AccessToken); status != http.StatusOK || body["sub"] != ag.ID || body["member_id"] != ag.ID || body["space_id"] != owner.SpaceID || body["principal_type"] != "agent" {
+		t.Fatalf("agent userinfo status=%d body=%v", status, body)
+	}
+	if status, body := request("not-a-token"); status != http.StatusUnauthorized || body["error"].(map[string]any)["code"] != "invalid_token" {
+		t.Fatalf("invalid userinfo status=%d body=%v", status, body)
 	}
 }
 

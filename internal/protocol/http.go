@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
@@ -17,6 +18,7 @@ import (
 type HTTP struct {
 	Issuer        string
 	Agents        *agent.Service
+	Accounts      *account.Service
 	Sessions      *session.Service
 	Authorization *authorization.Service
 }
@@ -29,7 +31,7 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.revoke", "POST", "/oauth/revoke", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.revoke))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.device_authorization", "POST", "/oauth/device_authorization", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.register", "POST", "/oauth/register", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.userinfo))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.users", "GET", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
@@ -139,6 +141,52 @@ func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	// RFC 7009 intentionally hides whether an opaque or JWT token was known.
 	w.WriteHeader(http.StatusOK)
+}
+
+func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
+	if h.Sessions == nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "userinfo is unavailable"))
+		return
+	}
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		writeErr(w, apierr.New("invalid_token", "a bearer access token is required"))
+		return
+	}
+	claims, active, err := h.Sessions.Introspect(r.Context(), parts[1], security.DefaultApplicationAudience)
+	if err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "userinfo is unavailable"))
+		return
+	}
+	if !active {
+		writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
+		return
+	}
+	if claims.Type == "user" {
+		if h.Accounts == nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "userinfo is unavailable"))
+			return
+		}
+		user, err := h.Accounts.Me(r.Context(), claims)
+		if err != nil {
+			writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
+			return
+		}
+		body := map[string]any{"sub": user.ID, "email": user.Email, "email_verified": user.EmailVerified}
+		if user.DisplayName != "" {
+			body["name"] = user.DisplayName
+		}
+		if user.AvatarURL != "" {
+			body["picture"] = user.AvatarURL
+		}
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+	if claims.Type == "agent" {
+		writeJSON(w, http.StatusOK, map[string]any{"sub": claims.Subject, "member_id": claims.MemberID, "space_id": claims.SpaceID, "principal_type": "agent"})
+		return
+	}
+	writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
 }
 
 func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {

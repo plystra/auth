@@ -234,7 +234,7 @@ func serve(ctx context.Context) error {
 	scfg := route.HumaConfig("Plystra Auth server", "1.0.0")
 	ocfg := route.HumaConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
-	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
+	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Accounts: accounts, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, signer)
