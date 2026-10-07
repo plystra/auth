@@ -426,6 +426,123 @@ func TestGrantValidationLocksAnchorSpaceBeforeWrite(t *testing.T) {
 	}
 }
 
+func TestGrantValidationAndWriteShareLocksAgainstConcurrentAssignmentRevocation(t *testing.T) {
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Concurrent revocation target", "human", "single")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rights, err := st.Queries().ListActiveAssignRightsForHolder(ctx, db.ListActiveAssignRightsForHolderParams{HolderMemberID: actor.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rights) != 1 {
+		t.Fatalf("creator assignment rights = %d, want one", len(rights))
+	}
+
+	const advisoryKey int64 = 917241
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION test_hold_authorization_grant_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(917241);
+			RETURN NEW;
+		END
+		$$;
+		CREATE TRIGGER test_hold_authorization_grant_insert
+		BEFORE INSERT ON authorization_grants
+		FOR EACH ROW EXECUTE FUNCTION test_hold_authorization_grant_insert();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = st.Pool.Exec(context.Background(), `
+			DROP TRIGGER IF EXISTS test_hold_authorization_grant_insert ON authorization_grants;
+			DROP FUNCTION IF EXISTS test_hold_authorization_grant_insert();
+		`)
+	})
+
+	lockConn, err := st.Pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryKey); err != nil {
+		lockConn.Release()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = lockConn.Exec(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryKey)
+		lockConn.Release()
+	})
+
+	grantErr := make(chan error, 1)
+	go func() {
+		_, grantErrValue := svc.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID)
+		grantErr <- grantErrValue
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var waiting bool
+		if err := st.Pool.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1
+				FROM pg_stat_activity
+				WHERE datname = current_database()
+				  AND wait_event_type = 'Lock'
+				  AND wait_event = 'advisory'
+			)`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("grant did not reach the write barrier")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	revokeErr := make(chan error, 1)
+	go func() {
+		revokeErr <- svc.RevokeAssignmentRight(ctx, actor.ID, spaceID, rights[0].ID)
+	}()
+	select {
+	case err := <-revokeErr:
+		t.Fatalf("assignment revocation committed before the grant transaction: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if _, err := lockConn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, advisoryKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-grantErr; err != nil {
+		t.Fatalf("grant failed after the validation/write barrier was released: %v", err)
+	}
+	if err := <-revokeErr; err != nil {
+		t.Fatalf("assignment revocation failed after the grant committed: %v", err)
+	}
+
+	var grants int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM authorization_grants
+		WHERE grantee_member_id = $1 AND revoked_at IS NULL
+	`, target.ID).Scan(&grants); err != nil {
+		t.Fatal(err)
+	}
+	if grants != 1 {
+		t.Fatalf("committed grants = %d, want one", grants)
+	}
+	var revoked bool
+	if err := st.Pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM assign_rights WHERE id = $1`, rights[0].ID).Scan(&revoked); err != nil {
+		t.Fatal(err)
+	}
+	if !revoked {
+		t.Fatal("assignment right was not revoked after the grant transaction committed")
+	}
+}
+
 func TestGrantCreationAllowsEmptyDelta(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
