@@ -462,6 +462,10 @@ type User struct {
 	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
 	Status                  string             `json:"status"`
 	PasswordResetRequiredAt pgtype.Timestamptz `json:"password_reset_required_at"`
+	DisplayName             string             `json:"display_name"`
+	AvatarUrl               string             `json:"avatar_url"`
+	PublicMetadata          []byte             `json:"public_metadata"`
+	PrivateMetadata         []byte             `json:"private_metadata"`
 }
 
 type UserMember struct {

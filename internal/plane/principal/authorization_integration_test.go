@@ -116,6 +116,61 @@ func TestMeAndSpaceMembersHTTPEndpointsReturnAuthorizedData(t *testing.T) {
 	}
 }
 
+func TestMeUpdateChangesPublicProfileButNeverPrivateMetadata(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET private_metadata = '{"internal":"secret"}'::jsonb WHERE id = 'usr_principal_actor'`); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: st}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	req := httptest.NewRequest(http.MethodPatch, "/v1/me", strings.NewReader(`{"name":"Carol","avatar_url":"https://cdn.example.test/avatar.png","public_metadata":{"team":"security"}}`))
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"name":"Carol"`) || !strings.Contains(w.Body.String(), `"team":"security"`) || strings.Contains(w.Body.String(), "internal") {
+		t.Fatalf("PATCH /v1/me = %d %s, want public profile without private metadata", w.Code, w.Body.String())
+	}
+	var displayName, avatarURL string
+	var publicMetadata, privateMetadata []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT display_name, avatar_url, public_metadata, private_metadata FROM users WHERE id = 'usr_principal_actor'`).Scan(&displayName, &avatarURL, &publicMetadata, &privateMetadata); err != nil {
+		t.Fatal(err)
+	}
+	var publicValues map[string]string
+	if err := json.Unmarshal(publicMetadata, &publicValues); err != nil {
+		t.Fatal(err)
+	}
+	var privateValues map[string]string
+	if err := json.Unmarshal(privateMetadata, &privateValues); err != nil {
+		t.Fatal(err)
+	}
+	if displayName != "Carol" || avatarURL != "https://cdn.example.test/avatar.png" || publicValues["team"] != "security" || privateValues["internal"] != "secret" {
+		t.Fatalf("stored profile = name %q avatar %q public %s private %s", displayName, avatarURL, publicMetadata, privateMetadata)
+	}
+
+	agentService := &agent.Service{Store: st}
+	created, _, err := agentService.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "profile-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentTokens, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := api.updateMe(ctx, &MePatchInput{Authorization: "Bearer " + agentTokens.AccessToken}); err == nil {
+		t.Fatal("Agent was allowed to update a user profile")
+	} else {
+		assertPrincipalError(t, err, "USER_ACCOUNT_REQUIRED")
+	}
+}
+
 func TestGroupMembershipManagementEndpointUsesTargetGroupFacts(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)

@@ -923,6 +923,22 @@
         ],
         "type": "object"
       },
+      "MePatchInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "avatar_url": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "public_metadata": {
+            "additionalProperties": {},
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
       "Member": {
         "additionalProperties": false,
         "properties": {
@@ -1272,6 +1288,9 @@
       "User": {
         "additionalProperties": false,
         "properties": {
+          "avatar_url": {
+            "type": "string"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -1285,6 +1304,13 @@
           "id": {
             "type": "string"
           },
+          "name": {
+            "type": "string"
+          },
+          "public_metadata": {
+            "additionalProperties": {},
+            "type": "object"
+          },
           "status": {
             "type": "string"
           }
@@ -1294,6 +1320,9 @@
           "email",
           "email_verified",
           "status",
+          "name",
+          "avatar_url",
+          "public_metadata",
           "created_at"
         ],
         "type": "object"
@@ -1705,6 +1734,51 @@
           }
         },
         "summary": "auth.me"
+      },
+      "patch": {
+        "operationId": "auth.me_update",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MePatchInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.me_update"
       }
     },
     "/v1/me/agents": {

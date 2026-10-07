@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
@@ -22,11 +24,14 @@ import (
 )
 
 type User struct {
-	ID            string    `json:"id"`
-	Email         string    `json:"email"`
-	EmailVerified bool      `json:"email_verified"`
-	Status        string    `json:"status"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string         `json:"id"`
+	Email          string         `json:"email"`
+	EmailVerified  bool           `json:"email_verified"`
+	Status         string         `json:"status"`
+	DisplayName    string         `json:"name"`
+	AvatarURL      string         `json:"avatar_url"`
+	PublicMetadata map[string]any `json:"public_metadata"`
+	CreatedAt      time.Time      `json:"created_at"`
 }
 type Service struct {
 	Store         *store.Store
@@ -39,6 +44,12 @@ type Service struct {
 type RegisterInput struct {
 	Email    string
 	Password string
+}
+
+type ProfileUpdate struct {
+	DisplayName    *string
+	AvatarURL      *string
+	PublicMetadata *map[string]any
 }
 type LoginInput struct {
 	Email     string
@@ -234,7 +245,7 @@ func rateIdentity(ip net.IP) string {
 	return ip.String()
 }
 func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) {
-	u, e := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
+	u, e := s.Store.Queries().GetUserProfileByID(ctx, db.GetUserProfileByIDParams{ID: claims.Subject})
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return User{}, apierr.New("unauthorized", "user no longer exists")
@@ -244,7 +255,54 @@ func (s *Service) Me(ctx context.Context, claims security.Claims) (User, error) 
 	if u.DisabledAt.Valid || u.Status != "active" {
 		return User{}, apierr.New("unauthorized", "account is disabled")
 	}
-	return toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), nil
+	return userFromProfileRow(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.DisplayName, u.AvatarUrl, u.PublicMetadata, u.CreatedAt.Time)
+}
+
+// UpdateProfile changes only user-owned public profile fields. Private
+// metadata is intentionally absent from this API and is reserved for the
+// server-side management plane.
+func (s *Service) UpdateProfile(ctx context.Context, userID string, in ProfileUpdate) (User, error) {
+	if strings.TrimSpace(userID) == "" {
+		return User{}, apierr.New("UNAUTHENTICATED", "a user account is required")
+	}
+	if in.DisplayName != nil && (len([]rune(*in.DisplayName)) > 128 || strings.ContainsAny(*in.DisplayName, "\r\n")) {
+		return User{}, apierr.New("VALIDATION_FAILED", "name is invalid")
+	}
+	if in.AvatarURL != nil && (len(*in.AvatarURL) > 2048 || strings.ContainsAny(*in.AvatarURL, "\r\n")) {
+		return User{}, apierr.New("VALIDATION_FAILED", "avatar_url is invalid")
+	}
+	var publicMetadata []byte
+	if in.PublicMetadata != nil {
+		encoded, err := json.Marshal(*in.PublicMetadata)
+		if err != nil {
+			return User{}, apierr.New("VALIDATION_FAILED", "public_metadata must be valid JSON")
+		}
+		if len(encoded) > 16*1024 {
+			return User{}, apierr.New("VALIDATION_FAILED", "public_metadata exceeds 16 KiB")
+		}
+		publicMetadata = encoded
+	}
+	var out User
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.UpdateUserProfile(ctx, db.UpdateUserProfileParams{
+			ID: userID, DisplayName: optionalText(in.DisplayName), AvatarUrl: optionalText(in.AvatarURL), PublicMetadata: publicMetadata,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "user was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if row.Status != "active" {
+			return apierr.New("UNAUTHENTICATED", "account is not active")
+		}
+		out, err = userFromProfileRow(row.ID, row.Email, row.EmailVerifiedAt.Valid, row.Status, row.DisplayName, row.AvatarUrl, row.PublicMetadata, row.CreatedAt.Time)
+		if err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", userID, "user.profile.update", userID, "success")
+	})
+	return out, err
 }
 
 // SetUserStatus changes an account state and revokes all online credentials
@@ -311,7 +369,24 @@ func RequirePasswordResetTx(ctx context.Context, q *db.Queries, actorType, actor
 }
 
 func toPublicUser(id, email string, verified bool, status string, createdAt time.Time) User {
-	return User{ID: id, Email: email, EmailVerified: verified, Status: status, CreatedAt: createdAt}
+	return User{ID: id, Email: email, EmailVerified: verified, Status: status, PublicMetadata: map[string]any{}, CreatedAt: createdAt}
+}
+
+func userFromProfileRow(id, email string, verified bool, status, displayName, avatarURL string, encoded []byte, createdAt time.Time) (User, error) {
+	metadata := map[string]any{}
+	if len(encoded) != 0 {
+		if err := json.Unmarshal(encoded, &metadata); err != nil {
+			return User{}, err
+		}
+	}
+	return User{ID: id, Email: email, EmailVerified: verified, Status: status, DisplayName: displayName, AvatarURL: avatarURL, PublicMetadata: metadata, CreatedAt: createdAt}, nil
+}
+
+func optionalText(value *string) pgtype.Text {
+	if value == nil {
+		return pgtype.Text{}
+	}
+	return pgtype.Text{String: *value, Valid: true}
 }
 func validEmail(v string) bool {
 	at := strings.LastIndexByte(v, '@')

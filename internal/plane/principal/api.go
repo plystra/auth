@@ -57,6 +57,14 @@ type MembersInput struct {
 	Authorization string `header:"Authorization"`
 	Type          string `query:"type"`
 }
+type MePatchInput struct {
+	Authorization string `header:"Authorization"`
+	Body          struct {
+		Name           *string         `json:"name,omitempty"`
+		AvatarURL      *string         `json:"avatar_url,omitempty"`
+		PublicMetadata *map[string]any `json:"public_metadata,omitempty"`
+	}
+}
 type MeOutput struct {
 	Body struct {
 		Data any `json:"data"`
@@ -151,6 +159,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.sign_in_attempt", "POST", "/v1/auth/sign-in/{attempt_id}", route.Principal, "", []route.Subject{route.Public}), a.loginAttempt)
 	route.Register(api, route.NewSpec("auth.refresh", "POST", "/v1/auth/refresh", route.Principal, "", []route.Subject{route.Public}), a.refresh)
 	route.Register(api, route.NewSpec("auth.me", "GET", "/v1/me", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.me)
+	route.Register(api, route.NewSpec("auth.me_update", "PATCH", "/v1/me", route.Principal, "", []route.Subject{route.User}), a.updateMe)
 	route.Register(api, route.NewSpec("auth.me_permissions", "GET", "/v1/me/permissions", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.mePermissions)
 	route.Register(api, route.NewSpec("auth.me_members", "GET", "/v1/me/members", route.Principal, "", []route.Subject{route.User}), a.meMembers)
 	route.Register(api, route.NewSpec("auth.sign_out", "POST", "/v1/auth/sign-out", route.Principal, "", []route.Subject{route.User}), a.logout)
@@ -245,6 +254,35 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 		}
 		out.Body.Data = u
 	}
+	return out, nil
+}
+
+func (a *API) updateMe(ctx context.Context, in *MePatchInput) (*MeOutput, error) {
+	parts := strings.Fields(in.Authorization)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+	}
+	if a.Sessions == nil || a.Accounts == nil {
+		return nil, apierr.New("UNAVAILABLE", "authentication is unavailable")
+	}
+	claims, active, err := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
+	}
+	if claims.Type != "user" {
+		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+	}
+	user, err := a.Accounts.UpdateProfile(ctx, claims.Subject, account.ProfileUpdate{
+		DisplayName: in.Body.Name, AvatarURL: in.Body.AvatarURL, PublicMetadata: in.Body.PublicMetadata,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &MeOutput{}
+	out.Body.Data = user
 	return out, nil
 }
 

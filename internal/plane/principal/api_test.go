@@ -55,6 +55,21 @@ func TestSignOutRouteDeclaresUserAccountSubject(t *testing.T) {
 	t.Fatal("sign-out route was not registered")
 }
 
+func TestMeUpdateRouteDeclaresUserAccountSubject(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "auth.me_update" {
+			continue
+		}
+		if spec.Method != http.MethodPatch || spec.Path != "/v1/me" || spec.Permission != "" || len(spec.Subjects) != 1 || spec.Subjects[0] != route.User {
+			t.Fatalf("me update route = %+v, want PATCH U without member permission", spec)
+		}
+		return
+	}
+	t.Fatal("me update route was not registered")
+}
+
 func TestMultiStepSignInRoutesAndOpenAPIContract(t *testing.T) {
 	api := &API{}
 	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
