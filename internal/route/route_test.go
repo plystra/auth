@@ -96,6 +96,46 @@ func TestUserOnlyRouteMayOmitMemberPermission(t *testing.T) {
 	}
 }
 
+func TestRouteRegistrationRejectsIncompleteSpecs(t *testing.T) {
+	valid := Spec{
+		Name: "route.test", Method: http.MethodGet, Path: "/test",
+		Plane: Principal, Permission: "self:read", Subjects: []Subject{Human},
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Spec)
+	}{
+		{name: "name", mutate: func(spec *Spec) { spec.Name = "" }},
+		{name: "method", mutate: func(spec *Spec) { spec.Method = "" }},
+		{name: "path", mutate: func(spec *Spec) { spec.Path = "" }},
+		{name: "plane", mutate: func(spec *Spec) { spec.Plane = "" }},
+		{name: "subjects", mutate: func(spec *Spec) { spec.Subjects = nil }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := valid
+			tc.mutate(&spec)
+			assertRoutePanic(t, func() {
+				Register[struct{}, struct{}](nil, spec, nil)
+			})
+		})
+	}
+
+	assertRoutePanic(t, func() {
+		RegisterNonJSON(http.NewServeMux(), Spec{NonJSON: true}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	})
+}
+
+func assertRoutePanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("route registration did not reject an incomplete spec")
+		}
+	}()
+	fn()
+}
+
 func TestRegisterMapsInternalErrorsToUnavailable(t *testing.T) {
 	mux := http.NewServeMux()
 	api := humago.New(mux, HumaConfig("route test", "1.0.0"))
