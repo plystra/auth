@@ -191,3 +191,43 @@ func TestShutdownServersHonorsTimeoutForInFlightRequests(t *testing.T) {
 		t.Fatal("in-flight request did not finish after release")
 	}
 }
+
+func TestShutdownServersWaitsForInFlightRequestsBeforeTimeout(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get(server.URL)
+		if err == nil {
+			response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("request did not start")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- shutdownServers([]*http.Server{server.Config}, time.Second) }()
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not wait for the in-flight request")
+	}
+	if err := <-requestDone; err != nil {
+		t.Fatalf("in-flight request error = %v", err)
+	}
+}
