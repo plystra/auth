@@ -20,11 +20,11 @@ import (
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
-	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/config"
+	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/member"
@@ -183,53 +183,20 @@ func serve(ctx context.Context) error {
 		return e
 	}
 	opsAPI := &ops.API{Settings: settings, Operators: opsSvc}
+	parsers := credential.Validator{
+		Principal: credential.PrincipalParser{Sessions: sessionSvc, Agents: agentSvc},
+		Server:    credential.ServerParser{Applications: apps},
+		Ops:       credential.OpsParser{Operators: opsSvc},
+	}
 	validateCredential := func(ctx context.Context, plane, raw string) error {
-		raw = strings.TrimSpace(raw)
-		if raw == "" {
+		if strings.TrimSpace(raw) == "" {
 			return nil
 		}
-		parts := strings.Fields(raw)
-		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			return apierr.New("UNAUTHENTICATED", "a valid bearer credential is required")
+		err := parsers.Validate(ctx, plane, raw)
+		if err != nil && credential.Kind(raw) == "application_api_key" && (plane == string(route.Principal) || plane == string(route.Ops)) {
+			slog.Warn("application API key presented on non-server plane", "plane", plane, "credential_type", credential.Kind(raw))
 		}
-		raw = parts[1]
-		switch route.Plane(plane) {
-		case route.Principal:
-			if err := rejectCredentialPlane(route.Principal, raw); err != nil {
-				if strings.HasPrefix(raw, "ply_sk_") {
-					slog.Warn("application API key presented on principal plane", "plane", plane, "credential_type", "application_api_key")
-				}
-				return err
-			}
-			if strings.HasPrefix(raw, "ply_ag_") {
-				_, err := agentSvc.AuthenticateKey(ctx, raw)
-				return err
-			}
-			_, active, err := sessionSvc.Introspect(ctx, raw, security.DefaultApplicationAudience)
-			if err != nil {
-				return err
-			}
-			if !active {
-				return apierr.New("UNAUTHENTICATED", "the access token is no longer active")
-			}
-			return nil
-		case route.Server:
-			if err := rejectCredentialPlane(route.Server, raw); err != nil {
-				return err
-			}
-			_, err := apps.AuthenticateKey(ctx, raw)
-			return err
-		case route.Ops:
-			if err := rejectCredentialPlane(route.Ops, raw); err != nil {
-				if strings.HasPrefix(raw, "ply_sk_") {
-					slog.Warn("application API key presented on operations plane", "plane", plane, "credential_type", "application_api_key")
-				}
-				return err
-			}
-			return opsSvc.Validate(ctx, raw)
-		default:
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "credential plane is not supported")
-		}
+		return err
 	}
 	auditCredentialFailure := func(ctx context.Context, plane route.Plane, credentialType, code string) error {
 		if code != "CREDENTIAL_PLANE_MISMATCH" {
@@ -385,25 +352,5 @@ func decodeDataKey(value string) (string, error) {
 }
 
 func rejectCredentialPlane(plane route.Plane, raw string) error {
-	switch plane {
-	case route.Principal:
-		if strings.HasPrefix(raw, "ply_sk_") {
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "application API keys are not accepted on the principal plane")
-		}
-		if strings.HasPrefix(raw, "ply_ops_") {
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "operations credentials are not accepted on the principal plane")
-		}
-	case route.Server:
-		if strings.HasPrefix(raw, "ply_ag_") || strings.HasPrefix(raw, "ply_ops_") || strings.HasPrefix(raw, "ply_rt_") {
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "this credential is not accepted on the server plane")
-		}
-	case route.Ops:
-		if strings.HasPrefix(raw, "ply_sk_") {
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "application API keys are not accepted on the operations plane")
-		}
-		if strings.HasPrefix(raw, "ply_ag_") || strings.HasPrefix(raw, "ply_rt_") {
-			return apierr.New("CREDENTIAL_PLANE_MISMATCH", "member credentials are not accepted on the operations plane")
-		}
-	}
-	return nil
+	return credential.ValidatePrefix(string(plane), raw)
 }
