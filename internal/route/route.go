@@ -2,12 +2,15 @@ package route
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
@@ -150,6 +153,23 @@ func Validate(mux *Mux) error {
 
 type OriginPolicy func(context.Context, string) (bool, error)
 type CredentialFailureAuditor func(context.Context, Plane, string, string) error
+type RateLimitFunc func(context.Context, string, int, time.Duration) (bool, error)
+
+// PlaneRateLimit returns the default transport budgets. The budgets are
+// intentionally independent so a noisy public request stream cannot consume
+// the server or operations plane's capacity.
+func PlaneRateLimit(p Plane) (int, time.Duration) {
+	switch p {
+	case Principal:
+		return 600, time.Minute
+	case Server:
+		return 1200, time.Minute
+	case Ops:
+		return 300, time.Minute
+	default:
+		return 0, 0
+	}
+}
 
 var registry struct {
 	sync.RWMutex
@@ -245,7 +265,7 @@ func MiddlewareWithIdempotency(p Plane, next http.Handler, manager idempotency.T
 }
 
 func MiddlewareWithCredentialAudit(p Plane, next http.Handler, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
-	return middlewareWithAudit(p, next, nil, nil, validate, auditFailure)
+	return middlewareWithAudit(p, next, nil, nil, validate, auditFailure, nil)
 }
 
 func MiddlewareWithOriginPolicyAndIdempotency(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
@@ -253,14 +273,18 @@ func MiddlewareWithOriginPolicyAndIdempotency(p Plane, next http.Handler, policy
 }
 
 func MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
-	return middlewareWithAudit(p, next, policy, manager, validate, auditFailure)
+	return middlewareWithAudit(p, next, policy, manager, validate, auditFailure, nil)
+}
+
+func MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(p Plane, next http.Handler, policy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor, rateLimit RateLimitFunc) http.Handler {
+	return middlewareWithAudit(p, next, policy, manager, validate, auditFailure, rateLimit)
 }
 
 func middleware(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator) http.Handler {
-	return middlewareWithAudit(p, next, originPolicy, manager, validate, nil)
+	return middlewareWithAudit(p, next, originPolicy, manager, validate, nil, nil)
 }
 
-func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor) http.Handler {
+func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, manager idempotency.TransactionManager, validate idempotency.CredentialValidator, auditFailure CredentialFailureAuditor, rateLimit RateLimitFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimSpace(r.Header.Get("X-Request-Id"))
 		if id == "" || len(id) > 128 {
@@ -301,6 +325,21 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 				return
 			}
 		}
+		if rateLimit != nil && r.Method != http.MethodOptions {
+			limit, window := PlaneRateLimit(p)
+			if limit > 0 {
+				key := transportRateLimitKey(p, requestinfo.Get(ctx).IP)
+				allowed, err := rateLimit(ctx, key, limit, window)
+				if err != nil {
+					writeRouteError(w, ctx, apierr.New("UNAVAILABLE", "request rate limiting is temporarily unavailable"))
+					return
+				}
+				if !allowed {
+					writeRouteError(w, ctx, apierr.New("rate_limited", "too many requests"))
+					return
+				}
+			}
+		}
 		request := r.WithContext(ctx)
 		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
 			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
@@ -320,6 +359,15 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 		}
 		next.ServeHTTP(w, request)
 	})
+}
+
+func transportRateLimitKey(p Plane, ip net.IP) string {
+	identity := "unknown"
+	if len(ip) > 0 {
+		identity = ip.String()
+	}
+	digest := sha256.Sum256([]byte("plystra-auth:plane-rate:" + string(p) + ":" + identity))
+	return "plane:" + base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func credentialType(value string) string {

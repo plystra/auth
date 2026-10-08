@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/apierr"
@@ -88,6 +89,44 @@ func TestMiddlewarePreservesValidRequestIDAndReplacesOversizedID(t *testing.T) {
 	Middleware(Principal, next).ServeHTTP(oversizedResponse, oversized)
 	if got := oversizedResponse.Header().Get("X-Request-Id"); got == "" || len(got) > 128 || got == strings.Repeat("x", 129) {
 		t.Fatalf("oversized request ID = %q, want a generated bounded ID", got)
+	}
+}
+
+func TestPlaneRateLimitsAreIndependentAndExhaustionIsIsolated(t *testing.T) {
+	counts := make(map[string]int)
+	rateLimit := func(_ context.Context, key string, limit int, _ time.Duration) (bool, error) {
+		counts[key]++
+		if limit == 0 {
+			t.Fatal("plane rate limit was not configured")
+		}
+		return counts[key] <= 1, nil
+	}
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	request := func(handler http.Handler) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		return res
+	}
+
+	principal := MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(Principal, next, nil, nil, nil, nil, rateLimit)
+	server := MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(Server, next, nil, nil, nil, nil, rateLimit)
+	if got := request(principal).Code; got != http.StatusNoContent {
+		t.Fatalf("first principal request = %d, want %d", got, http.StatusNoContent)
+	}
+	if got := request(principal).Code; got != http.StatusTooManyRequests {
+		t.Fatalf("exhausted principal request = %d, want %d", got, http.StatusTooManyRequests)
+	}
+	if got := request(server).Code; got != http.StatusNoContent {
+		t.Fatalf("server request after principal exhaustion = %d, want %d", got, http.StatusNoContent)
+	}
+	if len(counts) != 2 {
+		t.Fatalf("rate-limit keys = %d, want one independent key per plane", len(counts))
+	}
+	for key := range counts {
+		if strings.Contains(key, "192.0.2.1") || strings.Contains(key, "principal") || strings.Contains(key, "server") {
+			t.Fatalf("rate-limit key %q leaks raw transport identity or plane", key)
+		}
 	}
 }
 

@@ -269,9 +269,9 @@ func serve(ctx context.Context) error {
 		}
 		return false, nil
 	}
-	principalHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Principal, principalMux, principalOriginPolicy, st, validateCredential, auditCredentialFailure), "principal", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
-	serverHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Server, serverMux, nil, st, validateCredential, auditCredentialFailure), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
-	opsHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAudit(route.Ops, opsMux, nil, st, validateCredential, auditCredentialFailure), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	principalHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, principalOriginPolicy, st, validateCredential, auditCredentialFailure, limiter.Allow), "principal", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	serverHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Server, serverMux, nil, st, validateCredential, auditCredentialFailure, limiter.Allow), "server", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
+	opsHandler := otelhttp.NewHandler(route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Ops, opsMux, nil, st, validateCredential, auditCredentialFailure, limiter.Allow), "ops", otelhttp.WithMeterProvider(telemetry.MeterProvider), otelhttp.WithTracerProvider(telemetry.TracerProvider))
 	servers := planeServers(c, ":8090", telemetry.HTTP("principal", principalHandler), telemetry.HTTP("server", serverHandler), telemetry.HTTP("ops", opsHandler), health)
 	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
