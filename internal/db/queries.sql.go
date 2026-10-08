@@ -895,7 +895,7 @@ func (q *Queries) DeleteExpiredIdempotencyKey(ctx context.Context, arg DeleteExp
 const getAgentCredentialByPrefix = `-- name: GetAgentCredentialByPrefix :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
-       m.type, m.home_group_id, m.created_by_member_id
+       m.type, m.home_group_id, m.created_by_member_id, m.oauth_client_id
 FROM agent_credentials c
 JOIN members m ON m.id = c.member_id
 WHERE c.prefix = $1
@@ -922,6 +922,7 @@ type GetAgentCredentialByPrefixRow struct {
 	Type              string             `json:"type"`
 	HomeGroupID       pgtype.Text        `json:"home_group_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 }
 
 func (q *Queries) GetAgentCredentialByPrefix(ctx context.Context, arg GetAgentCredentialByPrefixParams) (GetAgentCredentialByPrefixRow, error) {
@@ -943,6 +944,7 @@ func (q *Queries) GetAgentCredentialByPrefix(ctx context.Context, arg GetAgentCr
 		&i.Type,
 		&i.HomeGroupID,
 		&i.CreatedByMemberID,
+		&i.OauthClientID,
 	)
 	return i, err
 }
@@ -2543,7 +2545,7 @@ func (q *Queries) LockMemberInSpace(ctx context.Context, arg LockMemberInSpacePa
 const lockOAuthRefreshCredentialByHash = `-- name: LockOAuthRefreshCredentialByHash :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
-       m.type, m.home_group_id, m.created_by_member_id
+       m.type, m.home_group_id, m.created_by_member_id, m.oauth_client_id
 FROM agent_credentials c
 JOIN members m ON m.id = c.member_id
 WHERE c.secret_hash = $1 AND c.kind = 'oauth_refresh'
@@ -2570,6 +2572,7 @@ type LockOAuthRefreshCredentialByHashRow struct {
 	Type              string             `json:"type"`
 	HomeGroupID       pgtype.Text        `json:"home_group_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 }
 
 func (q *Queries) LockOAuthRefreshCredentialByHash(ctx context.Context, arg LockOAuthRefreshCredentialByHashParams) (LockOAuthRefreshCredentialByHashRow, error) {
@@ -2591,6 +2594,7 @@ func (q *Queries) LockOAuthRefreshCredentialByHash(ctx context.Context, arg Lock
 		&i.Type,
 		&i.HomeGroupID,
 		&i.CreatedByMemberID,
+		&i.OauthClientID,
 	)
 	return i, err
 }

@@ -68,17 +68,18 @@ type CreateInput struct {
 }
 
 type Credential struct {
-	ID          string
-	MemberID    string
-	SpaceID     string
-	Kind        string
-	Prefix      string
-	SecretHash  []byte
-	FamilyID    string
-	ExpiresAt   time.Time
-	Revoked     bool
-	MemberState string
-	HomeGroupID string
+	ID            string
+	MemberID      string
+	SpaceID       string
+	OAuthClientID string
+	Kind          string
+	Prefix        string
+	SecretHash    []byte
+	FamilyID      string
+	ExpiresAt     time.Time
+	Revoked       bool
+	MemberState   string
+	HomeGroupID   string
 }
 
 type agentsGroup struct {
@@ -469,6 +470,16 @@ func (s *Service) CreateOAuthRefreshCredential(ctx context.Context, memberID str
 // RotateOAuthRefresh atomically consumes an OAuth refresh credential and
 // creates its successor. A replay revokes the entire credential family.
 func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credential, string, error) {
+	return s.rotateOAuthRefresh(ctx, raw, "")
+}
+
+// RotateOAuthRefreshForClient performs the same atomic rotation while binding
+// the credential to the authenticated OAuth client before consuming it.
+func (s *Service) RotateOAuthRefreshForClient(ctx context.Context, raw, clientID string) (Credential, string, error) {
+	return s.rotateOAuthRefresh(ctx, raw, clientID)
+}
+
+func (s *Service) rotateOAuthRefresh(ctx context.Context, raw, clientID string) (Credential, string, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, "ply_rt_") || raw == "" {
 		return Credential{}, "", apierr.New("invalid_grant", "OAuth refresh token is invalid")
@@ -502,6 +513,9 @@ func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credentia
 		}
 		if !found {
 			return apierr.New("invalid_grant", "OAuth refresh token is invalid")
+		}
+		if clientID != "" && row.OauthClientID.String != clientID {
+			return apierr.New("invalid_client", "OAuth client authentication failed")
 		}
 		if row.FamilyID.Valid {
 			family = row.FamilyID.String
@@ -546,7 +560,7 @@ func (s *Service) RotateOAuthRefresh(ctx context.Context, raw string) (Credentia
 		}); err != nil {
 			return normalize(err)
 		}
-		out = Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, FamilyID: family, ExpiresAt: expiresAt, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}
+		out = Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, OAuthClientID: row.OauthClientID.String, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, FamilyID: family, ExpiresAt: expiresAt, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}
 		return audit.Write(ctx, q, "member", row.MemberID, "agent.oauth_refresh", row.MemberID, "success")
 	})
 	if err != nil {

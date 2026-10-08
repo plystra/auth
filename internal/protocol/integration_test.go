@@ -69,7 +69,24 @@ func TestOAuthRefreshGrantUsesAgentAccessTokenRenewal(t *testing.T) {
 	}
 	credentialKey := []byte("protocol-oauth-refresh-hmac-key-0001")
 	agents := &agent.Service{Store: st, HMACKeys: [][]byte{credentialKey}}
-	ag, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-protocol-agent", Source: "oauth", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	clientID := "https://refresh.client/metadata.json"
+	clientSecret := "oauth-refresh-client-secret"
+	clientHMACKey := []byte("protocol-oauth-client-hmac-key-0002")
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
+		VALUES ('app_oauth_refresh_protocol', $1, 'OAuth Refresh Client', '[]'::jsonb, '[]'::jsonb, $2, $3)
+	`, owner.SpaceID, clientID, hmacSHA256(clientHMACKey, clientSecret)); err != nil {
+		t.Fatal(err)
+	}
+	wrongClientID := "https://other-refresh.client/metadata.json"
+	wrongClientSecret := "other-refresh-client-secret"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
+		VALUES ('app_oauth_refresh_other', $1, 'Other Refresh Client', '[]'::jsonb, '[]'::jsonb, $2, $3)
+	`, owner.SpaceID, wrongClientID, hmacSHA256(clientHMACKey, wrongClientSecret)); err != nil {
+		t.Fatal(err)
+	}
+	ag, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-protocol-agent", Source: "oauth", OAuthClientID: clientID, ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,18 +104,38 @@ func TestOAuthRefreshGrantUsesAgentAccessTokenRenewal(t *testing.T) {
 			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
 		},
 	}
+	apps := &application.Service{Store: st, HMACKeys: [][]byte{clientHMACKey}}
 	var mux http.ServeMux
-	(HTTP{Agents: agents, Sessions: sessions}).Register(&mux)
+	(HTTP{Applications: apps, Agents: agents, Sessions: sessions}).Register(&mux)
 
-	request := func(token string) *httptest.ResponseRecorder {
-		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {token}, "resource": {security.DefaultApplicationAudience}}
+	request := func(token, id, secret, resource string) *httptest.ResponseRecorder {
+		form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {token}, "client_id": {id}, "resource": {resource}}
+		if secret != "" {
+			form.Set("client_secret", secret)
+		}
 		req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		res := httptest.NewRecorder()
 		mux.ServeHTTP(res, req)
 		return res
 	}
-	first := request(refresh)
+	missing := request(refresh, clientID, "", clientID)
+	if missing.Code != http.StatusUnauthorized || missing.Header().Get("WWW-Authenticate") == "" {
+		t.Fatalf("missing OAuth client authentication status=%d body=%s", missing.Code, missing.Body.String())
+	}
+	wrongSecret := request(refresh, clientID, "wrong-secret", clientID)
+	if wrongSecret.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong OAuth client authentication status=%d body=%s", wrongSecret.Code, wrongSecret.Body.String())
+	}
+	wrongClient := request(refresh, wrongClientID, wrongClientSecret, wrongClientID)
+	if wrongClient.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong OAuth client binding status=%d body=%s", wrongClient.Code, wrongClient.Body.String())
+	}
+	wrongResource := request(refresh, clientID, clientSecret, "https://other-resource.test")
+	if wrongResource.Code != http.StatusBadRequest {
+		t.Fatalf("wrong resource status=%d body=%s", wrongResource.Code, wrongResource.Body.String())
+	}
+	first := request(refresh, clientID, clientSecret, clientID)
 	if first.Code != http.StatusOK {
 		t.Fatalf("OAuth refresh status = %d, body = %s", first.Code, first.Body.String())
 	}
@@ -112,15 +149,15 @@ func TestOAuthRefreshGrantUsesAgentAccessTokenRenewal(t *testing.T) {
 	if firstBody.AccessToken == "" || firstBody.RefreshToken == "" || firstBody.RefreshToken == refresh {
 		t.Fatalf("OAuth refresh response = %+v", firstBody)
 	}
-	claims, active, err := sessions.Introspect(ctx, firstBody.AccessToken, security.DefaultApplicationAudience)
+	claims, active, err := sessions.Introspect(ctx, firstBody.AccessToken, clientID)
 	if err != nil || !active || claims.Type != "agent" || claims.Subject != ag.ID {
 		t.Fatalf("renewed Agent access token claims=%+v active=%v err=%v", claims, active, err)
 	}
-	replay := request(refresh)
+	replay := request(refresh, clientID, clientSecret, clientID)
 	if replay.Code != http.StatusBadRequest {
 		t.Fatalf("replayed OAuth refresh status = %d, want 400", replay.Code)
 	}
-	if next := request(firstBody.RefreshToken); next.Code != http.StatusBadRequest {
+	if next := request(firstBody.RefreshToken, clientID, clientSecret, clientID); next.Code != http.StatusBadRequest {
 		t.Fatalf("family token after replay status = %d, want 400", next.Code)
 	}
 }
@@ -624,8 +661,17 @@ func TestOAuthRevokeDisablesAgentAuthorizationTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	clientID := "https://revoke.client/metadata.json"
+	clientSecret := "oauth-revoke-client-secret"
+	clientHMACKey := []byte("protocol-oauth-revoke-client-hmac-0002")
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
+		VALUES ('app_oauth_revoke_protocol', $1, 'OAuth Revoke Client', '[]'::jsonb, '[]'::jsonb, $2, $3)
+	`, owner.SpaceID, clientID, hmacSHA256(clientHMACKey, clientSecret)); err != nil {
+		t.Fatal(err)
+	}
 	agents := &agent.Service{Store: st, HMACKeys: [][]byte{[]byte("protocol-oauth-revoke-hmac-key-0001")}}
-	root, rootKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-root", Source: "oauth", ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
+	root, rootKey, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "oauth-root", Source: "oauth", OAuthClientID: clientID, ExpiresAt: time.Now().UTC().Add(2 * time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +702,8 @@ func TestOAuthRevokeDisablesAgentAuthorizationTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mux http.ServeMux
-	(HTTP{Agents: agents, Sessions: sessions, Authorization: authorizer}).Register(&mux)
+	apps := &application.Service{Store: st, HMACKeys: [][]byte{clientHMACKey}}
+	(HTTP{Applications: apps, Agents: agents, Sessions: sessions, Authorization: authorizer}).Register(&mux)
 	revoke := func(token string) *httptest.ResponseRecorder {
 		form := url.Values{"token": {token}}
 		req := httptest.NewRequest(http.MethodPost, "/oauth/revoke", strings.NewReader(form.Encode()))
@@ -701,7 +748,7 @@ func TestOAuthRevokeDisablesAgentAuthorizationTree(t *testing.T) {
 	if _, err := agents.AuthenticateKey(ctx, rootKey); err == nil {
 		t.Fatal("revoked OAuth Agent key remained usable")
 	}
-	refreshForm := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}}
+	refreshForm := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {clientID}, "client_secret": {clientSecret}}
 	refreshReq := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(refreshForm.Encode()))
 	refreshReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	refreshRes := httptest.NewRecorder()

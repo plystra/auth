@@ -193,16 +193,39 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if grantType == "refresh_token" {
-		if h.Agents == nil || h.Sessions == nil {
+		if h.Agents == nil || h.Sessions == nil || h.Applications == nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
 			return
 		}
-		credential, refresh, err := h.Agents.RotateOAuthRefresh(r.Context(), r.Form.Get("refresh_token"))
+		clientID, clientSecret, err := oauthClientCredentials(r)
 		if err != nil {
-			writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
+			writeOAuthErr(w, err)
 			return
 		}
-		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), credential.MemberID, credential.SpaceID, r.Form.Get("resource"))
+		client, err := h.Applications.AuthenticateOAuthClient(r.Context(), clientID, clientSecret)
+		if err != nil {
+			writeOAuthErr(w, err)
+			return
+		}
+		resource := strings.TrimSpace(r.Form.Get("resource"))
+		if resource == "" {
+			resource = client.ClientID
+		}
+		if resource != client.ClientID {
+			writeErr(w, apierr.New("invalid_target", "resource is not registered for this client"))
+			return
+		}
+		credential, refresh, err := h.Agents.RotateOAuthRefreshForClient(r.Context(), r.Form.Get("refresh_token"), client.ClientID)
+		if err != nil {
+			var publicErr *apierr.Error
+			if errors.As(err, &publicErr) && publicErr.Code == "invalid_client" {
+				writeOAuthErr(w, err)
+			} else {
+				writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
+			}
+			return
+		}
+		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), credential.MemberID, credential.SpaceID, resource)
 		if err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
 			return
