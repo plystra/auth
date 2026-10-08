@@ -44,6 +44,12 @@ func requestTransaction(ctx context.Context) *requestTx {
 	return t
 }
 
+// WithoutRequestTransaction keeps request metadata while ensuring a security
+// rate-limit counter commits independently of a failed idempotent request.
+func WithoutRequestTransaction(ctx context.Context) context.Context {
+	return context.WithValue(ctx, requestTxKey{}, nil)
+}
+
 func (t *requestTx) inTx(ctx context.Context, fn func(*db.Queries) error) error {
 	t.seq++
 	name := "plystra_auth_request_" + strconv.FormatUint(t.seq, 10)

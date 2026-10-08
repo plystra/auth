@@ -10,8 +10,7 @@ FOR UPDATE;
 UPDATE sessions
 SET step_up_operation = sqlc.arg(operation),
     step_up_digest = sqlc.arg(digest),
-    step_up_expires_at = now() + interval '5 minutes',
-    assurance_level = GREATEST(assurance_level, 2)
+    step_up_expires_at = now() + interval '5 minutes'
 WHERE id = sqlc.arg(id)
   AND revoked_at IS NULL
   AND expires_at > now()

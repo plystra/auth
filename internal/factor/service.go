@@ -15,9 +15,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -27,11 +29,20 @@ type Service struct {
 	Store   *store.Store
 	DataKey secret.String
 	Limiter *store.RateLimiter
+	StepUp  stepup.Consumer
 }
 type Enrollment struct {
 	FactorID string        `json:"factor_id"`
 	Secret   secret.String `json:"secret"`
 	URI      string        `json:"otpauth_uri"`
+}
+
+type Summary struct {
+	ID         string     `json:"id"`
+	Kind       string     `json:"kind"`
+	Name       string     `json:"name"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 var ErrInvalidCode = errors.New("invalid one-time code")
@@ -102,7 +113,7 @@ func (s *Service) VerifyTOTP(ctx context.Context, userID, factorID, code string)
 		return err
 	}
 	digest := sha256.Sum256([]byte("plystra-auth-totp-failure:" + userID + ":" + factorID))
-	allowed, limitErr := s.Limiter.Allow(ctx, base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
+	allowed, limitErr := s.Limiter.Allow(store.WithoutRequestTransaction(ctx), base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
 	if limitErr != nil {
 		return limitErr
 	}
@@ -165,7 +176,7 @@ func (s *Service) VerifyTOTPTxRateLimited(ctx context.Context, q *db.Queries, us
 		return err
 	}
 	digest := sha256.Sum256([]byte("plystra-auth-totp-failure:" + userID + ":" + factorID))
-	allowed, limitErr := s.Limiter.Allow(ctx, base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
+	allowed, limitErr := s.Limiter.Allow(store.WithoutRequestTransaction(ctx), base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
 	if limitErr != nil {
 		return limitErr
 	}
@@ -198,6 +209,14 @@ func (s *Service) GenerateBackupCodesForUser(ctx context.Context, userID string,
 		return nil, err
 	}
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+		}
 		if err := q.DeleteBackupCodes(ctx, db.DeleteBackupCodesParams{UserID: userID}); err != nil {
 			return err
 		}
@@ -211,12 +230,29 @@ func (s *Service) GenerateBackupCodesForUser(ctx context.Context, userID string,
 				return err
 			}
 		}
-		return nil
+		return audit.Write(ctx, q, "user", userID, "factor.backup_codes.generate", userID, "success")
 	})
 	if err != nil {
 		return nil, err
 	}
 	return codes, nil
+}
+
+func (s *Service) List(ctx context.Context, userID string) ([]Summary, error) {
+	rows, err := s.Store.Queries().ListFactors(ctx, db.ListFactorsParams{UserID: userID})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Summary, 0, len(rows))
+	for _, row := range rows {
+		item := Summary{ID: row.ID, Kind: row.Kind, Name: row.Name, CreatedAt: row.CreatedAt.Time}
+		if row.LastUsedAt.Valid {
+			value := row.LastUsedAt.Time
+			item.LastUsedAt = &value
+		}
+		out = append(out, item)
+	}
+	return out, nil
 }
 
 // ConsumeBackupCode atomically marks one matching code as used. A consumed or

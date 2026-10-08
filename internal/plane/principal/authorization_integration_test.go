@@ -23,6 +23,7 @@ import (
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
 )
@@ -1009,9 +1010,11 @@ func TestAssignmentRightManagementEndpointsUseAuthorizationEngineAndPreserveGran
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	authz.StepUp = sessions
 	create := &createAssignmentRightInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
 	create.Body.HolderMemberID = target.ID
 	create.Body.Permissions = []string{"auth.members:manage"}
+	seedStepUpProof(t, st, tokens.SessionID, "assignment_rights.create", map[string]any{"space_id": spaceID, "holder_member_id": target.ID, "permissions": create.Body.Permissions, "anchor_space_id": "", "anchor_group_id": "", "covers_subtree": false, "can_redelegate": false, "expires_at": nil})
 	rightOut, err := api.createAssignmentRight(ctx, create)
 	if err != nil {
 		t.Fatalf("assignment-right endpoint create = %v", err)
@@ -1019,6 +1022,7 @@ func TestAssignmentRightManagementEndpointsUseAuthorizationEngineAndPreserveGran
 	if rightOut.Body.Data.ID == "" || rightOut.Body.Data.ParentID == "" {
 		t.Fatalf("created assignment right = %+v", rightOut.Body.Data)
 	}
+	seedStepUpProof(t, st, tokens.SessionID, "assignment_rights.list", map[string]any{"space_id": spaceID})
 	listOut, err := api.listAssignmentRights(ctx, &assignmentRightsInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID})
 	if err != nil {
 		t.Fatalf("assignment-right endpoint list = %v", err)
@@ -1029,9 +1033,11 @@ func TestAssignmentRightManagementEndpointsUseAuthorizationEngineAndPreserveGran
 	if _, err := authz.CreateInlineGrant(ctx, actor.ID, spaceID, target.ID, []string{"auth.members:read"}, "space", spaceID); err != nil {
 		t.Fatalf("create existing grant = %v", err)
 	}
+	seedStepUpProof(t, st, tokens.SessionID, "assignment_rights.revoke", map[string]any{"space_id": spaceID, "assignment_right_id": rightOut.Body.Data.ID})
 	if _, err := api.revokeAssignmentRight(ctx, &assignmentRightPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID, RightID: rightOut.Body.Data.ID}); err != nil {
 		t.Fatalf("assignment-right endpoint revoke = %v", err)
 	}
+	seedStepUpProof(t, st, tokens.SessionID, "assignment_rights.list", map[string]any{"space_id": spaceID})
 	listOut, err = api.listAssignmentRights(ctx, &assignmentRightsInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID})
 	if err != nil {
 		t.Fatal(err)
@@ -1248,6 +1254,34 @@ func TestAgentCannotCreateChildWithoutAgentsPermission(t *testing.T) {
 	assertPrincipalError(t, err, "OWNER_ENVELOPE_EXCLUDED")
 }
 
+func TestAgentCreatesChildWithoutHumanStepUp(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "auth.agents:create")
+	agents := &agent.Service{Store: st}
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, parent.ID, "auth.agents:create")
+	tokens, err := sessions.CreateAgentAccess(ctx, parent.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &agentsInput{Authorization: "Bearer " + tokens.AccessToken}
+	in.Body.Name = "child"
+	expires := parent.ExpiresAt.Add(-time.Minute)
+	in.Body.ExpiresAt = &expires
+	out, err := api.createAgent(ctx, in)
+	if err != nil {
+		t.Fatalf("Agent creation without human step-up = %v", err)
+	}
+	if out.Body.Data.Agent.CreatedByMember != parent.ID {
+		t.Fatalf("created Agent parent = %q, want %q", out.Body.Data.Agent.CreatedByMember, parent.ID)
+	}
+}
+
 func TestCreateAgentEndpointReturnsOneTimeAgentCredential(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
@@ -1263,8 +1297,10 @@ func TestCreateAgentEndpointReturnsOneTimeAgentCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	agents.StepUp = sessions
 	in := &agentsInput{Authorization: "Bearer " + tokens.AccessToken}
 	in.Body.Name = "one-time-credential"
+	seedStepUpProof(t, st, tokens.SessionID, "me.agents.create", map[string]any{"name": in.Body.Name, "expires_at": nil, "source": ""})
 	out, err := api.createAgent(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -1401,6 +1437,21 @@ func seedTestInlineGrant(t *testing.T, st *store.Store, spaceID, actorID, member
 		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
 		VALUES ($1, $2, $3::jsonb, $4, 'space', $2, $5)
 	`, string(ids.New[ids.GrantID]("grt")), spaceID, string(encoded), memberID, actorID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func seedStepUpProof(t *testing.T, st *store.Store, sessionID, operation string, request any) {
+	t.Helper()
+	digest, err := stepup.DigestValue(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(context.Background(), `
+		UPDATE sessions
+		SET step_up_operation = $2, step_up_digest = $3, step_up_expires_at = now() + interval '5 minutes'
+		WHERE id = $1
+	`, sessionID, operation, digest); err != nil {
 		t.Fatal(err)
 	}
 }

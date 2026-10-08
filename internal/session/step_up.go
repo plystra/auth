@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/security"
@@ -69,7 +70,10 @@ func (s *Service) StepUp(ctx context.Context, raw, code, operation string, diges
 		_, err = q.SetSessionStepUp(ctx, db.SetSessionStepUpParams{
 			ID: claims.SessionID, Operation: pgtype.Text{String: operation, Valid: true}, Digest: append([]byte(nil), digest...),
 		})
-		return err
+		if err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", current.UserID, "auth.session.step_up", claims.SessionID, "success")
 	})
 }
 

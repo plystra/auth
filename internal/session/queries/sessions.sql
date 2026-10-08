@@ -29,7 +29,8 @@ UPDATE refresh_tokens SET revoked_at = COALESCE(revoked_at, now())
 WHERE session_id IN (SELECT id FROM sessions WHERE user_id = sqlc.arg(user_id));
 
 -- name: SetSessionMember :exec
-UPDATE sessions SET member_id = sqlc.narg(member_id), last_seen_at = now()
+UPDATE sessions SET member_id = sqlc.narg(member_id), last_seen_at = now(),
+    step_up_operation = NULL, step_up_digest = NULL, step_up_expires_at = NULL
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id) AND revoked_at IS NULL;
 
 -- name: CreateRefreshToken :one

@@ -62,6 +62,28 @@ func TestPrincipalStepUpBindsOperationRequestAndRollsBackConsumption(t *testing.
 	if err := sessions.StepUp(ctx, tokens.AccessToken, code, "members.bindings.create", digest); err != nil {
 		t.Fatalf("step-up = %v", err)
 	}
+	var assurance int16
+	var audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT assurance_level FROM sessions WHERE id = $1`, tokens.SessionID).Scan(&assurance); err != nil {
+		t.Fatal(err)
+	}
+	if assurance != 1 {
+		t.Fatalf("session assurance = %d, step-up must not permanently elevate it", assurance)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'auth.session.step_up' AND resource_id = $1`, tokens.SessionID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("step-up audit count = %d, want 1", audits)
+	}
+	wrong := WithStepUpRequirement(ctx, stepup.Requirement{SessionID: tokens.SessionID, Operation: "me.agents.rotate", Digest: digest})
+	if err := st.InTx(wrong, func(q *db.Queries) error { return sessions.ConsumeStepUpTx(wrong, q) }); err == nil {
+		t.Fatal("step-up proof was accepted for a different operation")
+	}
+	wrongDigest := WithStepUpRequirement(ctx, stepup.Requirement{SessionID: tokens.SessionID, Operation: "members.bindings.create", Digest: []byte(strings.Repeat("y", 32))})
+	if err := st.InTx(wrongDigest, func(q *db.Queries) error { return sessions.ConsumeStepUpTx(wrongDigest, q) }); err == nil {
+		t.Fatal("step-up proof was accepted for a different request digest")
+	}
 	requirement := StepUpRequirement{SessionID: tokens.SessionID, Operation: "members.bindings.create", Digest: digest}
 	rollbackCtx := WithStepUpRequirement(ctx, requirement)
 	if err := st.InTx(rollbackCtx, func(q *db.Queries) error {
@@ -88,8 +110,4 @@ func TestPrincipalStepUpBindsOperationRequestAndRollsBackConsumption(t *testing.
 		}
 	}
 
-	wrong := WithStepUpRequirement(ctx, stepup.Requirement{SessionID: tokens.SessionID, Operation: "me.agents.rotate", Digest: digest})
-	if err := st.InTx(wrong, func(q *db.Queries) error { return sessions.ConsumeStepUpTx(wrong, q) }); err == nil {
-		t.Fatal("step-up proof was accepted for a different operation")
-	}
 }

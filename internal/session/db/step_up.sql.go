@@ -96,8 +96,7 @@ const setSessionStepUp = `-- name: SetSessionStepUp :one
 UPDATE sessions
 SET step_up_operation = $1,
     step_up_digest = $2,
-    step_up_expires_at = now() + interval '5 minutes',
-    assurance_level = GREATEST(assurance_level, 2)
+    step_up_expires_at = now() + interval '5 minutes'
 WHERE id = $3
   AND revoked_at IS NULL
   AND expires_at > now()

@@ -145,7 +145,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct2"
+            "$ref": "#/components/schemas/DataStruct3"
           }
         },
         "required": [
@@ -482,6 +482,18 @@
         ],
         "type": "object"
       },
+      "BackupCodesOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct1"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "BindUserInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -718,6 +730,24 @@
       "DataStruct1": {
         "additionalProperties": false,
         "properties": {
+          "codes": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "codes"
+        ],
+        "type": "object"
+      },
+      "DataStruct2": {
+        "additionalProperties": false,
+        "properties": {
           "revoked": {
             "type": "boolean"
           }
@@ -727,7 +757,7 @@
         ],
         "type": "object"
       },
-      "DataStruct2": {
+      "DataStruct3": {
         "additionalProperties": false,
         "properties": {
           "agent_key": {
@@ -824,6 +854,45 @@
         "required": [
           "code",
           "message"
+        ],
+        "type": "object"
+      },
+      "FactorsInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "format": "int64",
+            "maximum": 20,
+            "minimum": 5,
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "backup_code"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "FactorsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Summary"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -965,7 +1034,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct1"
+            "$ref": "#/components/schemas/DataStruct2"
           }
         },
         "required": [
@@ -1322,6 +1391,35 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "Summary": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "name",
+          "created_at"
         ],
         "type": "object"
       },
@@ -2192,6 +2290,88 @@
           }
         },
         "summary": "me.agents.stop"
+      }
+    },
+    "/v1/me/factors": {
+      "get": {
+        "operationId": "auth.factors.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.factors.list"
+      },
+      "post": {
+        "operationId": "auth.factors.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FactorsInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupCodesOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.factors.create"
       }
     },
     "/v1/me/member": {

@@ -335,7 +335,8 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, arg RevokeUserSessions
 }
 
 const setSessionMember = `-- name: SetSessionMember :exec
-UPDATE sessions SET member_id = $1, last_seen_at = now()
+UPDATE sessions SET member_id = $1, last_seen_at = now(),
+    step_up_operation = NULL, step_up_digest = NULL, step_up_expires_at = NULL
 WHERE id = $2 AND user_id = $3 AND revoked_at IS NULL
 `
 

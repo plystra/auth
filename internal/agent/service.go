@@ -144,7 +144,10 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 		if owner.Type != "human" && owner.Type != "agent" && owner.Type != "application" {
 			return apierr.New("VALIDATION_FAILED", "owner member type is invalid")
 		}
-		if s.StepUp != nil {
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
 			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
 				return err
 			}
@@ -371,7 +374,10 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 		}
-		if s.StepUp != nil {
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
 			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
 				return err
 			}

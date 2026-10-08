@@ -170,6 +170,51 @@ func TestTOTPInvalidAttemptsAreRateLimitedWithoutStoringIdentity(t *testing.T) {
 	}
 }
 
+func TestTOTPFailureLimitSurvivesIdempotentRequestRollback(t *testing.T) {
+	ctx := context.Background()
+	st := newFactorStore(t)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_factor_idempotent', 'factor-idempotent@example.test', 'factor-idempotent@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	factors := &Service{Store: st, DataKey: secretKey(), Limiter: &store.RateLimiter{Store: st}}
+	enrollment, err := factors.BeginTOTP(ctx, "usr_factor_idempotent", "factor-idempotent@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 1; attempt <= 6; attempt++ {
+		request, err := st.BeginIdempotency(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		requestCtx := request.Context(ctx)
+		err = st.InTx(requestCtx, func(q *db.Queries) error {
+			return factors.VerifyTOTPTxRateLimited(requestCtx, q, "usr_factor_idempotent", enrollment.FactorID, "abcdef", time.Now().UTC())
+		})
+		if rollbackErr := request.Rollback(ctx); rollbackErr != nil {
+			t.Fatal(rollbackErr)
+		}
+		if attempt <= 5 && !errors.Is(err, ErrInvalidCode) {
+			t.Fatalf("attempt %d error = %v, want ErrInvalidCode", attempt, err)
+		}
+		if attempt == 6 {
+			var public *apierr.Error
+			if !errors.As(err, &public) || public.Code != "rate_limited" {
+				t.Fatalf("sixth attempt error = %v, want rate_limited", err)
+			}
+		}
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count FROM rate_limit_buckets`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 6 {
+		t.Fatalf("persisted failure count = %d, want 6", count)
+	}
+}
+
 func TestBackupCodesAreSingleUseAndRegenerationRevokesOldCodes(t *testing.T) {
 	ctx := context.Background()
 	st := newFactorStore(t)

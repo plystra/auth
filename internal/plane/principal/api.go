@@ -12,6 +12,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/route"
@@ -27,6 +28,7 @@ type API struct {
 	Authorization *authorization.Service
 	Agents        *agent.Service
 	Invitations   *invitation.Service
+	Factors       *factor.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
@@ -97,6 +99,25 @@ type MembersOutput struct {
 type PermissionsOutput struct {
 	Body struct {
 		Data []authorization.EffectivePermission `json:"data"`
+	}
+}
+type FactorsOutput struct {
+	Body struct {
+		Data []factor.Summary `json:"data"`
+	}
+}
+type FactorsInput struct {
+	Authorization string `header:"Authorization"`
+	Body          struct {
+		Kind  string `json:"kind" enum:"backup_code"`
+		Count int    `json:"count,omitempty" minimum:"5" maximum:"20"`
+	}
+}
+type BackupCodesOutput struct {
+	Body struct {
+		Data struct {
+			Codes []string `json:"codes"`
+		} `json:"data"`
 	}
 }
 type LoginInput struct {
@@ -182,6 +203,8 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.me_update", "PATCH", "/v1/me", route.Principal, "", []route.Subject{route.User}), a.updateMe)
 	route.Register(api, route.NewSpec("auth.me_permissions", "GET", "/v1/me/permissions", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.mePermissions)
 	route.Register(api, route.NewSpec("auth.me_members", "GET", "/v1/me/members", route.Principal, "", []route.Subject{route.User}), a.meMembers)
+	route.Register(api, route.NewSpec("auth.factors.list", "GET", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}), a.listFactors)
+	route.Register(api, route.NewSpec("auth.factors.create", "POST", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}, route.WithStepUp()), a.createFactor)
 	route.Register(api, route.NewSpec("auth.me_member_remove", "DELETE", "/v1/me/member", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.removeCurrentMember)
 	route.Register(api, route.NewSpec("auth.sign_out", "POST", "/v1/auth/sign-out", route.Principal, "", []route.Subject{route.User}), a.logout)
 	route.Register(api, route.NewSpec("auth.sessions.list", "GET", "/v1/me/sessions", route.Principal, "", []route.Subject{route.User}), a.listSessions)
@@ -266,11 +289,63 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 
 func principalStepUpOperation(operation string) bool {
 	switch operation {
-	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate":
+	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create":
 		return true
 	default:
 		return false
 	}
+}
+
+func (a *API) listFactors(ctx context.Context, in *BearerInput) (*FactorsOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if a.Factors == nil {
+		return nil, apierr.New("UNAVAILABLE", "factor service is unavailable")
+	}
+	items, err := a.Factors.List(ctx, claims.Subject)
+	if err != nil {
+		return nil, err
+	}
+	out := &FactorsOutput{}
+	out.Body.Data = items
+	return out, nil
+}
+
+func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*BackupCodesOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if a.Factors == nil {
+		return nil, apierr.New("UNAVAILABLE", "factor service is unavailable")
+	}
+	if in.Body.Kind != "backup_code" {
+		return nil, apierr.New("VALIDATION_FAILED", "only backup_code factor creation is currently available")
+	}
+	request := map[string]any{"kind": in.Body.Kind}
+	if in.Body.Count != 0 {
+		request["count"] = in.Body.Count
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.factors.create", request)
+	if err != nil {
+		return nil, err
+	}
+	count := in.Body.Count
+	if count == 0 {
+		count = 10
+	}
+	if count < 5 || count > 20 {
+		return nil, apierr.New("VALIDATION_FAILED", "backup code count must be between 5 and 20")
+	}
+	codes, err := a.Factors.GenerateBackupCodesForUser(ctx, claims.Subject, count)
+	if err != nil {
+		return nil, err
+	}
+	out := &BackupCodesOutput{}
+	out.Body.Data.Codes = codes
+	return out, nil
 }
 
 func (a *API) principalStepUpContext(ctx context.Context, authorizationHeader, operation string, request any) (context.Context, error) {
@@ -287,9 +362,6 @@ func (a *API) principalStepUpContext(ctx context.Context, authorizationHeader, o
 	digest, err := stepup.DigestValue(request)
 	if err != nil {
 		return nil, err
-	}
-	if a.Authorization == nil || a.Authorization.StepUp == nil {
-		return ctx, nil
 	}
 	return session.WithStepUpRequirement(ctx, session.StepUpRequirement{SessionID: claims.SessionID, Operation: operation, Digest: digest}), nil
 }
