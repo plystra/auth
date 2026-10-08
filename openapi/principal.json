@@ -35,6 +35,9 @@
           "name": {
             "type": "string"
           },
+          "oauth_client_id": {
+            "type": "string"
+          },
           "owner_member_id": {
             "type": "string"
           },

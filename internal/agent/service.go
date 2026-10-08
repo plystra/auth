@@ -53,6 +53,7 @@ type Agent struct {
 	CreatedByUserID string    `json:"created_by_user_id,omitempty"`
 	CreatedByMember string    `json:"created_by_member_id"`
 	Source          string    `json:"source"`
+	OAuthClientID   string    `json:"oauth_client_id,omitempty"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	Version         int64     `json:"version"`
 }
@@ -63,6 +64,7 @@ type CreateInput struct {
 	Name          string
 	ExpiresAt     time.Time
 	Source        string
+	OAuthClientID string
 }
 
 type Credential struct {
@@ -85,6 +87,19 @@ type agentsGroup struct {
 }
 
 func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, error) {
+	return s.create(ctx, in, true)
+}
+
+// CreateOAuth creates an OAuth Agent without provisioning a direct Agent key.
+// OAuth Agents authenticate with their one-time refresh credential instead; a
+// hidden key would create an untracked credential that the consent flow never
+// returns to the caller.
+func (s *Service) CreateOAuth(ctx context.Context, in CreateInput) (Agent, error) {
+	out, _, err := s.create(ctx, in, false)
+	return out, err
+}
+
+func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bool) (Agent, string, error) {
 	in.Name = strings.TrimSpace(in.Name)
 	if in.Name == "" || len(in.Name) > 128 {
 		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent name is invalid")
@@ -102,9 +117,14 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 	if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
 		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
 	}
-	raw, prefix, hash, err := s.generateCredential()
-	if err != nil {
-		return Agent{}, "", err
+	var raw, prefix string
+	var hash []byte
+	var err error
+	if issueCredential {
+		raw, prefix, hash, err = s.generateCredential()
+		if err != nil {
+			return Agent{}, "", err
+		}
 	}
 	var out Agent
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -142,7 +162,7 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 		member, err := q.CreateAgentMember(ctx, db.CreateAgentMemberParams{
 			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: owner.SpaceID, Name: in.Name,
 			HomeGroupID: pgtype.Text{String: group.ID, Valid: true}, CreatedByUserID: createdByUser,
-			CreatedByMemberID: pgtype.Text{String: in.OwnerMemberID, Valid: true}, Source: pgtype.Text{String: in.Source, Valid: true}, ExpiresAt: pgTime(in.ExpiresAt),
+			CreatedByMemberID: pgtype.Text{String: in.OwnerMemberID, Valid: true}, Source: pgtype.Text{String: in.Source, Valid: true}, OauthClientID: pgtype.Text{String: in.OAuthClientID, Valid: in.OAuthClientID != ""}, ExpiresAt: pgTime(in.ExpiresAt),
 		})
 		if err != nil {
 			return normalize(err)
@@ -150,27 +170,53 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 		if err := q.AddAgentToGroup(ctx, db.AddAgentToGroupParams{GroupID: group.ID, MemberID: member.ID}); err != nil {
 			return err
 		}
-		cred, err := q.CreateAgentCredential(ctx, db.CreateAgentCredentialParams{ID: string(ids.New[ids.ID]("crd")), MemberID: member.ID, Prefix: prefix, SecretHash: hash, ExpiresAt: pgTime(in.ExpiresAt)})
-		if err != nil {
-			return normalize(err)
+		if issueCredential {
+			if _, err := q.CreateAgentCredential(ctx, db.CreateAgentCredentialParams{ID: string(ids.New[ids.ID]("crd")), MemberID: member.ID, Prefix: prefix, SecretHash: hash, ExpiresAt: pgTime(in.ExpiresAt)}); err != nil {
+				return normalize(err)
+			}
 		}
 		if err := audit.Write(ctx, q, "member", in.OwnerMemberID, "agent.create", member.ID, "success"); err != nil {
 			return err
 		}
 		out = Agent{ID: member.ID, SpaceID: member.SpaceID, Name: member.Name, Type: member.Type, Status: member.Status, HomeGroupID: member.HomeGroupID.String, CreatedByMember: member.CreatedByMemberID.String, Source: member.Source.String, ExpiresAt: member.ExpiresAt.Time, Version: member.Version}
+		if member.OauthClientID.Valid {
+			out.OAuthClientID = member.OauthClientID.String
+		}
 		if member.CreatedByUserID.Valid {
 			out.CreatedByUserID = member.CreatedByUserID.String
 		}
 		if group.OwnerMemberID.Valid {
 			out.OwnerMemberID = group.OwnerMemberID.String
 		}
-		_ = cred
 		return nil
 	})
 	if err != nil {
 		return Agent{}, "", err
 	}
 	return out, raw, nil
+}
+
+// OAuthAgent returns the active OAuth Agent previously authorized by an owner
+// for the same client. A client gets one Agent per owner member.
+func (s *Service) OAuthAgent(ctx context.Context, ownerMemberID, clientID string) (Agent, error) {
+	row, err := s.Store.Queries().GetOAuthAgentForOwnerClient(ctx, db.GetOAuthAgentForOwnerClientParams{OwnerMemberID: pgtype.Text{String: ownerMemberID, Valid: true}, OauthClientID: pgtype.Text{String: clientID, Valid: true}})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Agent{}, apierr.New("NOT_FOUND", "OAuth Agent was not found")
+	}
+	if err != nil {
+		return Agent{}, err
+	}
+	out := Agent{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Type: row.Type, Status: row.Status, HomeGroupID: row.HomeGroupID.String, CreatedByMember: row.CreatedByMemberID.String, Source: row.Source.String, ExpiresAt: row.ExpiresAt.Time, Version: row.Version}
+	if row.OwnerMemberID.Valid {
+		out.OwnerMemberID = row.OwnerMemberID.String
+	}
+	if row.CreatedByUserID.Valid {
+		out.CreatedByUserID = row.CreatedByUserID.String
+	}
+	if row.OauthClientID.Valid {
+		out.OAuthClientID = row.OauthClientID.String
+	}
+	return out, nil
 }
 
 func (s *Service) validateDelegationDepthTx(ctx context.Context, q *db.Queries, ownerMemberID string) error {

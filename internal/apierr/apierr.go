@@ -36,7 +36,7 @@ func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = r
 func WithStatus(e *Error, status int) *Error          { c := *e; c.status = status; return &c }
 func Status(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
-	case "invalid_request", "invalid_grant", "invalid_scope", "validation_failed", "inline_grants_not_allowed":
+	case "invalid_request", "invalid_grant", "invalid_scope", "invalid_target", "validation_failed", "inline_grants_not_allowed":
 		return http.StatusBadRequest
 	case "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized

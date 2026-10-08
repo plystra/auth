@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1261,6 +1262,31 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 // intentionally separate from named roles so short-lived consent (such as an
 // OAuth Agent authorization) does not create or mutate the Space role catalog.
 func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	return s.createInlineGrant(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, false)
+}
+
+// CreateOAuthInlineGrant applies the system assignment right from the
+// authorization model: a member may give an OAuth Agent a subset of that
+// member's currently usable permissions without separately holding
+// auth.grants:assign. The owner's permission is still evaluated by CheckTx for
+// every requested permission inside the same transaction.
+func (s *Service) CreateOAuthInlineGrant(ctx context.Context, ownerMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	return s.createInlineGrant(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, true)
+}
+
+// ValidateOAuthGrant checks the owner's system assignment right before an
+// OAuth Agent is created. The mutation path repeats the check in its own
+// transaction so a concurrent policy change cannot widen the grant.
+func (s *Service) ValidateOAuthGrant(ctx context.Context, ownerMemberID, spaceID string, permissions []string) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationMembersTx(ctx, q, ownerMemberID); err != nil {
+			return err
+		}
+		return s.authorizeOAuthGrantTx(ctx, q, ownerMemberID, spaceID, uniqueSorted(permissions))
+	})
+}
+
+func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, oauthConsent bool) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1296,7 +1322,21 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
+		if oauthConsent {
+			agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: member.ID})
+			if agentErr != nil {
+				if errors.Is(agentErr, pgx.ErrNoRows) {
+					return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an OAuth Agent")
+				}
+				return agentErr
+			}
+			if agent.Source.String != "oauth" || !agent.CreatedByMemberID.Valid || agent.CreatedByMemberID.String != actorMemberID {
+				return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an owner's OAuth Agent")
+			}
+			if err := s.authorizeOAuthGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions); err != nil {
+				return err
+			}
+		} else if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
 			return err
 		}
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
@@ -1311,10 +1351,16 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
-			return err
+		if !oauthConsent {
+			if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
+				return err
+			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.inline.create", row.ID, "success"); err != nil {
+		action := "grant.inline.create"
+		if oauthConsent {
+			action = "grant.oauth_consent.create"
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
@@ -1323,10 +1369,59 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	return out, err
 }
 
+func (s *Service) authorizeOAuthGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID string, permissions []string) error {
+	assignments, _, err := s.assignmentsQueries(ctx, q, ownerMemberID)
+	if err != nil {
+		return err
+	}
+	for _, permission := range permissions {
+		allowed := false
+		for _, assignment := range assignments {
+			if !slices.Contains(assignment.Permissions, permission) || !slices.Contains(assignment.Envelope, permission) {
+				continue
+			}
+			if len(assignment.PrincipalKinds) > 0 && !slices.Contains(assignment.PrincipalKinds, "agent") {
+				continue
+			}
+			request := CheckRequest{MemberID: ownerMemberID, Permission: permission, ResourceSpace: spaceID}
+			switch assignment.Scope.Kind {
+			case "self":
+				request.ResourceOwner = ownerMemberID
+			case "group", "group_tree":
+				request.ResourceGroup = assignment.Scope.Anchor
+			case "space":
+				request.ResourceSpace = assignment.Scope.Anchor
+			}
+			decision, checkErr := s.CheckTx(ctx, q, request)
+			if checkErr != nil {
+				return checkErr
+			}
+			if decision.Effect == engine.Allow {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return apierr.New("invalid_scope", "the owner does not hold the requested permission")
+		}
+	}
+	return nil
+}
+
 // ReplaceInlineGrants atomically replaces a member's direct permission grants.
 // Named-role grants remain intact; the resulting effective authority is
 // checked once before the transaction can commit.
 func (s *Service) ReplaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	return s.replaceInlineGrants(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, false)
+}
+
+// ReplaceOAuthInlineGrants updates an existing OAuth Agent's consent grant
+// using the same owner system assignment right as initial consent.
+func (s *Service) ReplaceOAuthInlineGrants(ctx context.Context, ownerMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	return s.replaceInlineGrants(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, true)
+}
+
+func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, oauthConsent bool) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1362,7 +1457,21 @@ func (s *Service) ReplaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
+		if oauthConsent {
+			agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: member.ID})
+			if agentErr != nil {
+				if errors.Is(agentErr, pgx.ErrNoRows) {
+					return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an OAuth Agent")
+				}
+				return agentErr
+			}
+			if agent.Source.String != "oauth" || !agent.CreatedByMemberID.Valid || agent.CreatedByMemberID.String != actorMemberID {
+				return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an owner's OAuth Agent")
+			}
+			if err := s.authorizeOAuthGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions); err != nil {
+				return err
+			}
+		} else if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
 			return err
 		}
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
@@ -1380,10 +1489,16 @@ func (s *Service) ReplaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
-			return err
+		if !oauthConsent {
+			if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
+				return err
+			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.replace", row.ID, "success"); err != nil {
+		action := "grant.replace"
+		if oauthConsent {
+			action = "grant.oauth_consent.replace"
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}

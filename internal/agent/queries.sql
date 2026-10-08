@@ -17,14 +17,29 @@ RETURNING id, space_id, name, parent_id, kind, owner_member_id, status, created_
 -- name: CreateAgentMember :one
 INSERT INTO members (
     id, space_id, name, kind, type, binding_policy, status, version,
-    home_group_id, created_by_user_id, created_by_member_id, source, expires_at
+    home_group_id, created_by_user_id, created_by_member_id, source, oauth_client_id, expires_at
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), 'agent', 'agent', 'single', 'active', 1,
-    sqlc.arg(home_group_id), sqlc.narg(created_by_user_id), sqlc.arg(created_by_member_id), sqlc.arg(source), sqlc.arg(expires_at)
+    sqlc.arg(home_group_id), sqlc.narg(created_by_user_id), sqlc.arg(created_by_member_id), sqlc.arg(source), sqlc.narg(oauth_client_id), sqlc.arg(expires_at)
 )
 RETURNING id, space_id, name, type, binding_policy, status, version, home_group_id,
-          created_by_user_id, created_by_member_id, source, expires_at, deleted_at, created_at;
+          created_by_user_id, created_by_member_id, source, oauth_client_id, expires_at, deleted_at, created_at;
+
+-- name: GetOAuthAgentForOwnerClient :one
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
+       m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
+       g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status
+FROM members m
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+WHERE m.type = 'agent'
+  AND m.source = 'oauth'
+  AND m.oauth_client_id = sqlc.arg(oauth_client_id)
+  AND m.created_by_member_id = sqlc.arg(owner_member_id)
+  AND m.status <> 'removed'
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT 1;
 
 -- name: AddAgentToGroup :exec
 INSERT INTO group_members (group_id, member_id, source)
@@ -34,7 +49,7 @@ ON CONFLICT (group_id, member_id) DO NOTHING;
 -- name: GetAgentMember :one
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
-       m.expires_at, m.deleted_at, m.created_at,
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
        g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status
 FROM members m
 JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
@@ -43,7 +58,7 @@ WHERE m.id = sqlc.arg(member_id) AND m.type = 'agent';
 -- name: ListAgentsForGroup :many
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
-       m.expires_at, m.deleted_at, m.created_at
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at
 FROM members m
 JOIN group_members gm ON gm.member_id = m.id
 WHERE gm.group_id = sqlc.arg(group_id) AND m.type = 'agent'

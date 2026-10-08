@@ -7,5 +7,35 @@ UPDATE api_keys SET last_used_at = now() WHERE id = sqlc.arg(id);
 -- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash) VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb), COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash)) RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at;
 
+-- name: GetApplicationByClientID :one
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
+FROM applications
+WHERE client_id = sqlc.arg(client_id)
+LIMIT 1;
+
+-- name: CreateAuthorizationCode :exec
+INSERT INTO authorization_codes (
+    id, application_id, user_id, member_id, redirect_uri, code_hash,
+    code_challenge, code_challenge_method, scope, nonce, resource, expires_at
+)
+VALUES (
+    sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(user_id), sqlc.narg(member_id),
+    sqlc.arg(redirect_uri), sqlc.arg(code_hash), sqlc.arg(code_challenge),
+    sqlc.arg(code_challenge_method), sqlc.arg(scope), sqlc.narg(nonce),
+    sqlc.narg(resource), sqlc.arg(expires_at)
+);
+
+-- name: ConsumeAuthorizationCode :one
+UPDATE authorization_codes
+SET consumed_at = now()
+WHERE code_hash = sqlc.arg(code_hash)
+  AND application_id = sqlc.arg(application_id)
+  AND redirect_uri = sqlc.arg(redirect_uri)
+  AND consumed_at IS NULL
+  AND expires_at > now()
+RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
+          code_challenge, code_challenge_method, scope, nonce, resource,
+          expires_at, consumed_at;
+
 -- name: CreateAPIKey :one
 INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, expires_at, allow_subject_assertion) VALUES (sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(name), sqlc.arg(prefix), sqlc.arg(secret_hash), COALESCE(sqlc.narg(scopes), '[]'::jsonb), sqlc.narg(expires_at), sqlc.arg(allow_subject_assertion)) RETURNING id, application_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion;

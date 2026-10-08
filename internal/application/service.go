@@ -20,6 +20,45 @@ import (
 )
 
 type Service struct{ Store *store.Store }
+
+type OAuthClient struct {
+	ID               string
+	SpaceID          string
+	Name             string
+	ClientID         string
+	RedirectURIs     []string
+	AllowedScopes    []string
+	ClientSecretHash []byte
+}
+
+type AuthorizationCode struct {
+	ID                  string
+	ApplicationID       string
+	UserID              string
+	MemberID            string
+	RedirectURI         string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Scope               string
+	Nonce               string
+	Resource            string
+	ExpiresAt           time.Time
+}
+
+type CreateAuthorizationCodeInput struct {
+	ID                  string
+	ApplicationID       string
+	UserID              string
+	MemberID            string
+	RedirectURI         string
+	CodeHash            []byte
+	CodeChallenge       string
+	CodeChallengeMethod string
+	Scope               string
+	Nonce               string
+	Resource            string
+	ExpiresAt           time.Time
+}
 type Key struct {
 	ID                    string
 	ApplicationID         string
@@ -56,6 +95,71 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	var scopes []string
 	_ = json.Unmarshal(row.Scopes, &scopes)
 	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
+}
+
+func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient, error) {
+	row, err := s.Store.Queries().GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: clientID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OAuthClient{}, apierr.New("invalid_request", "client_id is not registered")
+	}
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	var redirectURIs, allowedScopes []string
+	if err := json.Unmarshal(row.RedirectUris, &redirectURIs); err != nil {
+		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
+	}
+	if err := json.Unmarshal(row.AllowedScopes, &allowedScopes); err != nil {
+		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
+	}
+	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash}, nil
+}
+
+func (s *Service) CreateAuthorizationCode(ctx context.Context, in CreateAuthorizationCodeInput) error {
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		return q.CreateAuthorizationCode(ctx, db.CreateAuthorizationCodeParams{
+			ID: in.ID, ApplicationID: in.ApplicationID, UserID: in.UserID,
+			MemberID: nullableText(in.MemberID), RedirectUri: in.RedirectURI,
+			CodeHash: in.CodeHash, CodeChallenge: pgtype.Text{String: in.CodeChallenge, Valid: true},
+			CodeChallengeMethod: pgtype.Text{String: in.CodeChallengeMethod, Valid: true}, Scope: in.Scope,
+			Nonce: nullableText(in.Nonce), Resource: nullableText(in.Resource), ExpiresAt: pgtype.Timestamptz{Time: in.ExpiresAt, Valid: true},
+		})
+	})
+}
+
+func (s *Service) ConsumeAuthorizationCode(ctx context.Context, codeHash []byte, applicationID, redirectURI string) (AuthorizationCode, error) {
+	var out AuthorizationCode
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.ConsumeAuthorizationCode(ctx, db.ConsumeAuthorizationCodeParams{CodeHash: codeHash, ApplicationID: applicationID, RedirectUri: redirectURI})
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "authorization code is invalid or expired")
+			}
+			return err
+		}
+		out = AuthorizationCode{ID: row.ID, ApplicationID: row.ApplicationID, UserID: row.UserID, RedirectURI: row.RedirectUri, Scope: row.Scope, ExpiresAt: row.ExpiresAt.Time}
+		if row.MemberID.Valid {
+			out.MemberID = row.MemberID.String
+		}
+		if row.CodeChallenge.Valid {
+			out.CodeChallenge = row.CodeChallenge.String
+		}
+		if row.CodeChallengeMethod.Valid {
+			out.CodeChallengeMethod = row.CodeChallengeMethod.String
+		}
+		if row.Nonce.Valid {
+			out.Nonce = row.Nonce.String
+		}
+		if row.Resource.Valid {
+			out.Resource = row.Resource.String
+		}
+		return nil
+	})
+	return out, err
+}
+
+func nullableText(value string) pgtype.Text {
+	return pgtype.Text{String: value, Valid: value != ""}
 }
 func GenerateSecret() (string, string, []byte, error) {
 	b := make([]byte, 32)

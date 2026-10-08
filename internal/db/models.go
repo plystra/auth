@@ -144,6 +144,10 @@ type AuthorizationCode struct {
 	Scope               string             `json:"scope"`
 	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	CodeHash            []byte             `json:"code_hash"`
+	MemberID            pgtype.Text        `json:"member_id"`
+	Nonce               pgtype.Text        `json:"nonce"`
+	Resource            pgtype.Text        `json:"resource"`
 }
 
 type AuthorizationGrant struct {

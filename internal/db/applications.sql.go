@@ -11,6 +11,62 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeAuthorizationCode = `-- name: ConsumeAuthorizationCode :one
+UPDATE authorization_codes
+SET consumed_at = now()
+WHERE code_hash = $1
+  AND application_id = $2
+  AND redirect_uri = $3
+  AND consumed_at IS NULL
+  AND expires_at > now()
+RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
+          code_challenge, code_challenge_method, scope, nonce, resource,
+          expires_at, consumed_at
+`
+
+type ConsumeAuthorizationCodeParams struct {
+	CodeHash      []byte `json:"code_hash"`
+	ApplicationID string `json:"application_id"`
+	RedirectUri   string `json:"redirect_uri"`
+}
+
+type ConsumeAuthorizationCodeRow struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	UserID              string             `json:"user_id"`
+	MemberID            pgtype.Text        `json:"member_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	CodeHash            []byte             `json:"code_hash"`
+	CodeChallenge       pgtype.Text        `json:"code_challenge"`
+	CodeChallengeMethod pgtype.Text        `json:"code_challenge_method"`
+	Scope               string             `json:"scope"`
+	Nonce               pgtype.Text        `json:"nonce"`
+	Resource            pgtype.Text        `json:"resource"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+}
+
+func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAuthorizationCodeParams) (ConsumeAuthorizationCodeRow, error) {
+	row := q.db.QueryRow(ctx, consumeAuthorizationCode, arg.CodeHash, arg.ApplicationID, arg.RedirectUri)
+	var i ConsumeAuthorizationCodeRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.UserID,
+		&i.MemberID,
+		&i.RedirectUri,
+		&i.CodeHash,
+		&i.CodeChallenge,
+		&i.CodeChallengeMethod,
+		&i.Scope,
+		&i.Nonce,
+		&i.Resource,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+	)
+	return i, err
+}
+
 const createAPIKey = `-- name: CreateAPIKey :one
 INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, expires_at, allow_subject_assertion) VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), $7, $8) RETURNING id, application_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 `
@@ -92,6 +148,52 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 	return i, err
 }
 
+const createAuthorizationCode = `-- name: CreateAuthorizationCode :exec
+INSERT INTO authorization_codes (
+    id, application_id, user_id, member_id, redirect_uri, code_hash,
+    code_challenge, code_challenge_method, scope, nonce, resource, expires_at
+)
+VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7,
+    $8, $9, $10,
+    $11, $12
+)
+`
+
+type CreateAuthorizationCodeParams struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	UserID              string             `json:"user_id"`
+	MemberID            pgtype.Text        `json:"member_id"`
+	RedirectUri         string             `json:"redirect_uri"`
+	CodeHash            []byte             `json:"code_hash"`
+	CodeChallenge       pgtype.Text        `json:"code_challenge"`
+	CodeChallengeMethod pgtype.Text        `json:"code_challenge_method"`
+	Scope               string             `json:"scope"`
+	Nonce               pgtype.Text        `json:"nonce"`
+	Resource            pgtype.Text        `json:"resource"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthorizationCodeParams) error {
+	_, err := q.db.Exec(ctx, createAuthorizationCode,
+		arg.ID,
+		arg.ApplicationID,
+		arg.UserID,
+		arg.MemberID,
+		arg.RedirectUri,
+		arg.CodeHash,
+		arg.CodeChallenge,
+		arg.CodeChallengeMethod,
+		arg.Scope,
+		arg.Nonce,
+		arg.Resource,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
 SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
 `
@@ -135,6 +237,33 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.SpaceID,
 		&i.ApplicationName,
 		&i.ClientID,
+	)
+	return i, err
+}
+
+const getApplicationByClientID = `-- name: GetApplicationByClientID :one
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
+FROM applications
+WHERE client_id = $1
+LIMIT 1
+`
+
+type GetApplicationByClientIDParams struct {
+	ClientID string `json:"client_id"`
+}
+
+func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicationByClientIDParams) (Application, error) {
+	row := q.db.QueryRow(ctx, getApplicationByClientID, arg.ClientID)
+	var i Application
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.RedirectUris,
+		&i.AllowedScopes,
+		&i.ClientID,
+		&i.ClientSecretHash,
+		&i.CreatedAt,
 	)
 	return i, err
 }

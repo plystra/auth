@@ -139,14 +139,14 @@ func (q *Queries) CreateAgentCredential(ctx context.Context, arg CreateAgentCred
 const createAgentMember = `-- name: CreateAgentMember :one
 INSERT INTO members (
     id, space_id, name, kind, type, binding_policy, status, version,
-    home_group_id, created_by_user_id, created_by_member_id, source, expires_at
+    home_group_id, created_by_user_id, created_by_member_id, source, oauth_client_id, expires_at
 )
 VALUES (
     $1, $2, $3, 'agent', 'agent', 'single', 'active', 1,
-    $4, $5, $6, $7, $8
+    $4, $5, $6, $7, $8, $9
 )
 RETURNING id, space_id, name, type, binding_policy, status, version, home_group_id,
-          created_by_user_id, created_by_member_id, source, expires_at, deleted_at, created_at
+          created_by_user_id, created_by_member_id, source, oauth_client_id, expires_at, deleted_at, created_at
 `
 
 type CreateAgentMemberParams struct {
@@ -157,6 +157,7 @@ type CreateAgentMemberParams struct {
 	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
 	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
 }
 
@@ -172,6 +173,7 @@ type CreateAgentMemberRow struct {
 	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
 	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
 	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
@@ -186,6 +188,7 @@ func (q *Queries) CreateAgentMember(ctx context.Context, arg CreateAgentMemberPa
 		arg.CreatedByUserID,
 		arg.CreatedByMemberID,
 		arg.Source,
+		arg.OauthClientID,
 		arg.ExpiresAt,
 	)
 	var i CreateAgentMemberRow
@@ -201,6 +204,7 @@ func (q *Queries) CreateAgentMember(ctx context.Context, arg CreateAgentMemberPa
 		&i.CreatedByUserID,
 		&i.CreatedByMemberID,
 		&i.Source,
+		&i.OauthClientID,
 		&i.ExpiresAt,
 		&i.DeletedAt,
 		&i.CreatedAt,
@@ -390,7 +394,7 @@ func (q *Queries) GetAgentCredentialByPrefix(ctx context.Context, arg GetAgentCr
 const getAgentMember = `-- name: GetAgentMember :one
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
-       m.expires_at, m.deleted_at, m.created_at,
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
        g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status
 FROM members m
 JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
@@ -413,6 +417,7 @@ type GetAgentMemberRow struct {
 	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
 	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
 	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
@@ -436,6 +441,7 @@ func (q *Queries) GetAgentMember(ctx context.Context, arg GetAgentMemberParams) 
 		&i.CreatedByUserID,
 		&i.CreatedByMemberID,
 		&i.Source,
+		&i.OauthClientID,
 		&i.ExpiresAt,
 		&i.DeletedAt,
 		&i.CreatedAt,
@@ -536,6 +542,74 @@ func (q *Queries) GetMemberVersion(ctx context.Context, arg GetMemberVersionPara
 	return version, err
 }
 
+const getOAuthAgentForOwnerClient = `-- name: GetOAuthAgentForOwnerClient :one
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
+       m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
+       g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status
+FROM members m
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+WHERE m.type = 'agent'
+  AND m.source = 'oauth'
+  AND m.oauth_client_id = $1
+  AND m.created_by_member_id = $2
+  AND m.status <> 'removed'
+ORDER BY m.created_at DESC, m.id DESC
+LIMIT 1
+`
+
+type GetOAuthAgentForOwnerClientParams struct {
+	OauthClientID pgtype.Text `json:"oauth_client_id"`
+	OwnerMemberID pgtype.Text `json:"owner_member_id"`
+}
+
+type GetOAuthAgentForOwnerClientRow struct {
+	ID                string             `json:"id"`
+	SpaceID           string             `json:"space_id"`
+	Name              string             `json:"name"`
+	Type              string             `json:"type"`
+	BindingPolicy     string             `json:"binding_policy"`
+	Status            string             `json:"status"`
+	Version           int64              `json:"version"`
+	HomeGroupID       pgtype.Text        `json:"home_group_id"`
+	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
+	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	OwnerMemberID     pgtype.Text        `json:"owner_member_id"`
+	GroupParentID     pgtype.Text        `json:"group_parent_id"`
+	GroupStatus       string             `json:"group_status"`
+}
+
+func (q *Queries) GetOAuthAgentForOwnerClient(ctx context.Context, arg GetOAuthAgentForOwnerClientParams) (GetOAuthAgentForOwnerClientRow, error) {
+	row := q.db.QueryRow(ctx, getOAuthAgentForOwnerClient, arg.OauthClientID, arg.OwnerMemberID)
+	var i GetOAuthAgentForOwnerClientRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Type,
+		&i.BindingPolicy,
+		&i.Status,
+		&i.Version,
+		&i.HomeGroupID,
+		&i.CreatedByUserID,
+		&i.CreatedByMemberID,
+		&i.Source,
+		&i.OauthClientID,
+		&i.ExpiresAt,
+		&i.DeletedAt,
+		&i.CreatedAt,
+		&i.OwnerMemberID,
+		&i.GroupParentID,
+		&i.GroupStatus,
+	)
+	return i, err
+}
+
 const listActiveAgentCredentials = `-- name: ListActiveAgentCredentials :many
 SELECT id, member_id, kind, prefix, family_id, expires_at, revoked_at, last_used_at, created_at
 FROM agent_credentials
@@ -592,7 +666,7 @@ func (q *Queries) ListActiveAgentCredentials(ctx context.Context, arg ListActive
 const listAgentsForGroup = `-- name: ListAgentsForGroup :many
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
-       m.expires_at, m.deleted_at, m.created_at
+       m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at
 FROM members m
 JOIN group_members gm ON gm.member_id = m.id
 WHERE gm.group_id = $1 AND m.type = 'agent'
@@ -615,6 +689,7 @@ type ListAgentsForGroupRow struct {
 	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
 	Source            pgtype.Text        `json:"source"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
 	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
@@ -641,6 +716,7 @@ func (q *Queries) ListAgentsForGroup(ctx context.Context, arg ListAgentsForGroup
 			&i.CreatedByUserID,
 			&i.CreatedByMemberID,
 			&i.Source,
+			&i.OauthClientID,
 			&i.ExpiresAt,
 			&i.DeletedAt,
 			&i.CreatedAt,

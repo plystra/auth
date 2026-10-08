@@ -2,6 +2,8 @@ package protocol
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
+	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -190,6 +193,215 @@ func TestOAuthUserinfoReturnsUserAndAgentSubjects(t *testing.T) {
 	if status, body := request("not-a-token"); status != http.StatusUnauthorized || body["error"].(map[string]any)["code"] != "invalid_token" {
 		t.Fatalf("invalid userinfo status=%d body=%v", status, body)
 	}
+}
+
+func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
+	ctx := context.Background()
+	database, err := protocolDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_oauth_code_protocol', 'oauth-code@example.test', 'oauth-code@example.test', 'test-password-hash', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &authorization.Service{Store: st}
+	_, owner, err := authorizer.CreateSpace(ctx, "usr_oauth_code_protocol", "OAuth Code Space", "oauth-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description, principal_kinds, agent_approval, risk, status)
+		VALUES ('prm_oauth_group_read', 'oauth.group:read', 'OAuth group-scoped read', '["human","agent"]'::jsonb, 'none', 'low', 'active')
+		ON CONFLICT (key) DO NOTHING
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO groups (id, space_id, name, kind, status)
+		VALUES ('grp_oauth_scope', $1, 'OAuth Scope', 'standard', 'active')
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by)
+		VALUES ('grt_oauth_owner_scope', $1, '["oauth.group:read"]'::jsonb, $2, 'group', 'grp_oauth_scope', $2)
+	`, owner.SpaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	clientID := "https://client.test/metadata.json"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id)
+		VALUES ('app_oauth_code_protocol', $1, 'OAuth Code Client', '["https://client.test/callback"]'::jsonb, '["oauth.group:read"]'::jsonb, $2)
+	`, owner.SpaceID, clientID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		DELETE FROM role_permissions rp
+		USING permissions p, member_roles mr
+		WHERE rp.permission_id = p.id AND rp.role_id = mr.role_id
+		  AND mr.member_id = $1 AND p.key = 'auth.grants:assign'
+	`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st, HMACKeys: [][]byte{[]byte("protocol-oauth-code-hmac-key-0001")}}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store: st, Signer: signer, HMACKeys: [][]byte{[]byte("session-hmac-key-0000000000000001")},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	accounts := &account.Service{Store: st}
+	apps := &application.Service{Store: st}
+	var mux http.ServeMux
+	(HTTP{Issuer: "https://auth.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authorizer}).Register(&mux)
+	userTokens, err := sessions.CreateForMember(ctx, "usr_oauth_code_protocol", owner.ID, nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := "oauth-code-verifier-for-pkce"
+	digest := sha256.Sum256([]byte(verifier))
+	authorizeQuery := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://client.test/callback"},
+		"scope":                 {"oauth.group:read"},
+		"state":                 {"state-123"},
+		"nonce":                 {"nonce-123"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(digest[:])},
+		"code_challenge_method": {"S256"},
+	}
+	badRedirectQuery := cloneValues(authorizeQuery)
+	badRedirectQuery.Set("redirect_uri", "https://client.test/other")
+	badRedirectRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+badRedirectQuery.Encode(), nil)
+	badRedirectRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	badRedirectResponse := httptest.NewRecorder()
+	mux.ServeHTTP(badRedirectResponse, badRedirectRequest)
+	if badRedirectResponse.Code != http.StatusBadRequest {
+		t.Fatalf("unregistered redirect status=%d body=%s", badRedirectResponse.Code, badRedirectResponse.Body.String())
+	}
+	badResourceQuery := cloneValues(authorizeQuery)
+	badResourceQuery.Set("resource", "https://resource.test")
+	badResourceRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+badResourceQuery.Encode(), nil)
+	badResourceRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	badResourceResponse := httptest.NewRecorder()
+	mux.ServeHTTP(badResourceResponse, badResourceRequest)
+	if badResourceResponse.Code != http.StatusBadRequest {
+		t.Fatalf("unregistered resource status=%d body=%s", badResourceResponse.Code, badResourceResponse.Body.String())
+	}
+	authorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
+	authorizeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	authorizeResponse := httptest.NewRecorder()
+	mux.ServeHTTP(authorizeResponse, authorizeRequest)
+	if authorizeResponse.Code != http.StatusFound {
+		t.Fatalf("authorize status=%d body=%s", authorizeResponse.Code, authorizeResponse.Body.String())
+	}
+	redirect, err := url.Parse(authorizeResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redirect.Query().Get("state") != "state-123" || redirect.Query().Get("code") == "" {
+		t.Fatalf("authorize redirect=%s", redirect)
+	}
+	code := redirect.Query().Get("code")
+	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"redirect_uri":  {"https://client.test/callback"},
+		"code":          {code},
+		"code_verifier": {verifier},
+	}.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResponse := httptest.NewRecorder()
+	mux.ServeHTTP(tokenResponse, tokenRequest)
+	if tokenResponse.Code != http.StatusOK {
+		t.Fatalf("token status=%d body=%s", tokenResponse.Code, tokenResponse.Body.String())
+	}
+	var tokenBody struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		Scope        string `json:"scope"`
+	}
+	if err := json.Unmarshal(tokenResponse.Body.Bytes(), &tokenBody); err != nil {
+		t.Fatal(err)
+	}
+	if tokenBody.AccessToken == "" || !strings.HasPrefix(tokenBody.RefreshToken, "ply_rt_") || tokenBody.Scope != "oauth.group:read" {
+		t.Fatalf("token response=%+v", tokenBody)
+	}
+	claims, active, err := sessions.Introspect(ctx, tokenBody.AccessToken, clientID)
+	if err != nil || !active || claims.Type != "agent" || claims.Subject == owner.ID {
+		t.Fatalf("OAuth access claims=%+v active=%v err=%v", claims, active, err)
+	}
+	agentMember, err := agents.OAuthAgent(ctx, owner.ID, clientID)
+	if err != nil || agentMember.ID != claims.Subject {
+		t.Fatalf("OAuth Agent=%+v err=%v claims=%+v", agentMember, err, claims)
+	}
+	var directKeyCount int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM agent_credentials WHERE member_id = $1 AND kind = 'key'`, agentMember.ID).Scan(&directKeyCount); err != nil {
+		t.Fatal(err)
+	}
+	if directKeyCount != 0 {
+		t.Fatalf("OAuth Agent has %d hidden direct keys, want none", directKeyCount)
+	}
+	wrongVerifierQuery := cloneValues(authorizeQuery)
+	wrongVerifierQuery.Set("state", "state-wrong-verifier")
+	wrongAuthorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+wrongVerifierQuery.Encode(), nil)
+	wrongAuthorizeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	wrongAuthorizeResponse := httptest.NewRecorder()
+	mux.ServeHTTP(wrongAuthorizeResponse, wrongAuthorizeRequest)
+	if wrongAuthorizeResponse.Code != http.StatusFound {
+		t.Fatalf("second authorize status=%d body=%s", wrongAuthorizeResponse.Code, wrongAuthorizeResponse.Body.String())
+	}
+	wrongCode, err := url.Parse(wrongAuthorizeResponse.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"redirect_uri":  {"https://client.test/callback"},
+		"code":          {wrongCode.Query().Get("code")},
+		"code_verifier": {"wrong-verifier"},
+	}.Encode()))
+	wrongTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	wrongTokenResponse := httptest.NewRecorder()
+	mux.ServeHTTP(wrongTokenResponse, wrongTokenRequest)
+	if wrongTokenResponse.Code != http.StatusBadRequest {
+		t.Fatalf("wrong PKCE verifier status=%d body=%s", wrongTokenResponse.Code, wrongTokenResponse.Body.String())
+	}
+	replayRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {clientID},
+		"redirect_uri":  {"https://client.test/callback"},
+		"code":          {code},
+		"code_verifier": {verifier},
+	}.Encode()))
+	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	replayResponse := httptest.NewRecorder()
+	mux.ServeHTTP(replayResponse, replayRequest)
+	if replayResponse.Code != http.StatusBadRequest {
+		t.Fatalf("authorization code replay status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
+	}
+}
+
+func cloneValues(in url.Values) url.Values {
+	out := make(url.Values, len(in))
+	for key, values := range in {
+		out[key] = append([]string(nil), values...)
+	}
+	return out
 }
 
 func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T) {
