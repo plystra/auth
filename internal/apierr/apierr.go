@@ -50,7 +50,7 @@ func Status(code string) int {
 		return http.StatusConflict
 	case "rate_limited":
 		return http.StatusTooManyRequests
-	case "unavailable":
+	case "unavailable", "temporarily_unavailable":
 		return http.StatusServiceUnavailable
 	case "not_implemented":
 		return http.StatusNotImplemented

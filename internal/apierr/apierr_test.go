@@ -13,6 +13,7 @@ func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 		"browser_origin_rejected":   http.StatusForbidden,
 		"BROWSER_ORIGIN_REJECTED":   http.StatusForbidden,
 		"unavailable":               http.StatusServiceUnavailable,
+		"temporarily_unavailable":   http.StatusServiceUnavailable,
 		"not_implemented":           http.StatusNotImplemented,
 		"invalid_grant":             http.StatusBadRequest,
 		"invalid_scope":             http.StatusBadRequest,
