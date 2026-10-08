@@ -424,19 +424,21 @@ type Session struct {
 	StepUpOperation pgtype.Text        `json:"step_up_operation"`
 	StepUpDigest    []byte             `json:"step_up_digest"`
 	StepUpExpiresAt pgtype.Timestamptz `json:"step_up_expires_at"`
+	AuthMethods     []string           `json:"auth_methods"`
 }
 
 type SignInAttempt struct {
-	ID              string             `json:"id"`
-	UserID          pgtype.Text        `json:"user_id"`
-	EmailNormalized string             `json:"email_normalized"`
-	Ip              pgtype.Text        `json:"ip"`
-	UserAgent       pgtype.Text        `json:"user_agent"`
-	FailedAttempts  int32              `json:"failed_attempts"`
-	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
-	ConsumedAt      pgtype.Timestamptz `json:"consumed_at"`
-	LockedAt        pgtype.Timestamptz `json:"locked_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	ID                 string             `json:"id"`
+	UserID             pgtype.Text        `json:"user_id"`
+	EmailNormalized    string             `json:"email_normalized"`
+	Ip                 pgtype.Text        `json:"ip"`
+	UserAgent          pgtype.Text        `json:"user_agent"`
+	FailedAttempts     int32              `json:"failed_attempts"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt         pgtype.Timestamptz `json:"consumed_at"`
+	LockedAt           pgtype.Timestamptz `json:"locked_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	PasswordVerifiedAt pgtype.Timestamptz `json:"password_verified_at"`
 }
 
 type Space struct {

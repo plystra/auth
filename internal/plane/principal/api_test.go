@@ -125,8 +125,10 @@ func TestMultiStepSignInRoutesAndOpenAPIContract(t *testing.T) {
 		t.Fatalf("sign-in start schema = %+v, want only required email", start)
 	}
 	attempt := document.Components.Schemas["SignInAttemptInputBody"]
-	if _, ok := attempt.Properties["password"]; !ok || len(attempt.Required) != 1 || attempt.Required[0] != "password" {
-		t.Fatalf("sign-in attempt schema = %+v, want only required password", attempt)
+	_, hasPassword := attempt.Properties["password"]
+	_, hasMFACode := attempt.Properties["mfa_code"]
+	if !hasPassword || !hasMFACode || len(attempt.Required) != 0 {
+		t.Fatalf("sign-in attempt schema = %+v, want optional password and mfa_code steps", attempt)
 	}
 }
 

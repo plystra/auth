@@ -34,7 +34,7 @@ VALUES (
     $1, $2, $3,
     $4, $5, $6
 )
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
 `
 
 type CreateSignInAttemptParams struct {
@@ -67,6 +67,7 @@ func (q *Queries) CreateSignInAttempt(ctx context.Context, arg CreateSignInAttem
 		&i.ConsumedAt,
 		&i.LockedAt,
 		&i.CreatedAt,
+		&i.PasswordVerifiedAt,
 	)
 	return i, err
 }
@@ -96,7 +97,7 @@ UPDATE sign_in_attempts
 SET failed_attempts = failed_attempts + 1,
     locked_at = CASE WHEN failed_attempts + 1 >= $1 THEN now() ELSE locked_at END
 WHERE id = $2
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
 `
 
 type IncrementSignInAttemptFailureParams struct {
@@ -118,12 +119,13 @@ func (q *Queries) IncrementSignInAttemptFailure(ctx context.Context, arg Increme
 		&i.ConsumedAt,
 		&i.LockedAt,
 		&i.CreatedAt,
+		&i.PasswordVerifiedAt,
 	)
 	return i, err
 }
 
 const lockSignInAttempt = `-- name: LockSignInAttempt :one
-SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at
+SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
 FROM sign_in_attempts
 WHERE id = $1
 FOR UPDATE
@@ -147,6 +149,23 @@ func (q *Queries) LockSignInAttempt(ctx context.Context, arg LockSignInAttemptPa
 		&i.ConsumedAt,
 		&i.LockedAt,
 		&i.CreatedAt,
+		&i.PasswordVerifiedAt,
 	)
 	return i, err
+}
+
+const markSignInPasswordVerified = `-- name: MarkSignInPasswordVerified :exec
+UPDATE sign_in_attempts
+SET password_verified_at = now()
+WHERE id = $1 AND password_verified_at IS NULL
+  AND consumed_at IS NULL AND locked_at IS NULL AND expires_at > now()
+`
+
+type MarkSignInPasswordVerifiedParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) MarkSignInPasswordVerified(ctx context.Context, arg MarkSignInPasswordVerifiedParams) error {
+	_, err := q.db.Exec(ctx, markSignInPasswordVerified, arg.ID)
+	return err
 }

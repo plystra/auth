@@ -40,7 +40,7 @@ func Status(code string) int {
 		return http.StatusBadRequest
 	case "invalid_client", "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized
-	case "forbidden", "permission_denied", "browser_origin_rejected", "cors_origin_rejected", "step_up_required", "human_principal_required":
+	case "forbidden", "permission_denied", "browser_origin_rejected", "cors_origin_rejected", "step_up_required", "human_principal_required", "mfa_required":
 		return http.StatusForbidden
 	case "email_verification_required":
 		return http.StatusForbidden

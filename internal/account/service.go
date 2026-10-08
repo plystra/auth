@@ -58,8 +58,11 @@ type LoginInput struct {
 	UserAgent string
 }
 type AuthResult struct {
-	User   User            `json:"user"`
-	Tokens *session.Tokens `json:"tokens,omitempty"`
+	User      User            `json:"user"`
+	Tokens    *session.Tokens `json:"tokens,omitempty"`
+	AttemptID string          `json:"attempt_id,omitempty"`
+	NextStep  string          `json:"next_step,omitempty"`
+	ExpiresAt *time.Time      `json:"expires_at,omitempty"`
 }
 
 const DefaultSpaceID = "spc_01h00000000000000000000000"
@@ -208,19 +211,38 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 	if u.PasswordResetRequiredAt.Valid {
 		return AuthResult{}, apierr.New("PASSWORD_RESET_REQUIRED", "reset your password before signing in")
 	}
-	memberID := ""
-	if s.Authorization != nil {
-		if member, memberErr := s.Authorization.GetMemberForUser(ctx, u.ID, DefaultSpaceID); memberErr == nil {
-			memberID = member.ID
-		} else {
-			return AuthResult{}, memberErr
-		}
+	factorCount, e := s.Store.Queries().CountTOTPFactors(ctx, db.CountTOTPFactorsParams{UserID: u.ID})
+	if e != nil {
+		return AuthResult{}, e
+	}
+	if factorCount > 0 {
+		return AuthResult{}, apierr.New("MFA_REQUIRED", "complete the multi-step sign-in to verify your authenticator")
+	}
+	memberID, e := s.defaultMemberID(ctx, u.ID)
+	if e != nil {
+		return AuthResult{}, e
 	}
 	tokens, e := s.Sessions.CreateForMember(ctx, u.ID, memberID, in.IP, in.UserAgent, 1)
 	if e != nil {
 		return AuthResult{}, e
 	}
 	return AuthResult{User: toPublicUser(u.ID, u.Email, u.EmailVerifiedAt.Valid, u.Status, u.CreatedAt.Time), Tokens: &tokens}, nil
+}
+
+func (s *Service) defaultMemberID(ctx context.Context, userID string) (string, error) {
+	if s.Authorization == nil {
+		return "", nil
+	}
+	members, err := s.Authorization.ListMembersForUser(ctx, userID, "human")
+	if err != nil {
+		return "", err
+	}
+	for _, member := range members {
+		if member.SpaceID == DefaultSpaceID {
+			return member.ID, nil
+		}
+	}
+	return "", nil
 }
 
 func (s *Service) allowRateLimit(ctx context.Context, kind, value string, limit int, window time.Duration) error {

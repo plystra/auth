@@ -117,9 +117,9 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level)
-VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($9, 1))
-RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($9, 1), $10)
+RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 `
 
 type CreateSessionParams struct {
@@ -132,6 +132,7 @@ type CreateSessionParams struct {
 	UserAgent      pgtype.Text        `json:"user_agent"`
 	AuthTime       interface{}        `json:"auth_time"`
 	AssuranceLevel interface{}        `json:"assurance_level"`
+	AuthMethods    []string           `json:"auth_methods"`
 }
 
 type CreateSessionRow struct {
@@ -147,6 +148,7 @@ type CreateSessionRow struct {
 	UserAgent      pgtype.Text        `json:"user_agent"`
 	AuthTime       pgtype.Timestamptz `json:"auth_time"`
 	AssuranceLevel int16              `json:"assurance_level"`
+	AuthMethods    []string           `json:"auth_methods"`
 }
 
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (CreateSessionRow, error) {
@@ -160,6 +162,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 		arg.UserAgent,
 		arg.AuthTime,
 		arg.AssuranceLevel,
+		arg.AuthMethods,
 	)
 	var i CreateSessionRow
 	err := row.Scan(
@@ -175,12 +178,13 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 		&i.UserAgent,
 		&i.AuthTime,
 		&i.AssuranceLevel,
+		&i.AuthMethods,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level FROM sessions WHERE id = $1
+SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = $1
 `
 
 type GetSessionParams struct {
@@ -200,6 +204,7 @@ type GetSessionRow struct {
 	UserAgent      pgtype.Text        `json:"user_agent"`
 	AuthTime       pgtype.Timestamptz `json:"auth_time"`
 	AssuranceLevel int16              `json:"assurance_level"`
+	AuthMethods    []string           `json:"auth_methods"`
 }
 
 func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
@@ -218,12 +223,13 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSess
 		&i.UserAgent,
 		&i.AuthTime,
 		&i.AssuranceLevel,
+		&i.AuthMethods,
 	)
 	return i, err
 }
 
 const listUserSessions = `-- name: ListUserSessions :many
-SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 FROM sessions
 WHERE user_id = $1
   AND revoked_at IS NULL
@@ -247,6 +253,7 @@ type ListUserSessionsRow struct {
 	UserAgent      pgtype.Text        `json:"user_agent"`
 	AuthTime       pgtype.Timestamptz `json:"auth_time"`
 	AssuranceLevel int16              `json:"assurance_level"`
+	AuthMethods    []string           `json:"auth_methods"`
 }
 
 func (q *Queries) ListUserSessions(ctx context.Context, arg ListUserSessionsParams) ([]ListUserSessionsRow, error) {
@@ -270,6 +277,7 @@ func (q *Queries) ListUserSessions(ctx context.Context, arg ListUserSessionsPara
 			&i.UserAgent,
 			&i.AuthTime,
 			&i.AssuranceLevel,
+			&i.AuthMethods,
 		); err != nil {
 			return nil, err
 		}

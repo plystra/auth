@@ -1305,3 +1305,10 @@ ALTER TABLE sessions
 CREATE INDEX IF NOT EXISTS sessions_step_up_idx
     ON sessions(id, step_up_expires_at)
     WHERE step_up_operation IS NOT NULL;
+
+
+ALTER TABLE sign_in_attempts ADD COLUMN password_verified_at timestamptz;
+
+ALTER TABLE sessions
+    ADD COLUMN auth_methods text[] NOT NULL DEFAULT ARRAY['pwd']::text[],
+    ADD CONSTRAINT sessions_auth_methods_nonempty CHECK (cardinality(auth_methods) > 0);

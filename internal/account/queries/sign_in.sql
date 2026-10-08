@@ -6,10 +6,10 @@ VALUES (
     sqlc.arg(id), sqlc.narg(user_id), sqlc.arg(email_normalized),
     sqlc.narg(ip), sqlc.narg(user_agent), sqlc.arg(expires_at)
 )
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at;
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at;
 
 -- name: LockSignInAttempt :one
-SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at
+SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
 FROM sign_in_attempts
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
@@ -27,7 +27,13 @@ UPDATE sign_in_attempts
 SET failed_attempts = failed_attempts + 1,
     locked_at = CASE WHEN failed_attempts + 1 >= sqlc.arg(max_failures) THEN now() ELSE locked_at END
 WHERE id = sqlc.arg(id)
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at;
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at;
+
+-- name: MarkSignInPasswordVerified :exec
+UPDATE sign_in_attempts
+SET password_verified_at = now()
+WHERE id = sqlc.arg(id) AND password_verified_at IS NULL
+  AND consumed_at IS NULL AND locked_at IS NULL AND expires_at > now();
 
 -- name: ConsumeSignInAttempt :exec
 UPDATE sign_in_attempts

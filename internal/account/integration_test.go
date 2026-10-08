@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,11 +16,14 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/factor"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/space"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
+	"github.com/pquerna/otp/totp"
 )
 
 var accountDB *testdb.Harness
@@ -456,6 +460,148 @@ func TestPasswordSignInUsesShortLivedOneTimeAttempts(t *testing.T) {
 	}
 	if successes != 1 || rejected != 1 {
 		t.Fatalf("concurrent sign-in completion: successes=%d rejected=%d", successes, rejected)
+	}
+}
+
+func TestTOTPSignInRequiresSecondStepAndPreservesAMROnRefresh(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	passwords := security.DefaultPasswordHasher()
+	hash, err := passwords.Hash("a sufficiently long password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_totp_signin', 'totp-signin@example.test', 'totp-signin@example.test', $1, 'active')
+	`, hash); err != nil {
+		t.Fatal(err)
+	}
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}
+	enrollment, err := factors.BeginTOTP(ctx, "usr_totp_signin", "totp-signin@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &session.Service{
+		Store: st, Signer: signer, Factors: factors, HMACKeys: [][]byte{[]byte(strings.Repeat("h", 32))},
+		Settings: func(context.Context) (session.Settings, error) {
+			return session.Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
+		},
+	}
+	accounts := &Service{Store: st, Passwords: passwords, Sessions: sessions, Settings: &space.Service{Store: st}}
+	challenge, err := accounts.BeginSignIn(ctx, LoginInput{Email: "totp-signin@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.CompleteSignInTOTP(ctx, challenge.AttemptID, "123456", nil, ""); err == nil {
+		t.Fatal("TOTP was accepted before the password step")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+	progress, err := accounts.CompleteSignIn(ctx, challenge.AttemptID, "a sufficiently long password", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.NextStep != "totp" || progress.AttemptID != challenge.AttemptID || progress.Tokens != nil || progress.ExpiresAt == nil {
+		t.Fatal("password step did not return a TOTP challenge without credentials")
+	}
+	var sessionCount int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM sessions WHERE user_id = 'usr_totp_signin'`).Scan(&sessionCount); err != nil {
+		t.Fatal(err)
+	}
+	if sessionCount != 0 {
+		t.Fatal("password-only step issued a session despite the TOTP factor")
+	}
+	if _, err := accounts.CompleteSignIn(ctx, challenge.AttemptID, "a sufficiently long password", nil, ""); err == nil {
+		t.Fatal("password step was reusable after advancing to TOTP")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+	if _, err := accounts.CompleteSignInTOTP(ctx, challenge.AttemptID, "abcdef", nil, ""); err == nil {
+		t.Fatal("invalid TOTP was accepted")
+	} else {
+		assertAccountError(t, err, "invalid_credentials")
+	}
+	code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := accounts.CompleteSignInTOTP(ctx, challenge.AttemptID, code, nil, "")
+	if err != nil || result.Tokens == nil {
+		t.Fatalf("TOTP completion did not issue a session: %v", err)
+	}
+	claims, err := sessions.VerifyAccess(result.Tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Assurance != 2 || !slices.Equal(claims.AMR, []string{"pwd", "otp"}) {
+		t.Fatalf("TOTP access token assurance=%d AMR=%v", claims.Assurance, claims.AMR)
+	}
+	refreshed, err := sessions.Refresh(ctx, result.Tokens.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshedClaims, err := sessions.VerifyAccess(refreshed.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refreshedClaims.Assurance != 2 || !slices.Equal(refreshedClaims.AMR, []string{"pwd", "otp"}) {
+		t.Fatalf("refreshed assurance=%d AMR=%v", refreshedClaims.Assurance, refreshedClaims.AMR)
+	}
+	listed, err := sessions.ListUserSessions(ctx, "usr_totp_signin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].AssuranceLevel != 2 || !slices.Equal(listed[0].AuthMethods, []string{"pwd", "otp"}) {
+		t.Fatal("session did not persist its authentication methods and assurance")
+	}
+	if _, err := accounts.CompleteSignInTOTP(ctx, challenge.AttemptID, code, nil, ""); err == nil {
+		t.Fatal("TOTP sign-in attempt was reusable")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+	if _, err := accounts.Login(ctx, LoginInput{Email: "totp-signin@example.test", Password: "a sufficiently long password"}); err == nil {
+		t.Fatal("direct password login bypassed the registered TOTP factor")
+	} else {
+		assertAccountError(t, err, "MFA_REQUIRED")
+	}
+	locked, err := accounts.BeginSignIn(ctx, LoginInput{Email: "totp-signin@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.CompleteSignIn(ctx, locked.AttemptID, "a sufficiently long password", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < maxSignInFailures; attempt++ {
+		if _, err := accounts.CompleteSignInTOTP(ctx, locked.AttemptID, "abcdef", nil, ""); err == nil {
+			t.Fatal("invalid TOTP was accepted")
+		} else {
+			assertAccountError(t, err, "invalid_credentials")
+		}
+	}
+	if _, err := accounts.CompleteSignInTOTP(ctx, locked.AttemptID, code, nil, ""); err == nil {
+		t.Fatal("locked TOTP attempt accepted a valid code")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
+	}
+	expired, err := accounts.BeginSignIn(ctx, LoginInput{Email: "totp-signin@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.CompleteSignIn(ctx, expired.AttemptID, "a sufficiently long password", nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sign_in_attempts SET expires_at = now() - interval '1 second' WHERE id = $1`, expired.AttemptID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := accounts.CompleteSignInTOTP(ctx, expired.AttemptID, code, nil, ""); err == nil {
+		t.Fatal("expired TOTP attempt accepted a code")
+	} else {
+		assertAccountError(t, err, "invalid_grant")
 	}
 }
 

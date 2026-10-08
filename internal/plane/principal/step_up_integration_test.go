@@ -17,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/security"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -202,5 +203,97 @@ func TestBackupCodeFactorHTTPRoutesUseDocumentedUserSurface(t *testing.T) {
 	handler.ServeHTTP(listed, listRequest)
 	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), created.Data.Codes[0]) {
 		t.Fatalf("GET /v1/me/factors status = %d or disclosed a backup code", listed.Code)
+	}
+}
+
+func TestPrincipalSignInRequiresTOTPAfterPassword(t *testing.T) {
+	ctx := context.Background()
+	st, authz, _, _, sessions, signer := newPrincipalFixture(t)
+	passwords := security.DefaultPasswordHasher()
+	hash, err := passwords.Hash("a sufficiently long password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = 'usr_principal_actor'`, hash); err != nil {
+		t.Fatal(err)
+	}
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}
+	enrollment, err := factors.BeginTOTP(ctx, "usr_principal_actor", "principal-actor@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.Factors = factors
+	accounts := &account.Service{Store: st, Passwords: passwords, Sessions: sessions, Authorization: authz}
+	api := &API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	post := func(path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	started := post("/v1/auth/sign-in", `{"email":"principal-actor@example.test"}`)
+	if started.Code != http.StatusOK {
+		t.Fatalf("sign-in start status = %d", started.Code)
+	}
+	var challenge struct {
+		Data struct {
+			AttemptID string `json:"attempt_id"`
+			NextStep  string `json:"next_step"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(started.Body.Bytes(), &challenge); err != nil {
+		t.Fatal(err)
+	}
+	if challenge.Data.AttemptID == "" || challenge.Data.NextStep != "password" {
+		t.Fatal("sign-in start did not return the password step")
+	}
+	path := "/v1/auth/sign-in/" + challenge.Data.AttemptID
+	password := post(path, `{"password":"a sufficiently long password"}`)
+	if password.Code != http.StatusOK || strings.Contains(password.Body.String(), "access_token") {
+		t.Fatalf("password step status = %d or disclosed a token", password.Code)
+	}
+	var next struct {
+		Data struct {
+			NextStep string `json:"next_step"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(password.Body.Bytes(), &next); err != nil {
+		t.Fatal(err)
+	}
+	if next.Data.NextStep != "totp" {
+		t.Fatalf("next sign-in step = %q, want totp", next.Data.NextStep)
+	}
+	code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := post(path, `{"mfa_code":"`+code+`"}`)
+	if finished.Code != http.StatusOK {
+		t.Fatalf("TOTP step status = %d", finished.Code)
+	}
+	var authenticated struct {
+		Data struct {
+			Tokens struct {
+				AccessToken string `json:"access_token"`
+			} `json:"tokens"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(finished.Body.Bytes(), &authenticated); err != nil {
+		t.Fatal(err)
+	}
+	if authenticated.Data.Tokens.AccessToken == "" {
+		t.Fatal("TOTP step did not issue an access token")
+	}
+	claims, err := sessions.VerifyAccess(authenticated.Data.Tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Assurance != 2 || len(claims.AMR) != 2 || claims.AMR[1] != "otp" {
+		t.Fatalf("HTTP sign-in assurance=%d AMR=%v", claims.Assurance, claims.AMR)
 	}
 }

@@ -1,13 +1,13 @@
 -- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level)
-VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.narg(member_id), sqlc.arg(token_hash), sqlc.arg(expires_at), sqlc.narg(ip), sqlc.narg(user_agent), COALESCE(sqlc.narg(auth_time), now()), COALESCE(sqlc.narg(assurance_level), 1))
-RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level;
+INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.narg(member_id), sqlc.arg(token_hash), sqlc.arg(expires_at), sqlc.narg(ip), sqlc.narg(user_agent), COALESCE(sqlc.narg(auth_time), now()), COALESCE(sqlc.narg(assurance_level), 1), sqlc.arg(auth_methods))
+RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods;
 
 -- name: GetSession :one
-SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level FROM sessions WHERE id = sqlc.arg(id);
+SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = sqlc.arg(id);
 
 -- name: ListUserSessions :many
-SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level
+SELECT id, user_id, member_id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 FROM sessions
 WHERE user_id = sqlc.arg(user_id)
   AND revoked_at IS NULL

@@ -49,6 +49,7 @@ type DeviceSession struct {
 	UserAgent      string    `json:"user_agent,omitempty"`
 	AuthTime       time.Time `json:"auth_time"`
 	AssuranceLevel int16     `json:"assurance_level"`
+	AuthMethods    []string  `json:"amr"`
 }
 
 func (s *Service) hashToken(token string) []byte {
@@ -77,6 +78,14 @@ func (s *Service) Create(ctx context.Context, userID string, ip net.IP, userAgen
 }
 
 func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, ip net.IP, userAgent string, assurance int) (Tokens, error) {
+	return s.CreateForMemberWithMethods(ctx, userID, memberID, ip, userAgent, assurance, []string{"pwd"})
+}
+
+func (s *Service) CreateForMemberWithMethods(ctx context.Context, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (Tokens, error) {
+	if assurance < 1 || assurance > 3 || len(methods) == 0 {
+		return Tokens{}, errors.New("invalid session authentication methods or assurance")
+	}
+	methods = append([]string(nil), methods...)
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
@@ -119,7 +128,7 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 			}
 			persistedMember = pgtype.Text{String: memberID, Valid: true}
 		}
-		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, MemberID: persistedMember, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance))})
+		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, MemberID: persistedMember, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods})
 		if e != nil {
 			return e
 		}
@@ -130,7 +139,7 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, AMR: []string{"pwd"}, Type: "user"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, AMR: methods, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -152,6 +161,7 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 	now := time.Now().UTC()
 	sid, uid, family, memberID, spaceID := "", "", "", "", ""
 	assurance := 1
+	var methods []string
 	rejected := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
 		var token db.RefreshToken
@@ -207,7 +217,7 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 			rejected = true
 			return nil
 		}
-		uid, assurance = sess.UserID, int(sess.AssuranceLevel)
+		uid, assurance, methods = sess.UserID, int(sess.AssuranceLevel), append([]string(nil), sess.AuthMethods...)
 		active, checkErr := activeUser(ctx, q, uid)
 		if checkErr != nil {
 			return checkErr
@@ -245,7 +255,7 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 		return Tokens{}, apierr.New("invalid_grant", "refresh token has been revoked")
 	}
 	jti, _ := randomToken("jti_")
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, AMR: []string{"pwd"}, Type: "user"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, AMR: methods, Type: "user"})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -360,7 +370,7 @@ func (s *Service) ListUserSessions(ctx context.Context, userID string) ([]Device
 	}
 	out := make([]DeviceSession, 0, len(rows))
 	for _, row := range rows {
-		item := DeviceSession{ID: row.ID, CreatedAt: row.CreatedAt.Time, LastSeenAt: row.LastSeenAt.Time, ExpiresAt: row.ExpiresAt.Time, AuthTime: row.AuthTime.Time, AssuranceLevel: row.AssuranceLevel}
+		item := DeviceSession{ID: row.ID, CreatedAt: row.CreatedAt.Time, LastSeenAt: row.LastSeenAt.Time, ExpiresAt: row.ExpiresAt.Time, AuthTime: row.AuthTime.Time, AssuranceLevel: row.AssuranceLevel, AuthMethods: append([]string(nil), row.AuthMethods...)}
 		if row.MemberID.Valid {
 			item.MemberID = row.MemberID.String
 		}

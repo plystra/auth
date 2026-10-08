@@ -272,6 +272,16 @@
       "AuthResult": {
         "additionalProperties": false,
         "properties": {
+          "attempt_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "next_step": {
+            "type": "string"
+          },
           "tokens": {
             "$ref": "#/components/schemas/Tokens"
           },
@@ -772,6 +782,15 @@
       "DeviceSession": {
         "additionalProperties": false,
         "properties": {
+          "amr": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "assurance_level": {
             "format": "int32",
             "type": "integer"
@@ -811,7 +830,8 @@
           "last_seen_at",
           "expires_at",
           "auth_time",
-          "assurance_level"
+          "assurance_level",
+          "amr"
         ],
         "type": "object"
       },
@@ -1274,13 +1294,13 @@
       "SignInAttemptInputBody": {
         "additionalProperties": false,
         "properties": {
+          "mfa_code": {
+            "type": "string"
+          },
           "password": {
             "type": "string"
           }
         },
-        "required": [
-          "password"
-        ],
         "type": "object"
       },
       "SignInChallenge": {
