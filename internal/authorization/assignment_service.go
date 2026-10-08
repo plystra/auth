@@ -78,6 +78,9 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err := s.authorizeAssignmentRightTx(ctx, q, actorMemberID, anchorSpace, anchorGroup); err != nil {
 			return err
 		}
+		if err := s.consumeStepUpTx(ctx, q); err != nil {
+			return err
+		}
 		if err := holderCoversAnchorTx(ctx, q, holder.SpaceID, anchorSpace); err != nil {
 			return err
 		}
@@ -261,6 +264,9 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err := s.authorizeAssignmentRightTx(ctx, q, actorMemberID, anchorSpace, row.AnchorGroupID.String); err != nil {
 			return err
 		}
+		if err := s.consumeStepUpTx(ctx, q); err != nil {
+			return err
+		}
 		if err := q.RevokeAssignRight(ctx, db.RevokeAssignRightParams{ID: rightID}); err != nil {
 			return err
 		}
@@ -275,7 +281,15 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 // in the requested Space or in one of its groups. Authorization is performed
 // by the caller against the requested Space before this display-only read.
 func (s *Service) ListAssignmentRights(ctx context.Context, spaceID string) ([]AssignmentRight, error) {
-	rows, err := s.Store.Queries().ListAssignRightsInSpace(ctx, db.ListAssignRightsInSpaceParams{SpaceID: pgtype.Text{String: spaceID, Valid: true}})
+	var rows []db.AssignRight
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.consumeStepUpTx(ctx, q); err != nil {
+			return err
+		}
+		var err error
+		rows, err = q.ListAssignRightsInSpace(ctx, db.ListAssignRightsInSpaceParams{SpaceID: pgtype.Text{String: spaceID, Valid: true}})
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}

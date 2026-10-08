@@ -156,6 +156,24 @@ func (s *Service) VerifyTOTPTx(ctx context.Context, q *db.Queries, userID, facto
 	}
 	return ErrInvalidCode
 }
+
+// VerifyTOTPTxRateLimited preserves the caller's transaction while applying
+// the same bounded failure bucket used by the public TOTP verifier.
+func (s *Service) VerifyTOTPTxRateLimited(ctx context.Context, q *db.Queries, userID, factorID, code string, now time.Time) error {
+	err := s.VerifyTOTPTx(ctx, q, userID, factorID, code, now)
+	if !errors.Is(err, ErrInvalidCode) || s.Limiter == nil {
+		return err
+	}
+	digest := sha256.Sum256([]byte("plystra-auth-totp-failure:" + userID + ":" + factorID))
+	allowed, limitErr := s.Limiter.Allow(ctx, base64.RawURLEncoding.EncodeToString(digest[:]), 5, 5*time.Minute)
+	if limitErr != nil {
+		return limitErr
+	}
+	if !allowed {
+		return apierr.New("rate_limited", "too many one-time code attempts")
+	}
+	return err
+}
 func (s *Service) GenerateBackupCodes(count int) ([]string, error) {
 	if count < 5 || count > 20 {
 		return nil, errors.New("backup code count must be between 5 and 20")

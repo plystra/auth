@@ -19,6 +19,7 @@ import (
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
 
@@ -29,10 +30,21 @@ var errGroupInactive = errors.New("group or ancestor is inactive")
 
 type Service struct {
 	Store              *store.Store
+	StepUp             stepup.Consumer
 	MaxDelegationDepth int
 
 	cacheOnce sync.Once
 	cache     *decisionCache
+}
+
+func (s *Service) consumeStepUpTx(ctx context.Context, q *db.Queries) error {
+	if _, ok := stepup.RequirementFromContext(ctx); !ok {
+		return nil
+	}
+	if s.StepUp == nil {
+		return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+	}
+	return s.StepUp.ConsumeStepUpTx(ctx, q)
 }
 
 const defaultMaxDelegationDepth = 8
@@ -846,6 +858,9 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
+		if err := s.consumeStepUpTx(ctx, q); err != nil {
+			return err
+		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -913,6 +928,9 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
+			return err
+		}
+		if err := s.consumeStepUpTx(ctx, q); err != nil {
 			return err
 		}
 		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {

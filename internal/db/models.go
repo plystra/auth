@@ -409,18 +409,21 @@ type RolePermission struct {
 }
 
 type Session struct {
-	ID             string             `json:"id"`
-	UserID         string             `json:"user_id"`
-	TokenHash      []byte             `json:"token_hash"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
-	Ip             pgtype.Text        `json:"ip"`
-	UserAgent      pgtype.Text        `json:"user_agent"`
-	AuthTime       pgtype.Timestamptz `json:"auth_time"`
-	AssuranceLevel int16              `json:"assurance_level"`
-	MemberID       pgtype.Text        `json:"member_id"`
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	TokenHash       []byte             `json:"token_hash"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt      pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+	AuthTime        pgtype.Timestamptz `json:"auth_time"`
+	AssuranceLevel  int16              `json:"assurance_level"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	StepUpOperation pgtype.Text        `json:"step_up_operation"`
+	StepUpDigest    []byte             `json:"step_up_digest"`
+	StepUpExpiresAt pgtype.Timestamptz `json:"step_up_expires_at"`
 }
 
 type SignInAttempt struct {

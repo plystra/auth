@@ -1295,3 +1295,13 @@ ALTER TABLE authorization_codes
 CREATE UNIQUE INDEX IF NOT EXISTS authorization_codes_hash_idx
     ON authorization_codes(code_hash)
     WHERE code_hash IS NOT NULL;
+
+
+ALTER TABLE sessions
+    ADD COLUMN IF NOT EXISTS step_up_operation text,
+    ADD COLUMN IF NOT EXISTS step_up_digest bytea,
+    ADD COLUMN IF NOT EXISTS step_up_expires_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS sessions_step_up_idx
+    ON sessions(id, step_up_expires_at)
+    WHERE step_up_operation IS NOT NULL;

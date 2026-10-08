@@ -204,6 +204,7 @@ func serve(ctx context.Context) error {
 	}
 	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter}
 	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
+	sessionSvc.Factors = factorSvc
 	sessionSvc.Settings = func(ctx context.Context) (session.Settings, error) {
 		v, e := settings.Get(ctx)
 		if e != nil {
@@ -211,6 +212,8 @@ func serve(ctx context.Context) error {
 		}
 		return session.Settings{AccessTTL: v.AccessTokenTTL, RefreshTTL: v.RefreshTokenTTL, RefreshIdleTTL: v.RefreshIdleTTL}, nil
 	}
+	authorizationSvc.StepUp = sessionSvc
+	agentSvc.StepUp = sessionSvc
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
 	apps := &application.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: &invitation.Service{Store: st}}

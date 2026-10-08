@@ -111,6 +111,10 @@ func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOu
 	if a.Authorization == nil || a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.agents.create", map[string]any{"name": in.Body.Name, "expires_at": in.Body.ExpiresAt, "source": in.Body.Source})
+	if err != nil {
+		return nil, err
+	}
 	var expires time.Time
 	if in.Body.ExpiresAt != nil {
 		expires = in.Body.ExpiresAt.UTC()
@@ -135,6 +139,10 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
 	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.agents.rotate", map[string]any{"agent_id": in.ID})
+	if err != nil {
 		return nil, err
 	}
 	key, err := a.Agents.RotateForUser(ctx, memberID, userID, in.ID)

@@ -17,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/store"
@@ -26,6 +27,7 @@ type Settings struct{ AccessTTL, RefreshTTL, RefreshIdleTTL time.Duration }
 type Service struct {
 	Store    *store.Store
 	Signer   *security.Signer
+	Factors  *factor.Service
 	HMACKeys [][]byte
 	Settings func(context.Context) (Settings, error)
 }

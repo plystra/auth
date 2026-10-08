@@ -1291,6 +1291,40 @@
         ],
         "type": "object"
       },
+      "StepUpInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "mfa_code": {
+            "maxLength": 6,
+            "minLength": 6,
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
+          "request": {
+            "minLength": 2
+          }
+        },
+        "required": [
+          "mfa_code",
+          "operation",
+          "request"
+        ],
+        "type": "object"
+      },
+      "StepUpOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "Tokens": {
         "additionalProperties": false,
         "properties": {
@@ -1757,6 +1791,53 @@
           }
         },
         "summary": "auth.sign_up"
+      }
+    },
+    "/v1/auth/step-up": {
+      "post": {
+        "operationId": "auth.step_up",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StepUpInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StepUpOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.step_up"
       }
     },
     "/v1/me": {

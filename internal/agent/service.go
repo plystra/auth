@@ -18,6 +18,7 @@ import (
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
 
@@ -26,6 +27,7 @@ const oauthRefreshLifetime = 30 * 24 * time.Hour
 
 type Service struct {
 	Store              *store.Store
+	StepUp             stepup.Consumer
 	MaxDelegationDepth int
 	HMACKeys           [][]byte
 	RefreshTTL         func(context.Context) (time.Duration, error)
@@ -141,6 +143,11 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 		}
 		if owner.Type != "human" && owner.Type != "agent" && owner.Type != "application" {
 			return apierr.New("VALIDATION_FAILED", "owner member type is invalid")
+		}
+		if s.StepUp != nil {
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
 		}
 		if err := s.validateDelegationDepthTx(ctx, q, owner.ID); err != nil {
 			return err
@@ -363,6 +370,11 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 			return err
 		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
+		}
+		if s.StepUp != nil {
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
 		}
 		if row.GroupStatus != "active" {
 			return apierr.New("CONFLICT", "agent is not active")

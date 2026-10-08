@@ -2,6 +2,7 @@ package principal
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"strings"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
+	"github.com/plystra/auth/internal/stepup"
 )
 
 type API struct {
@@ -50,6 +52,21 @@ type RefreshInput struct {
 type RefreshOutput struct {
 	Body struct {
 		Data session.Tokens `json:"data"`
+	}
+}
+type StepUpInput struct {
+	Authorization string `header:"Authorization"`
+	Body          struct {
+		Code      string          `json:"mfa_code" minLength:"6" maxLength:"6"`
+		Operation string          `json:"operation"`
+		Request   json.RawMessage `json:"request" minLength:"2"`
+	}
+}
+type StepUpOutput struct {
+	Body struct {
+		Data struct {
+			Accepted bool `json:"accepted"`
+		} `json:"data"`
 	}
 }
 type BearerInput struct {
@@ -160,6 +177,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.sign_in", "POST", "/v1/auth/sign-in", route.Principal, "", []route.Subject{route.Public}), a.login)
 	route.Register(api, route.NewSpec("auth.sign_in_attempt", "POST", "/v1/auth/sign-in/{attempt_id}", route.Principal, "", []route.Subject{route.Public}), a.loginAttempt)
 	route.Register(api, route.NewSpec("auth.refresh", "POST", "/v1/auth/refresh", route.Principal, "", []route.Subject{route.Public}), a.refresh)
+	route.Register(api, route.NewSpec("auth.step_up", "POST", "/v1/auth/step-up", route.Principal, "", []route.Subject{route.User}), a.stepUp)
 	route.Register(api, route.NewSpec("auth.me", "GET", "/v1/me", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.me)
 	route.Register(api, route.NewSpec("auth.me_update", "PATCH", "/v1/me", route.Principal, "", []route.Subject{route.User}), a.updateMe)
 	route.Register(api, route.NewSpec("auth.me_permissions", "GET", "/v1/me/permissions", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.mePermissions)
@@ -221,6 +239,59 @@ func (a *API) refresh(ctx context.Context, in *RefreshInput) (*RefreshOutput, er
 	out := &RefreshOutput{}
 	out.Body.Data = tokens
 	return out, nil
+}
+func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if !principalStepUpOperation(in.Body.Operation) {
+		return nil, apierr.New("VALIDATION_FAILED", "operation is not supported for principal step-up")
+	}
+	digest, err := stepup.Digest(in.Body.Request)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Fields(in.Authorization)
+	if len(parts) != 2 || claims.SessionID == "" {
+		return nil, apierr.New("UNAUTHENTICATED", "a user access-token session is required")
+	}
+	if err := a.Sessions.StepUp(ctx, parts[1], in.Body.Code, in.Body.Operation, digest); err != nil {
+		return nil, err
+	}
+	out := &StepUpOutput{}
+	out.Body.Data.Accepted = true
+	return out, nil
+}
+
+func principalStepUpOperation(operation string) bool {
+	switch operation {
+	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate":
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *API) principalStepUpContext(ctx context.Context, authorizationHeader, operation string, request any) (context.Context, error) {
+	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	if err != nil {
+		return nil, err
+	}
+	if claims.Type == "agent" {
+		return ctx, nil
+	}
+	if claims.Type != "user" || claims.SessionID == "" {
+		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "step-up requires a user account")
+	}
+	digest, err := stepup.DigestValue(request)
+	if err != nil {
+		return nil, err
+	}
+	if a.Authorization == nil || a.Authorization.StepUp == nil {
+		return ctx, nil
+	}
+	return session.WithStepUpRequirement(ctx, session.StepUpRequirement{SessionID: claims.SessionID, Operation: operation, Digest: digest}), nil
 }
 func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	parts := strings.Fields(in.Authorization)

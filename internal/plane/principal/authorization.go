@@ -375,6 +375,10 @@ func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDa
 	if err != nil {
 		return nil, err
 	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "members.bindings.create", map[string]any{"space_id": in.ID, "member_id": in.MemberID, "user_id": in.Body.UserID})
+	if err != nil {
+		return nil, err
+	}
 	if err := a.Authorization.BindUser(ctx, actor.ID, in.ID, in.MemberID, in.Body.UserID); err != nil {
 		return nil, err
 	}
@@ -383,6 +387,10 @@ func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDa
 
 func (a *API) unbindUser(ctx context.Context, in *unbindUserInput) (*authorizationDataOutput[acceptedData], error) {
 	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "members.bindings.revoke", map[string]any{"space_id": in.ID, "member_id": in.MemberID, "user_id": in.UserID})
 	if err != nil {
 		return nil, err
 	}
@@ -504,6 +512,11 @@ func (a *API) listAssignmentRights(ctx context.Context, in *assignmentRightsInpu
 	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage"); err != nil {
 		return nil, err
 	}
+	var err error
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "assignment_rights.list", map[string]any{"space_id": in.ID})
+	if err != nil {
+		return nil, err
+	}
 	rights, err := a.Authorization.ListAssignmentRights(ctx, in.ID)
 	if err != nil {
 		return nil, err
@@ -523,6 +536,10 @@ func (a *API) createAssignmentRight(ctx context.Context, in *createAssignmentRig
 	if err != nil {
 		return nil, err
 	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "assignment_rights.create", map[string]any{"space_id": in.ID, "holder_member_id": in.Body.HolderMemberID, "permissions": in.Body.Permissions, "anchor_space_id": in.Body.AnchorSpaceID, "anchor_group_id": in.Body.AnchorGroupID, "covers_subtree": in.Body.CoversSubtree, "can_redelegate": in.Body.CanRedelegate, "expires_at": in.Body.ExpiresAt})
+	if err != nil {
+		return nil, err
+	}
 	right, err := a.Authorization.CreateAssignmentRight(ctx, actor.ID, in.ID, in.Body.HolderMemberID, in.Body.Permissions, in.Body.AnchorSpaceID, in.Body.AnchorGroupID, in.Body.CoversSubtree, in.Body.CanRedelegate, in.Body.ExpiresAt)
 	if err != nil {
 		return nil, err
@@ -534,6 +551,10 @@ func (a *API) createAssignmentRight(ctx context.Context, in *createAssignmentRig
 
 func (a *API) revokeAssignmentRight(ctx context.Context, in *assignmentRightPathInput) (*authorizationDataOutput[acceptedData], error) {
 	actor, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "assignment_rights.revoke", map[string]any{"space_id": in.ID, "assignment_right_id": in.RightID})
 	if err != nil {
 		return nil, err
 	}
