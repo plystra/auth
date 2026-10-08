@@ -112,6 +112,10 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "member_id must identify a human member"))
 		return
 	}
+	if member.SpaceID != client.SpaceID {
+		writeErr(w, apierr.New("invalid_request", "member_id is not in the client's Space"))
+		return
+	}
 	scopes := uniqueScopes(strings.Fields(q.Get("scope")))
 	if len(scopes) == 0 {
 		writeErr(w, apierr.New("invalid_scope", "at least one scope is required"))
