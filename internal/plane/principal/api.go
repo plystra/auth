@@ -109,14 +109,29 @@ type FactorsOutput struct {
 type FactorsInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Kind  string `json:"kind" enum:"backup_code"`
+		Kind  string `json:"kind" enum:"totp,backup_code"`
+		Name  string `json:"name,omitempty" maxLength:"100"`
 		Count int    `json:"count,omitempty" minimum:"5" maximum:"20"`
 	}
 }
-type BackupCodesOutput struct {
+type FactorCreateOutput struct {
 	Body struct {
 		Data struct {
-			Codes []string `json:"codes"`
+			Codes    []string `json:"codes,omitempty"`
+			FactorID string   `json:"factor_id,omitempty"`
+			Secret   string   `json:"secret,omitempty"`
+			URI      string   `json:"otpauth_uri,omitempty"`
+		} `json:"data"`
+	}
+}
+type FactorPathInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
+type FactorDeleteOutput struct {
+	Body struct {
+		Data struct {
+			Deleted bool `json:"deleted"`
 		} `json:"data"`
 	}
 }
@@ -206,6 +221,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.me_members", "GET", "/v1/me/members", route.Principal, "", []route.Subject{route.User}), a.meMembers)
 	route.Register(api, route.NewSpec("auth.factors.list", "GET", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}), a.listFactors)
 	route.Register(api, route.NewSpec("auth.factors.create", "POST", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}, route.WithStepUp()), a.createFactor)
+	route.Register(api, route.NewSpec("auth.factors.delete", "DELETE", "/v1/me/factors/{id}", route.Principal, "", []route.Subject{route.User}, route.WithStepUp()), a.deleteFactor)
 	route.Register(api, route.NewSpec("auth.me_member_remove", "DELETE", "/v1/me/member", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.removeCurrentMember)
 	route.Register(api, route.NewSpec("auth.sign_out", "POST", "/v1/auth/sign-out", route.Principal, "", []route.Subject{route.User}), a.logout)
 	route.Register(api, route.NewSpec("auth.sessions.list", "GET", "/v1/me/sessions", route.Principal, "", []route.Subject{route.User}), a.listSessions)
@@ -299,7 +315,7 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 
 func principalStepUpOperation(operation string) bool {
 	switch operation {
-	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create":
+	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete":
 		return true
 	default:
 		return false
@@ -323,7 +339,7 @@ func (a *API) listFactors(ctx context.Context, in *BearerInput) (*FactorsOutput,
 	return out, nil
 }
 
-func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*BackupCodesOutput, error) {
+func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*FactorCreateOutput, error) {
 	claims, err := a.userClaims(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
@@ -331,16 +347,41 @@ func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*BackupCodesO
 	if a.Factors == nil {
 		return nil, apierr.New("UNAVAILABLE", "factor service is unavailable")
 	}
-	if in.Body.Kind != "backup_code" {
-		return nil, apierr.New("VALIDATION_FAILED", "only backup_code factor creation is currently available")
+	if in.Body.Kind != "backup_code" && in.Body.Kind != "totp" {
+		return nil, apierr.New("VALIDATION_FAILED", "factor kind is invalid")
 	}
 	request := map[string]any{"kind": in.Body.Kind}
+	if in.Body.Name != "" {
+		request["name"] = strings.TrimSpace(in.Body.Name)
+	}
 	if in.Body.Count != 0 {
 		request["count"] = in.Body.Count
 	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.factors.create", request)
 	if err != nil {
 		return nil, err
+	}
+	if in.Body.Kind == "totp" {
+		name := strings.TrimSpace(in.Body.Name)
+		if name == "" {
+			return nil, apierr.New("VALIDATION_FAILED", "factor name is required for totp")
+		}
+		if a.Accounts == nil {
+			return nil, apierr.New("UNAVAILABLE", "account service is unavailable")
+		}
+		user, err := a.Accounts.Me(ctx, claims)
+		if err != nil {
+			return nil, err
+		}
+		enrollment, err := a.Factors.EnrollTOTPForUser(ctx, claims.Subject, user.Email, name)
+		if err != nil {
+			return nil, err
+		}
+		out := &FactorCreateOutput{}
+		out.Body.Data.FactorID = enrollment.FactorID
+		out.Body.Data.Secret = enrollment.Secret.Value()
+		out.Body.Data.URI = enrollment.URI
+		return out, nil
 	}
 	count := in.Body.Count
 	if count == 0 {
@@ -353,8 +394,29 @@ func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*BackupCodesO
 	if err != nil {
 		return nil, err
 	}
-	out := &BackupCodesOutput{}
+	out := &FactorCreateOutput{}
 	out.Body.Data.Codes = codes
+	return out, nil
+}
+
+func (a *API) deleteFactor(ctx context.Context, in *FactorPathInput) (*FactorDeleteOutput, error) {
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	if a.Factors == nil {
+		return nil, apierr.New("UNAVAILABLE", "factor service is unavailable")
+	}
+	request := map[string]any{"factor_id": in.ID}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.factors.delete", request)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Factors.DeleteForUser(ctx, claims.Subject, in.ID); err != nil {
+		return nil, err
+	}
+	out := &FactorDeleteOutput{}
+	out.Body.Data.Deleted = true
 	return out, nil
 }
 

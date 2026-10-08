@@ -206,6 +206,113 @@ func TestBackupCodeFactorHTTPRoutesUseDocumentedUserSurface(t *testing.T) {
 	}
 }
 
+func TestTOTPFactorEnrollmentRequiresStepUpAndReturnsSecretOnce(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
+	authz.StepUp = sessions
+	if _, err := factors.BeginTOTP(ctx, "usr_principal_actor", "principal-actor@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{
+		Accounts:      &account.Service{Store: st},
+		Authorization: authz,
+		Sessions:      sessions,
+		Signer:        signer,
+		Factors:       factors,
+	}
+	create := &FactorsInput{Authorization: "Bearer " + tokens.AccessToken}
+	create.Body.Kind = "totp"
+	create.Body.Name = "laptop"
+	if _, err := api.createFactor(ctx, create); err == nil {
+		t.Fatal("TOTP enrollment succeeded without step-up")
+	} else {
+		assertPrincipalError(t, err, "STEP_UP_REQUIRED")
+	}
+	request := map[string]any{"kind": "totp", "name": "laptop"}
+	seedStepUpProof(t, st, tokens.SessionID, "me.factors.create", request)
+	created, err := api.createFactor(ctx, create)
+	if err != nil {
+		t.Fatalf("TOTP enrollment failed: %v", err)
+	}
+	if created.Body.Data.FactorID == "" || created.Body.Data.Secret == "" || !strings.HasPrefix(created.Body.Data.URI, "otpauth://totp/") {
+		t.Fatalf("incomplete TOTP enrollment response: %+v", created.Body.Data)
+	}
+	var ciphertext []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_ciphertext FROM factors WHERE id = $1`, created.Body.Data.FactorID).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if len(ciphertext) == 0 || strings.Contains(string(ciphertext), created.Body.Data.Secret) {
+		t.Fatal("TOTP secret was not encrypted at rest")
+	}
+	listed, err := api.listFactors(ctx, &BearerInput{Authorization: create.Authorization})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(listed.Body.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), created.Body.Data.Secret) || strings.Contains(string(encoded), created.Body.Data.URI) {
+		t.Fatal("factor listing disclosed TOTP enrollment secret")
+	}
+	if _, err := api.createFactor(ctx, create); err == nil {
+		t.Fatal("TOTP enrollment reused step-up proof")
+	} else {
+		assertPrincipalError(t, err, "STEP_UP_REQUIRED")
+	}
+}
+
+func TestFactorDeletionRequiresStepUpAndAuditsTheMutation(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
+	authz.StepUp = sessions
+	enrollment, err := factors.BeginTOTP(ctx, "usr_principal_actor", "principal-actor@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Factors: factors}
+	input := &FactorPathInput{Authorization: "Bearer " + tokens.AccessToken, ID: enrollment.FactorID}
+	if _, err := api.deleteFactor(ctx, input); err == nil {
+		t.Fatal("factor deletion succeeded without step-up")
+	} else {
+		assertPrincipalError(t, err, "STEP_UP_REQUIRED")
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "me.factors.delete", map[string]any{"factor_id": enrollment.FactorID})
+	deleted, err := api.deleteFactor(ctx, input)
+	if err != nil {
+		t.Fatalf("factor deletion failed: %v", err)
+	}
+	if !deleted.Body.Data.Deleted {
+		t.Fatal("factor deletion did not report deleted=true")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM factors WHERE id = $1`, enrollment.FactorID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("deleted factor count = %d, want 0", count)
+	}
+	var auditCount int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'factor.delete' AND resource_id = $1`, enrollment.FactorID).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("factor deletion audit count = %d, want 1", auditCount)
+	}
+}
+
 func TestPrincipalSignInRequiresTOTPAfterPassword(t *testing.T) {
 	ctx := context.Background()
 	st, authz, _, _, sessions, signer := newPrincipalFixture(t)

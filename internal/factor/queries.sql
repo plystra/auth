@@ -4,6 +4,15 @@ INSERT INTO factors (id, user_id, kind, name, secret_ciphertext, credential_id, 
 -- name: DeleteBackupCodes :exec
 DELETE FROM factors WHERE user_id = sqlc.arg(user_id) AND kind = 'backup_code';
 
+-- name: LockFactorForUser :one
+SELECT * FROM factors
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id)
+FOR UPDATE;
+
+-- name: DeleteFactor :exec
+DELETE FROM factors
+WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
+
 -- name: CreateBackupCode :one
 INSERT INTO factors (id, user_id, kind, name, secret_hash)
 VALUES (sqlc.arg(id), sqlc.arg(user_id), 'backup_code', sqlc.arg(name), sqlc.arg(secret_hash))

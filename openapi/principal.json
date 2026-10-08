@@ -145,7 +145,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct3"
+            "$ref": "#/components/schemas/DataStruct4"
           }
         },
         "required": [
@@ -492,18 +492,6 @@
         ],
         "type": "object"
       },
-      "BackupCodesOutputBody": {
-        "additionalProperties": false,
-        "properties": {
-          "data": {
-            "$ref": "#/components/schemas/DataStruct1"
-          }
-        },
-        "required": [
-          "data"
-        ],
-        "type": "object"
-      },
       "BindUserInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -748,14 +736,32 @@
               "array",
               "null"
             ]
+          },
+          "factor_id": {
+            "type": "string"
+          },
+          "otpauth_uri": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
           }
         },
-        "required": [
-          "codes"
-        ],
         "type": "object"
       },
       "DataStruct2": {
+        "additionalProperties": false,
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "deleted"
+        ],
+        "type": "object"
+      },
+      "DataStruct3": {
         "additionalProperties": false,
         "properties": {
           "revoked": {
@@ -767,7 +773,7 @@
         ],
         "type": "object"
       },
-      "DataStruct3": {
+      "DataStruct4": {
         "additionalProperties": false,
         "properties": {
           "agent_key": {
@@ -877,6 +883,30 @@
         ],
         "type": "object"
       },
+      "FactorCreateOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct1"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "FactorDeleteOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct2"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "FactorsInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -888,8 +918,13 @@
           },
           "kind": {
             "enum": [
+              "totp",
               "backup_code"
             ],
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 100,
             "type": "string"
           }
         },
@@ -1054,7 +1089,7 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct2"
+            "$ref": "#/components/schemas/DataStruct3"
           }
         },
         "required": [
@@ -2374,7 +2409,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/BackupCodesOutputBody"
+                  "$ref": "#/components/schemas/FactorCreateOutputBody"
                 }
               }
             },
@@ -2392,6 +2427,51 @@
           }
         },
         "summary": "auth.factors.create"
+      }
+    },
+    "/v1/me/factors/{id}": {
+      "delete": {
+        "operationId": "auth.factors.delete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactorDeleteOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "auth.factors.delete"
       }
     },
     "/v1/me/member": {

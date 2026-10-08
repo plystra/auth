@@ -892,6 +892,21 @@ func (q *Queries) DeleteExpiredIdempotencyKey(ctx context.Context, arg DeleteExp
 	return err
 }
 
+const deleteFactor = `-- name: DeleteFactor :exec
+DELETE FROM factors
+WHERE id = $1 AND user_id = $2
+`
+
+type DeleteFactorParams struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) DeleteFactor(ctx context.Context, arg DeleteFactorParams) error {
+	_, err := q.db.Exec(ctx, deleteFactor, arg.ID, arg.UserID)
+	return err
+}
+
 const getAgentCredentialByPrefix = `-- name: GetAgentCredentialByPrefix :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
@@ -2441,6 +2456,36 @@ func (q *Queries) ListRolesInSpace(ctx context.Context, arg ListRolesInSpacePara
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockFactorForUser = `-- name: LockFactorForUser :one
+SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at, secret_hash FROM factors
+WHERE id = $1 AND user_id = $2
+FOR UPDATE
+`
+
+type LockFactorForUserParams struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) LockFactorForUser(ctx context.Context, arg LockFactorForUserParams) (Factor, error) {
+	row := q.db.QueryRow(ctx, lockFactorForUser, arg.ID, arg.UserID)
+	var i Factor
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Kind,
+		&i.Name,
+		&i.SecretCiphertext,
+		&i.CredentialID,
+		&i.PublicKey,
+		&i.Counter,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.SecretHash,
+	)
+	return i, err
 }
 
 const lockGroupSubtree = `-- name: LockGroupSubtree :many

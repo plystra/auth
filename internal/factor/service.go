@@ -59,6 +59,10 @@ func (s *Service) cipher() (cipher.AEAD, error) {
 	return cipher.NewGCM(block)
 }
 func (s *Service) BeginTOTP(ctx context.Context, userID, email string) (Enrollment, error) {
+	return s.beginTOTP(ctx, userID, email, "authenticator")
+}
+
+func (s *Service) beginTOTP(ctx context.Context, userID, email, name string) (Enrollment, error) {
 	key, e := totp.Generate(totp.GenerateOpts{Issuer: "Plystra Auth", AccountName: email, Period: 30, SecretSize: 20})
 	if e != nil {
 		return Enrollment{}, e
@@ -74,10 +78,50 @@ func (s *Service) BeginTOTP(ctx context.Context, userID, email string) (Enrollme
 	var enrollment Enrollment
 	e = s.Store.InTx(ctx, func(q *db.Queries) error {
 		var err error
-		enrollment, err = s.beginTOTPWithQueries(ctx, q, userID, key.Secret(), key.URL(), blob)
+		enrollment, err = s.beginTOTPWithQueries(ctx, q, userID, name, key.Secret(), key.URL(), blob)
 		return err
 	})
 	return enrollment, e
+}
+
+// EnrollTOTPForUser creates a TOTP factor for the authenticated user. When
+// the interaction plane attached a step-up requirement, the proof is consumed
+// in the same transaction as the factor and audit record.
+func (s *Service) EnrollTOTPForUser(ctx context.Context, userID, email, name string) (Enrollment, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 100 {
+		return Enrollment{}, apierr.New("VALIDATION_FAILED", "factor name must be between 1 and 100 characters")
+	}
+	key, err := totp.Generate(totp.GenerateOpts{Issuer: "Plystra Auth", AccountName: email, Period: 30, SecretSize: 20})
+	if err != nil {
+		return Enrollment{}, err
+	}
+	a, err := s.cipher()
+	if err != nil {
+		return Enrollment{}, err
+	}
+	blob, err := seal(a, []byte(key.Secret()))
+	if err != nil {
+		return Enrollment{}, err
+	}
+	var enrollment Enrollment
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+		}
+		var err error
+		enrollment, err = s.beginTOTPWithQueries(ctx, q, userID, name, key.Secret(), key.URL(), blob)
+		if err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", userID, "factor.totp.create", enrollment.FactorID, "success")
+	})
+	return enrollment, err
 }
 
 // BeginTOTPTx is used by bootstrap flows that must create the operator and
@@ -95,15 +139,46 @@ func (s *Service) BeginTOTPTx(ctx context.Context, q *db.Queries, userID, email 
 	if err != nil {
 		return Enrollment{}, err
 	}
-	return s.beginTOTPWithQueries(ctx, q, userID, key.Secret(), key.URL(), blob)
+	return s.beginTOTPWithQueries(ctx, q, userID, "authenticator", key.Secret(), key.URL(), blob)
 }
 
-func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userID, raw, uri string, blob []byte) (Enrollment, error) {
+func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userID, name, raw, uri string, blob []byte) (Enrollment, error) {
 	id := ids.New[ids.FactorID]("fac")
-	if _, err := q.CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: "authenticator", SecretCiphertext: blob}); err != nil {
+	if _, err := q.CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: name, SecretCiphertext: blob}); err != nil {
 		return Enrollment{}, err
 	}
 	return Enrollment{FactorID: string(id), Secret: secret.New(raw), URI: uri}, nil
+}
+
+// DeleteForUser removes one factor after the interaction plane has bound and
+// attached a step-up proof. The target is locked before consuming the proof so
+// an invalid factor ID cannot burn a valid proof.
+func (s *Service) DeleteForUser(ctx context.Context, userID, factorID string) error {
+	factorID = strings.TrimSpace(factorID)
+	if !ids.FactorID(factorID).Valid() {
+		return apierr.New("VALIDATION_FAILED", "factor_id is invalid")
+	}
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.LockFactorForUser(ctx, db.LockFactorForUserParams{ID: factorID, UserID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "factor was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+		}
+		if err := q.DeleteFactor(ctx, db.DeleteFactorParams{ID: factorID, UserID: userID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", userID, "factor.delete", row.ID, "success")
+	})
 }
 func (s *Service) VerifyTOTP(ctx context.Context, userID, factorID, code string) error {
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
