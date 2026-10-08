@@ -19,7 +19,10 @@ import (
 	"github.com/plystra/auth/internal/store"
 )
 
-type Service struct{ Store *store.Store }
+type Service struct {
+	Store    *store.Store
+	HMACKeys [][]byte
+}
 
 type OAuthClient struct {
 	ID               string
@@ -113,6 +116,43 @@ func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient
 		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
 	}
 	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash}, nil
+}
+
+// AuthenticateOAuthClient resolves a registered OAuth client and verifies its
+// secret when the client is confidential. Public PKCE clients have no stored
+// secret and are intentionally accepted without one.
+func (s *Service) AuthenticateOAuthClient(ctx context.Context, clientID, rawSecret string) (OAuthClient, error) {
+	client, err := s.OAuthClient(ctx, clientID)
+	if err != nil {
+		var publicErr *apierr.Error
+		if errors.As(err, &publicErr) && publicErr.Code != "invalid_request" {
+			return OAuthClient{}, err
+		}
+		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+	}
+	if len(client.ClientSecretHash) == 0 {
+		return client, nil
+	}
+	if strings.TrimSpace(rawSecret) == "" {
+		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+	}
+	for _, key := range s.HMACKeys {
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(rawSecret))
+		if hmac.Equal(mac.Sum(nil), client.ClientSecretHash) {
+			return client, nil
+		}
+	}
+	return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+}
+
+// HMACClientSecretHash returns the storage digest for an OAuth client secret.
+// Deployments should use the current configured HMAC key and retain previous
+// keys during rotation.
+func HMACClientSecretHash(key []byte, rawSecret string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(rawSecret))
+	return mac.Sum(nil)
 }
 
 func (s *Service) CreateAuthorizationCode(ctx context.Context, in CreateAuthorizationCodeInput) error {

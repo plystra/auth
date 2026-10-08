@@ -9,6 +9,7 @@ import (
 
 func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 	tests := map[string]int{
+		"invalid_client":            http.StatusUnauthorized,
 		"invalid_credentials":       http.StatusUnauthorized,
 		"browser_origin_rejected":   http.StatusForbidden,
 		"BROWSER_ORIGIN_REJECTED":   http.StatusForbidden,

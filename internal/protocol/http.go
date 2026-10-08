@@ -244,7 +244,11 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
-	clientID := strings.TrimSpace(r.Form.Get("client_id"))
+	clientID, clientSecret, err := oauthClientCredentials(r)
+	if err != nil {
+		writeOAuthErr(w, err)
+		return
+	}
 	redirectURI := strings.TrimSpace(r.Form.Get("redirect_uri"))
 	verifier := r.Form.Get("code_verifier")
 	code := r.Form.Get("code")
@@ -252,9 +256,9 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "client_id, redirect_uri, code and code_verifier are required"))
 		return
 	}
-	client, err := h.Applications.OAuthClient(r.Context(), clientID)
+	client, err := h.Applications.AuthenticateOAuthClient(r.Context(), clientID, clientSecret)
 	if err != nil {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
+		writeOAuthErr(w, err)
 		return
 	}
 	if !containsString(client.RedirectURIs, redirectURI) {
@@ -528,6 +532,34 @@ func writeProtocolErr(w http.ResponseWriter, err error) {
 		return
 	}
 	writeErr(w, apierr.New("temporarily_unavailable", "protocol operation is unavailable"))
+}
+
+func writeOAuthErr(w http.ResponseWriter, err error) {
+	var publicErr *apierr.Error
+	if errors.As(err, &publicErr) {
+		if publicErr.Code == "invalid_client" {
+			w.Header().Set("WWW-Authenticate", `Basic realm="oauth/token"`)
+		}
+		writeErr(w, publicErr)
+		return
+	}
+	writeErr(w, apierr.New("temporarily_unavailable", "OAuth client authentication is unavailable"))
+}
+
+func oauthClientCredentials(r *http.Request) (string, string, error) {
+	formID := strings.TrimSpace(r.Form.Get("client_id"))
+	formSecret := r.Form.Get("client_secret")
+	basicID, basicSecret, basicOK := r.BasicAuth()
+	if basicOK {
+		if formID != "" && formID != basicID {
+			return "", "", apierr.New("invalid_client", "OAuth client authentication failed")
+		}
+		return strings.TrimSpace(basicID), basicSecret, nil
+	}
+	if formID == "" {
+		return "", "", apierr.New("invalid_request", "client_id is required")
+	}
+	return formID, formSecret, nil
 }
 
 func uniqueScopes(scopes []string) []string {

@@ -38,7 +38,7 @@ func Status(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
 	case "invalid_request", "invalid_grant", "invalid_scope", "invalid_target", "validation_failed", "inline_grants_not_allowed":
 		return http.StatusBadRequest
-	case "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":
+	case "invalid_client", "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized
 	case "forbidden", "permission_denied", "browser_origin_rejected", "cors_origin_rejected", "step_up_required", "human_principal_required":
 		return http.StatusForbidden

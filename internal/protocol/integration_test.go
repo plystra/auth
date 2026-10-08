@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -238,10 +239,12 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	clientID := "https://client.test/metadata.json"
+	clientSecret := "oauth-client-secret-for-test"
+	clientHMACKey := []byte("protocol-oauth-client-hmac-key-0001")
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id)
-		VALUES ('app_oauth_code_protocol', $1, 'OAuth Code Client', '["https://client.test/callback"]'::jsonb, '["oauth.group:read"]'::jsonb, $2)
-	`, owner.SpaceID, clientID); err != nil {
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
+		VALUES ('app_oauth_code_protocol', $1, 'OAuth Code Client', '["https://client.test/callback"]'::jsonb, '["oauth.group:read"]'::jsonb, $2, $3)
+	`, owner.SpaceID, clientID, hmacSHA256(clientHMACKey, clientSecret)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
@@ -264,7 +267,7 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		},
 	}
 	accounts := &account.Service{Store: st}
-	apps := &application.Service{Store: st}
+	apps := &application.Service{Store: st, HMACKeys: [][]byte{clientHMACKey}}
 	var mux http.ServeMux
 	(HTTP{Issuer: "https://auth.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authorizer}).Register(&mux)
 	userTokens, err := sessions.CreateForMember(ctx, "usr_oauth_code_protocol", owner.ID, nil, "", 1)
@@ -316,16 +319,36 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		t.Fatalf("authorize redirect=%s", redirect)
 	}
 	code := redirect.Query().Get("code")
-	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
-		"grant_type":    {"authorization_code"},
-		"client_id":     {clientID},
-		"redirect_uri":  {"https://client.test/callback"},
-		"code":          {code},
-		"code_verifier": {verifier},
-	}.Encode()))
-	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	newTokenRequest := func(secret string) *http.Request {
+		form := url.Values{
+			"grant_type":    {"authorization_code"},
+			"client_id":     {clientID},
+			"redirect_uri":  {"https://client.test/callback"},
+			"code":          {code},
+			"code_verifier": {verifier},
+		}
+		if secret != "" {
+			form.Set("client_secret", secret)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return req
+	}
 	tokenResponse := httptest.NewRecorder()
-	mux.ServeHTTP(tokenResponse, tokenRequest)
+	mux.ServeHTTP(tokenResponse, newTokenRequest(""))
+	if tokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("missing client authentication status=%d body=%s", tokenResponse.Code, tokenResponse.Body.String())
+	}
+	if tokenResponse.Header().Get("WWW-Authenticate") == "" {
+		t.Fatal("missing client authentication challenge")
+	}
+	tokenResponse = httptest.NewRecorder()
+	mux.ServeHTTP(tokenResponse, newTokenRequest("wrong-client-secret"))
+	if tokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong client authentication status=%d body=%s", tokenResponse.Code, tokenResponse.Body.String())
+	}
+	tokenResponse = httptest.NewRecorder()
+	mux.ServeHTTP(tokenResponse, newTokenRequest(clientSecret))
 	if tokenResponse.Code != http.StatusOK {
 		t.Fatalf("token status=%d body=%s", tokenResponse.Code, tokenResponse.Body.String())
 	}
@@ -374,6 +397,7 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		"redirect_uri":  {"https://client.test/callback"},
 		"code":          {wrongCode.Query().Get("code")},
 		"code_verifier": {"wrong-verifier"},
+		"client_secret": {clientSecret},
 	}.Encode()))
 	wrongTokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	wrongTokenResponse := httptest.NewRecorder()
@@ -387,6 +411,7 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		"redirect_uri":  {"https://client.test/callback"},
 		"code":          {code},
 		"code_verifier": {verifier},
+		"client_secret": {clientSecret},
 	}.Encode()))
 	replayRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	replayResponse := httptest.NewRecorder()
@@ -402,6 +427,12 @@ func cloneValues(in url.Values) url.Values {
 		out[key] = append([]string(nil), values...)
 	}
 	return out
+}
+
+func hmacSHA256(key []byte, value string) []byte {
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(value))
+	return mac.Sum(nil)
 }
 
 func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T) {
