@@ -23,6 +23,7 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/bootstrap"
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
@@ -46,7 +47,7 @@ import (
 
 func main() {
 	root := &cobra.Command{Use: "plystra-auth", Short: "Plystra Auth identity and authorization service"}
-	root.AddCommand(serveCommand(), migrateCommand(), doctorCommand(), verifyCommand(), operatorCommand(), permissionsCommand(), policyCommand())
+	root.AddCommand(serveCommand(), migrateCommand(), initCommand(), doctorCommand(), verifyCommand(), operatorCommand(), permissionsCommand(), policyCommand())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -63,6 +64,25 @@ func migrateCommand() *cobra.Command {
 			return e
 		}
 		return store.Migrate(cmd.Context(), c.MigrationDatabaseURL)
+	}}
+}
+func initCommand() *cobra.Command {
+	return &cobra.Command{Use: "init", Short: "initialize deployment defaults and create the bootstrap API key", RunE: func(cmd *cobra.Command, args []string) error {
+		c, e := loadConfig()
+		if e != nil {
+			return e
+		}
+		st, e := store.Open(cmd.Context(), c.DatabaseURL)
+		if e != nil {
+			return e
+		}
+		defer st.Close()
+		result, e := bootstrap.Initialize(cmd.Context(), st)
+		if e != nil {
+			return e
+		}
+		fmt.Printf("default space: %s\ndefault application: %s\nbootstrap API key (shown once): %s\n", result.SpaceID, result.ApplicationID, result.APIKey)
+		return nil
 	}}
 }
 func doctorCommand() *cobra.Command {
