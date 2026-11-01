@@ -137,7 +137,7 @@ func TestNewUserInvitationRegistrationAndVerificationThroughPrincipalHTTP(t *tes
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pending_verification":true`) || strings.Contains(response.Body.String(), raw) {
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pending_verification":true`) || strings.Contains(response.Body.String(), raw) || strings.Contains(response.Body.String(), spaceID) {
 		t.Fatalf("invited registration: status=%d body=%s", response.Code, response.Body.String())
 	}
 	var userID, status string

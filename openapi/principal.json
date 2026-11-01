@@ -44,9 +44,6 @@
             "type": "string"
           }
         },
-        "required": [
-          "space_id"
-        ],
         "type": "object"
       },
       "AcceptedData": {

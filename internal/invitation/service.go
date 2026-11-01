@@ -47,7 +47,7 @@ type Invitation struct {
 }
 
 type Acceptance struct {
-	SpaceID             string `json:"space_id"`
+	SpaceID             string `json:"space_id,omitempty"`
 	MemberID            string `json:"member_id,omitempty"`
 	PendingVerification bool   `json:"pending_verification,omitempty"`
 }
@@ -218,7 +218,7 @@ func (s *Service) RegisterNewUser(ctx context.Context, raw, email, password stri
 		}); err != nil {
 			return err
 		}
-		accepted = Acceptance{SpaceID: inv.SpaceID, PendingVerification: true}
+		accepted = Acceptance{PendingVerification: true}
 		return nil
 	})
 	var constraint *pgconn.PgError
