@@ -164,6 +164,7 @@ type createInvitationInput struct {
 	ID            string `path:"id"`
 	Body          struct {
 		Email     string    `json:"email"`
+		MemberID  string    `json:"member_id,omitempty"`
 		ExpiresAt time.Time `json:"expires_at,omitempty"`
 	}
 }
@@ -171,6 +172,7 @@ type createInvitationInput struct {
 type invitationResponse struct {
 	ID              string    `json:"id"`
 	SpaceID         string    `json:"space_id"`
+	MemberID        string    `json:"member_id,omitempty"`
 	EmailNormalized string    `json:"email_normalized"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	Token           string    `json:"token"`
@@ -213,7 +215,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
 	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
-	route.Register(api, route.NewSpec("invitations.create", "POST", "/v1/spaces/{id}/invitations", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}), a.createInvitation)
+	route.Register(api, route.NewSpec("invitations.create", "POST", "/v1/spaces/{id}/invitations", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.bindings:manage"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createInvitation)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
@@ -583,18 +585,39 @@ func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (
 	if a.Invitations == nil {
 		return nil, apierr.New("UNAVAILABLE", "invitation service is unavailable")
 	}
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	memberID := strings.TrimSpace(in.Body.MemberID)
+	var actor authorization.Member
+	var err error
+	inviterUserID := ""
+	if memberID == "" {
+		actor, err = a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	} else {
+		var claims security.Claims
+		claims, err = a.authenticatePrincipal(ctx, in.Authorization)
+		if err == nil && claims.Type != "user" {
+			return nil, apierr.New("USER_ACCOUNT_REQUIRED", "binding invitations require a user account")
+		}
+		if err == nil {
+			inviterUserID = claims.Subject
+			actor, err = a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", memberID)
+		}
+		if err == nil {
+			ctx, err = a.principalStepUpContext(ctx, in.Authorization, "invitations.create", map[string]any{
+				"space_id": in.ID, "email": in.Body.Email, "member_id": memberID, "expires_at": in.Body.ExpiresAt,
+			})
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	created, token, err := a.Invitations.CreateForActor(ctx, "member", actor.ID, invitation.CreateInput{
-		SpaceID: in.ID, Email: in.Body.Email, ExpiresAt: in.Body.ExpiresAt,
+		SpaceID: in.ID, Email: in.Body.Email, MemberID: memberID, InviterUserID: inviterUserID, ExpiresAt: in.Body.ExpiresAt,
 	})
 	if err != nil {
 		return nil, err
 	}
 	out := &authorizationDataOutput[invitationResponse]{}
-	out.Body.Data = invitationResponse{ID: created.ID, SpaceID: created.SpaceID, EmailNormalized: created.EmailNormalized, ExpiresAt: created.ExpiresAt, Token: token}
+	out.Body.Data = invitationResponse{ID: created.ID, SpaceID: created.SpaceID, MemberID: created.MemberID, EmailNormalized: created.EmailNormalized, ExpiresAt: created.ExpiresAt, Token: token}
 	return out, nil
 }
 

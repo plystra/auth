@@ -1351,3 +1351,8 @@ ALTER TABLE sign_in_attempts
 ALTER TABLE sign_in_attempts
     ADD CONSTRAINT sign_in_attempts_passkey_session_check
     CHECK ((method = 'passkey') = (passkey_session IS NOT NULL));
+
+
+ALTER TABLE invitation_tokens
+    ADD COLUMN inviter_member_id text REFERENCES members(id) ON DELETE SET NULL,
+    ADD COLUMN inviter_user_id text REFERENCES users(id) ON DELETE SET NULL;

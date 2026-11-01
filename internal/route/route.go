@@ -40,16 +40,17 @@ const (
 // create route declarations through NewSpec so all required fields are
 // present at compile time.
 type Declaration struct {
-	Name               string
-	Method             string
-	Path               string
-	Plane              Plane
-	Permission         string
-	Subjects           []Subject
-	StepUp             bool
-	AuthoritativeCheck bool
-	MaxBodyBytes       int64
-	NonJSON            bool
+	Name                  string
+	Method                string
+	Path                  string
+	Plane                 Plane
+	Permission            string
+	ConditionalPermission string
+	Subjects              []Subject
+	StepUp                bool
+	AuthoritativeCheck    bool
+	MaxBodyBytes          int64
+	NonJSON               bool
 }
 
 // Spec can only be created by NewSpec. Its unexported method prevents callers
@@ -67,6 +68,10 @@ type SpecOption func(*Declaration)
 
 func WithStepUp() SpecOption {
 	return func(spec *Declaration) { spec.StepUp = true }
+}
+
+func WithConditionalPermission(permission string) SpecOption {
+	return func(spec *Declaration) { spec.ConditionalPermission = permission }
 }
 
 func WithAuthoritativeCheck() SpecOption {

@@ -45,7 +45,7 @@ func TestInvitationTokensAreHashedSingleUseAndExpire(t *testing.T) {
 	st := newInvitationStore(t)
 	svc := &Service{Store: st}
 
-	inv, raw, err := svc.Create(ctx, CreateInput{SpaceID: "spc_01h00000000000000000000000", Email: "  Invitee@Example.Test ", MemberID: "mem_invitation_target"})
+	inv, raw, err := svc.Create(ctx, CreateInput{SpaceID: "spc_01h00000000000000000000000", Email: "  Invitee@Example.Test "})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,22 +164,6 @@ func TestInvitationAcceptanceRequiresVerifiedMatchingAccountAndActiveSpace(t *te
 	accepted, err := svc.AcceptVerifiedUser(ctx, raw, userID)
 	if err != nil || accepted.MemberID == "" {
 		t.Fatalf("valid invitation was consumed by a rejected attempt: accepted=%+v err=%v", accepted, err)
-	}
-	existing, existingRaw, err := svc.Create(ctx, CreateInput{
-		SpaceID: "spc_01h00000000000000000000000", Email: "invitee@example.test", MemberID: "mem_invitation_target",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := svc.AcceptVerifiedUser(ctx, existingRaw, userID); !hasCode(err, "AUTHORITY_DELTA_NOT_COVERED") {
-		t.Fatalf("existing-member invitation bypassed delta coverage: %v", err)
-	}
-	var consumed int
-	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM invitation_tokens WHERE id = $1 AND consumed_at IS NOT NULL`, existing.ID).Scan(&consumed); err != nil {
-		t.Fatal(err)
-	}
-	if consumed != 0 {
-		t.Fatal("rejected existing-member invitation was consumed")
 	}
 }
 

@@ -861,59 +861,8 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if err := s.consumeStepUpTx(ctx, q); err != nil {
 			return err
 		}
-		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "member was not found in this Space")
-			}
+		if err := s.checkBindingTargetTx(ctx, q, actorMemberID, spaceID, memberID, userID, true); err != nil {
 			return err
-		}
-		if member.Status != "active" {
-			return apierr.New("CONFLICT", "member is not active")
-		}
-		if member.Type != "human" {
-			return apierr.New("VALIDATION_FAILED", "only human members can bind a user")
-		}
-		user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "user was not found")
-			}
-			return err
-		}
-		if user.Status != "active" {
-			return apierr.New("CONFLICT", "user is not active")
-		}
-		if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
-			return err
-		} else if operators != 0 {
-			return apierr.New("CONFLICT", "an operator identity cannot become a member")
-		}
-		change, err := s.bindingAuthorityDeltaTx(ctx, q, memberID, userID, spaceID)
-		if err != nil {
-			return err
-		}
-		if len(change.Permissions) != 0 || len(change.Rights) != 0 {
-			if len(change.Permissions) != 0 {
-				if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID); err != nil {
-					return err
-				}
-			}
-			if len(change.Rights) != 0 {
-				if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.assign_rights:manage", spaceID, memberID); err != nil {
-					return err
-				}
-			}
-			if err := s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, member.ID, member.Type, spaceID); err != nil {
-				return err
-			}
-		}
-		count, err := q.CountActiveMemberBindings(ctx, db.CountActiveMemberBindingsParams{MemberID: memberID})
-		if err != nil {
-			return err
-		}
-		if member.BindingPolicy == "single" && count > 0 {
-			return apierr.New("CONFLICT", "a single-binding member can have only one active user binding")
 		}
 		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err

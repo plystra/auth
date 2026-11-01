@@ -738,6 +738,9 @@
           "expires_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "member_id": {
+            "type": "string"
           }
         },
         "required": [
@@ -1268,6 +1271,9 @@
             "type": "string"
           },
           "id": {
+            "type": "string"
+          },
+          "member_id": {
             "type": "string"
           },
           "space_id": {

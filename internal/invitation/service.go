@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/security"
@@ -25,15 +26,17 @@ import (
 const tokenLifetime = 7 * 24 * time.Hour
 
 type Service struct {
-	Store    *store.Store
-	Accounts *account.Service
+	Store         *store.Store
+	Accounts      *account.Service
+	Authorization *authorization.Service
 }
 
 type CreateInput struct {
-	SpaceID   string
-	Email     string
-	MemberID  string
-	ExpiresAt time.Time
+	SpaceID       string
+	Email         string
+	MemberID      string
+	InviterUserID string
+	ExpiresAt     time.Time
 }
 
 type Invitation struct {
@@ -92,12 +95,27 @@ func (s *Service) create(ctx context.Context, actorType, actorID string, in Crea
 		memberID := pgtype.Text{}
 		if value := strings.TrimSpace(in.MemberID); value != "" {
 			memberID = pgtype.Text{String: value, Valid: true}
+			if actorType != "member" || s.Authorization == nil {
+				return apierr.New("USER_ACCOUNT_REQUIRED", "binding invitations require a human member")
+			}
+			if err := s.Authorization.CheckInvitationBindingTx(ctx, q, in.InviterUserID, actorID, in.SpaceID, value, email, true); err != nil {
+				return err
+			}
+		}
+		inviterMember := pgtype.Text{}
+		if actorType == "member" && actorID != "" {
+			inviterMember = pgtype.Text{String: actorID, Valid: true}
+		}
+		inviterUser := pgtype.Text{}
+		if in.InviterUserID != "" {
+			inviterUser = pgtype.Text{String: in.InviterUserID, Valid: true}
 		}
 		row, err = q.CreateInvitationToken(ctx, db.CreateInvitationTokenParams{
 			ID: string(ids.New[ids.InvitationID]("ivt")), SpaceID: in.SpaceID,
 			EmailNormalized: pgtype.Text{String: email, Valid: true},
 			MemberID:        memberID,
-			TokenHash:       hash, ExpiresAt: pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
+			InviterMemberID: inviterMember, InviterUserID: inviterUser,
+			TokenHash: hash, ExpiresAt: pgtype.Timestamptz{Time: expiresAt.UTC(), Valid: true},
 		})
 		if err != nil {
 			return err
@@ -167,7 +185,7 @@ func (s *Service) RegisterNewUser(ctx context.Context, raw, email, password stri
 	if err != nil {
 		return Acceptance{}, err
 	}
-	if preflight.EmailNormalized != normalized || preflight.MemberID.Valid {
+	if preflight.EmailNormalized != normalized {
 		return Acceptance{}, apierr.New("invalid_grant", "invitation token is invalid or expired")
 	}
 	settings, err := s.Accounts.Settings.Get(ctx)
@@ -203,10 +221,17 @@ func (s *Service) RegisterNewUser(ctx context.Context, raw, email, password stri
 		if err != nil {
 			return err
 		}
-		if inv.EmailNormalized != normalized || inv.MemberID.Valid {
+		if inv.EmailNormalized != normalized {
 			return apierr.New("invalid_grant", "invitation token is invalid or expired")
 		}
-		if err := activeSpaceTx(ctx, q, inv.SpaceID); err != nil {
+		if inv.MemberID.Valid {
+			if !inv.InviterMemberID.Valid || !inv.InviterUserID.Valid || s.Authorization == nil {
+				return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "the invitation's binding authority cannot be verified")
+			}
+			if err := s.Authorization.CheckInvitationBindingTx(ctx, q, inv.InviterUserID.String, inv.InviterMemberID.String, inv.SpaceID, inv.MemberID.String, normalized, false); err != nil {
+				return err
+			}
+		} else if err := activeSpaceTx(ctx, q, inv.SpaceID); err != nil {
 			return err
 		}
 		user, err := s.Accounts.CreatePendingInvitedUserTx(ctx, q, normalized, passwordHash)
@@ -253,18 +278,21 @@ func (s *Service) FinalizeVerifiedUserTx(ctx context.Context, q *db.Queries, use
 	if err != nil {
 		return err
 	}
-	if user.EmailNormalized != inv.EmailNormalized || inv.MemberID.Valid {
+	if user.EmailNormalized != inv.EmailNormalized {
 		return apierr.New("invalid_grant", "invitation token is invalid or expired")
 	}
-	if _, err := acceptNewMemberTx(ctx, q, inv, userID, user.EmailNormalized); err != nil {
+	if inv.MemberID.Valid {
+		if err := s.acceptExistingMemberTx(ctx, q, inv, userID); err != nil {
+			return err
+		}
+	} else if _, err := acceptNewMemberTx(ctx, q, inv, userID, user.EmailNormalized); err != nil {
 		return err
 	}
 	return q.DeletePendingInvitationRegistration(ctx, db.DeletePendingInvitationRegistrationParams{UserID: userID})
 }
 
-// AcceptVerifiedUser creates a new human member and consumes the invitation in
-// the same transaction. Existing-member invitations require authority-delta
-// coverage and are rejected until that path is implemented.
+// AcceptVerifiedUser creates or binds a human member and consumes the invitation
+// in the same transaction.
 func (s *Service) AcceptVerifiedUser(ctx context.Context, raw, userID string) (Acceptance, error) {
 	if s == nil || s.Store == nil {
 		return Acceptance{}, errors.New("invitation store is required")
@@ -299,12 +327,28 @@ func (s *Service) AcceptVerifiedUser(ctx context.Context, raw, userID string) (A
 			return apierr.New("invalid_grant", "invitation token is invalid or expired")
 		}
 		if inv.MemberID.Valid {
-			return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "binding to an existing member is not available")
+			accepted = Acceptance{SpaceID: inv.SpaceID, MemberID: inv.MemberID.String}
+			return s.acceptExistingMemberTx(ctx, q, inv, user.ID)
 		}
 		accepted, err = acceptNewMemberTx(ctx, q, inv, user.ID, user.EmailNormalized)
 		return err
 	})
 	return accepted, err
+}
+
+func (s *Service) acceptExistingMemberTx(ctx context.Context, q *db.Queries, inv db.InvitationToken, userID string) error {
+	if !inv.InviterMemberID.Valid || !inv.InviterUserID.Valid || s.Authorization == nil {
+		return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "the invitation's binding authority cannot be verified")
+	}
+	if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+		return err
+	} else if operators != 0 {
+		return apierr.New("CONFLICT", "an operator identity cannot become a member")
+	}
+	if err := s.Authorization.BindInvitationTx(ctx, q, inv.InviterUserID.String, inv.InviterMemberID.String, inv.SpaceID, inv.MemberID.String, userID); err != nil {
+		return err
+	}
+	return audit.Write(ctx, q, "user", userID, "invitation.accept", inv.ID, "success")
 }
 
 func acceptNewMemberTx(ctx context.Context, q *db.Queries, inv db.InvitationToken, userID, email string) (Acceptance, error) {

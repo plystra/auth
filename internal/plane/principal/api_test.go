@@ -201,8 +201,8 @@ func TestInvitationCreationRouteDeclaresHumanAgent(t *testing.T) {
 		if spec.Name != "invitations.create" {
 			continue
 		}
-		if spec.Method != http.MethodPost || spec.Path != "/v1/spaces/{id}/invitations" || spec.Permission != "auth.members:manage" || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
-			t.Fatalf("invitation creation route = %+v, want POST H/A auth.members:manage", spec)
+		if spec.Method != http.MethodPost || spec.Path != "/v1/spaces/{id}/invitations" || spec.Permission != "auth.members:manage" || spec.ConditionalPermission != "auth.bindings:manage" || !spec.StepUp || !spec.AuthoritativeCheck || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("invitation creation route = %+v, want POST H/A with conditional binding requirements", spec)
 		}
 		return
 	}

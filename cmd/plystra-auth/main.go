@@ -248,7 +248,7 @@ func serve(ctx context.Context) error {
 	factorSvc.StepUp = sessionSvc
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc, Mailer: mailSvc}
 	apps := &application.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
-	invitationSvc := &invitation.Service{Store: st, Accounts: accounts}
+	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	accounts.Invitations = invitationSvc
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc}

@@ -14,7 +14,7 @@ import (
 const consumeInvitationByID = `-- name: ConsumeInvitationByID :one
 UPDATE invitation_tokens SET consumed_at = now()
 WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
-RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at, inviter_member_id, inviter_user_id
 `
 
 type ConsumeInvitationByIDParams struct {
@@ -33,6 +33,8 @@ func (q *Queries) ConsumeInvitationByID(ctx context.Context, arg ConsumeInvitati
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.InviterMemberID,
+		&i.InviterUserID,
 	)
 	return i, err
 }
@@ -43,7 +45,7 @@ SET consumed_at = now()
 WHERE token_hash = $1
   AND consumed_at IS NULL
   AND expires_at > now()
-RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at, inviter_member_id, inviter_user_id
 `
 
 type ConsumeInvitationTokenParams struct {
@@ -62,19 +64,22 @@ func (q *Queries) ConsumeInvitationToken(ctx context.Context, arg ConsumeInvitat
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.InviterMemberID,
+		&i.InviterUserID,
 	)
 	return i, err
 }
 
 const createInvitationToken = `-- name: CreateInvitationToken :one
 INSERT INTO invitation_tokens (
-    id, space_id, email_normalized, member_id, token_hash, expires_at
+    id, space_id, email_normalized, member_id, inviter_member_id, inviter_user_id, token_hash, expires_at
 )
 VALUES (
     $1, $2, $3,
-    $4, $5, $6
+    $4, $5, $6,
+    $7, $8
 )
-RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at, inviter_member_id, inviter_user_id
 `
 
 type CreateInvitationTokenParams struct {
@@ -82,6 +87,8 @@ type CreateInvitationTokenParams struct {
 	SpaceID         string             `json:"space_id"`
 	EmailNormalized pgtype.Text        `json:"email_normalized"`
 	MemberID        pgtype.Text        `json:"member_id"`
+	InviterMemberID pgtype.Text        `json:"inviter_member_id"`
+	InviterUserID   pgtype.Text        `json:"inviter_user_id"`
 	TokenHash       []byte             `json:"token_hash"`
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 }
@@ -92,6 +99,8 @@ func (q *Queries) CreateInvitationToken(ctx context.Context, arg CreateInvitatio
 		arg.SpaceID,
 		arg.EmailNormalized,
 		arg.MemberID,
+		arg.InviterMemberID,
+		arg.InviterUserID,
 		arg.TokenHash,
 		arg.ExpiresAt,
 	)
@@ -105,6 +114,8 @@ func (q *Queries) CreateInvitationToken(ctx context.Context, arg CreateInvitatio
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.InviterMemberID,
+		&i.InviterUserID,
 	)
 	return i, err
 }
@@ -138,7 +149,7 @@ func (q *Queries) DeletePendingInvitationRegistration(ctx context.Context, arg D
 }
 
 const getInvitationByToken = `-- name: GetInvitationByToken :one
-SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at, inviter_member_id, inviter_user_id
 FROM invitation_tokens
 WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
 `
@@ -159,12 +170,14 @@ func (q *Queries) GetInvitationByToken(ctx context.Context, arg GetInvitationByT
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.InviterMemberID,
+		&i.InviterUserID,
 	)
 	return i, err
 }
 
 const getInvitationForRegistration = `-- name: GetInvitationForRegistration :one
-SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at, inviter_member_id, inviter_user_id
 FROM invitation_tokens
 WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
 FOR UPDATE
@@ -186,6 +199,8 @@ func (q *Queries) GetInvitationForRegistration(ctx context.Context, arg GetInvit
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.InviterMemberID,
+		&i.InviterUserID,
 	)
 	return i, err
 }
