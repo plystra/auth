@@ -1317,3 +1317,10 @@ ALTER TABLE sessions
 ALTER TABLE sessions
     ADD COLUMN step_up_method text
     CONSTRAINT sessions_step_up_method_check CHECK (step_up_method IN ('totp', 'password'));
+
+
+CREATE TABLE pending_invitation_registrations (
+    user_id text PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    invitation_id text NOT NULL UNIQUE REFERENCES invitation_tokens(id) ON DELETE CASCADE,
+    created_at timestamptz NOT NULL DEFAULT now()
+);

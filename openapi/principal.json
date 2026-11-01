@@ -4,6 +4,12 @@
       "AcceptInvitationInputBody": {
         "additionalProperties": false,
         "properties": {
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          },
           "token": {
             "type": "string"
           }
@@ -31,13 +37,15 @@
           "member_id": {
             "type": "string"
           },
+          "pending_verification": {
+            "type": "boolean"
+          },
           "space_id": {
             "type": "string"
           }
         },
         "required": [
-          "space_id",
-          "member_id"
+          "space_id"
         ],
         "type": "object"
       },

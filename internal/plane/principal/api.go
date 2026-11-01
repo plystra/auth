@@ -44,7 +44,9 @@ type AuthOutput struct {
 type AcceptInvitationInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Token secret.String `json:"token"`
+		Token    secret.String `json:"token"`
+		Email    string        `json:"email,omitempty"`
+		Password secret.String `json:"password,omitempty"`
 	}
 }
 type AcceptInvitationOutput struct {
@@ -224,7 +226,7 @@ type SessionOutput struct {
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.sign_up", "POST", "/v1/auth/sign-up", route.Principal, "", []route.Subject{route.Public}), a.register)
-	route.Register(api, route.NewSpec("invitations.accept", "POST", "/v1/invitations/accept", route.Principal, "", []route.Subject{route.User}), a.acceptInvitation)
+	route.Register(api, route.NewSpec("invitations.accept", "POST", "/v1/invitations/accept", route.Principal, "", []route.Subject{route.Public, route.User}), a.acceptInvitation)
 	route.Register(api, route.NewSpec("auth.sign_in", "POST", "/v1/auth/sign-in", route.Principal, "", []route.Subject{route.Public}), a.login)
 	route.Register(api, route.NewSpec("auth.sign_in_attempt", "POST", "/v1/auth/sign-in/{attempt_id}", route.Principal, "", []route.Subject{route.Public}), a.loginAttempt)
 	route.Register(api, route.NewSpec("auth.refresh", "POST", "/v1/auth/refresh", route.Principal, "", []route.Subject{route.Public}), a.refresh)
@@ -260,11 +262,17 @@ func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (
 	if a.Invitations == nil {
 		return nil, apierr.New("UNAVAILABLE", "invitation service is unavailable")
 	}
-	claims, err := a.userClaims(ctx, in.Authorization)
-	if err != nil {
-		return nil, err
+	var accepted invitation.Acceptance
+	var err error
+	if strings.TrimSpace(in.Authorization) == "" {
+		accepted, err = a.Invitations.RegisterNewUser(ctx, in.Body.Token.Value(), in.Body.Email, in.Body.Password.Value())
+	} else {
+		var claims security.Claims
+		claims, err = a.userClaims(ctx, in.Authorization)
+		if err == nil {
+			accepted, err = a.Invitations.AcceptVerifiedUser(ctx, in.Body.Token.Value(), claims.Subject)
+		}
 	}
-	accepted, err := a.Invitations.AcceptVerifiedUser(ctx, in.Body.Token.Value(), claims.Subject)
 	if err != nil {
 		return nil, err
 	}

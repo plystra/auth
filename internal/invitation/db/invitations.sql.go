@@ -11,6 +11,32 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeInvitationByID = `-- name: ConsumeInvitationByID :one
+UPDATE invitation_tokens SET consumed_at = now()
+WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+RETURNING id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+`
+
+type ConsumeInvitationByIDParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) ConsumeInvitationByID(ctx context.Context, arg ConsumeInvitationByIDParams) (InvitationToken, error) {
+	row := q.db.QueryRow(ctx, consumeInvitationByID, arg.ID)
+	var i InvitationToken
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.EmailNormalized,
+		&i.MemberID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const consumeInvitationToken = `-- name: ConsumeInvitationToken :one
 UPDATE invitation_tokens
 SET consumed_at = now()
@@ -81,4 +107,101 @@ func (q *Queries) CreateInvitationToken(ctx context.Context, arg CreateInvitatio
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const createPendingInvitationRegistration = `-- name: CreatePendingInvitationRegistration :exec
+INSERT INTO pending_invitation_registrations (user_id, invitation_id)
+VALUES ($1, $2)
+`
+
+type CreatePendingInvitationRegistrationParams struct {
+	UserID       string `json:"user_id"`
+	InvitationID string `json:"invitation_id"`
+}
+
+func (q *Queries) CreatePendingInvitationRegistration(ctx context.Context, arg CreatePendingInvitationRegistrationParams) error {
+	_, err := q.db.Exec(ctx, createPendingInvitationRegistration, arg.UserID, arg.InvitationID)
+	return err
+}
+
+const deletePendingInvitationRegistration = `-- name: DeletePendingInvitationRegistration :exec
+DELETE FROM pending_invitation_registrations WHERE user_id = $1
+`
+
+type DeletePendingInvitationRegistrationParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) DeletePendingInvitationRegistration(ctx context.Context, arg DeletePendingInvitationRegistrationParams) error {
+	_, err := q.db.Exec(ctx, deletePendingInvitationRegistration, arg.UserID)
+	return err
+}
+
+const getInvitationByToken = `-- name: GetInvitationByToken :one
+SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+FROM invitation_tokens
+WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+`
+
+type GetInvitationByTokenParams struct {
+	TokenHash []byte `json:"token_hash"`
+}
+
+func (q *Queries) GetInvitationByToken(ctx context.Context, arg GetInvitationByTokenParams) (InvitationToken, error) {
+	row := q.db.QueryRow(ctx, getInvitationByToken, arg.TokenHash)
+	var i InvitationToken
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.EmailNormalized,
+		&i.MemberID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getInvitationForRegistration = `-- name: GetInvitationForRegistration :one
+SELECT id, space_id, email_normalized, member_id, token_hash, expires_at, consumed_at, created_at
+FROM invitation_tokens
+WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now()
+FOR UPDATE
+`
+
+type GetInvitationForRegistrationParams struct {
+	TokenHash []byte `json:"token_hash"`
+}
+
+func (q *Queries) GetInvitationForRegistration(ctx context.Context, arg GetInvitationForRegistrationParams) (InvitationToken, error) {
+	row := q.db.QueryRow(ctx, getInvitationForRegistration, arg.TokenHash)
+	var i InvitationToken
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.EmailNormalized,
+		&i.MemberID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getPendingInvitationForUser = `-- name: GetPendingInvitationForUser :one
+SELECT invitation_id FROM pending_invitation_registrations
+WHERE user_id = $1 FOR UPDATE
+`
+
+type GetPendingInvitationForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) GetPendingInvitationForUser(ctx context.Context, arg GetPendingInvitationForUserParams) (string, error) {
+	row := q.db.QueryRow(ctx, getPendingInvitationForUser, arg.UserID)
+	var invitation_id string
+	err := row.Scan(&invitation_id)
+	return invitation_id, err
 }

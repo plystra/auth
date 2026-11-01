@@ -43,6 +43,11 @@ type Service struct {
 	Limiter       *store.RateLimiter
 	Authorization *authorization.Service
 	Mailer        *mail.Service
+	Invitations   InvitationFinalizer
+}
+
+type InvitationFinalizer interface {
+	FinalizeVerifiedUserTx(context.Context, *db.Queries, string) error
 }
 type RegisterInput struct {
 	Email    string
@@ -254,6 +259,9 @@ func (s *Service) defaultMemberID(ctx context.Context, userID string) (string, e
 		if member.SpaceID == DefaultSpaceID {
 			return member.ID, nil
 		}
+	}
+	if len(members) > 0 {
+		return members[0].ID, nil
 	}
 	return "", nil
 }

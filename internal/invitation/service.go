@@ -11,17 +11,23 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/store"
 )
 
 const tokenLifetime = 7 * 24 * time.Hour
 
-type Service struct{ Store *store.Store }
+type Service struct {
+	Store    *store.Store
+	Accounts *account.Service
+}
 
 type CreateInput struct {
 	SpaceID   string
@@ -41,8 +47,9 @@ type Invitation struct {
 }
 
 type Acceptance struct {
-	SpaceID  string `json:"space_id"`
-	MemberID string `json:"member_id"`
+	SpaceID             string `json:"space_id"`
+	MemberID            string `json:"member_id,omitempty"`
+	PendingVerification bool   `json:"pending_verification,omitempty"`
 }
 
 // Create creates a single-use invitation token. The raw token is returned only
@@ -132,6 +139,129 @@ func (s *Service) Consume(ctx context.Context, raw string) (Invitation, error) {
 	return fromRow(row), nil
 }
 
+func (s *Service) RegisterNewUser(ctx context.Context, raw, email, password string) (Acceptance, error) {
+	if s == nil || s.Store == nil || s.Accounts == nil || s.Accounts.Settings == nil || s.Accounts.Mailer == nil {
+		return Acceptance{}, apierr.New("UNAVAILABLE", "invited registration is unavailable")
+	}
+	if len(raw) != 46 || !strings.HasPrefix(raw, "iv_") {
+		return Acceptance{}, apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if s.Accounts.Limiter != nil {
+		allowed, err := s.Accounts.Limiter.Allow(ctx, "register:"+normalized, 10, time.Hour)
+		if err != nil {
+			return Acceptance{}, err
+		}
+		if !allowed {
+			return Acceptance{}, apierr.New("rate_limited", "too many registration attempts")
+		}
+	}
+	sum := sha256.Sum256([]byte(raw))
+	preflight, err := s.Store.Queries().GetInvitationByToken(ctx, db.GetInvitationByTokenParams{TokenHash: sum[:]})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Acceptance{}, apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if preflight.EmailNormalized != normalized || preflight.MemberID.Valid {
+		return Acceptance{}, apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	settings, err := s.Accounts.Settings.Get(ctx)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if settings.RegistrationMode == "closed" {
+		return Acceptance{}, apierr.New("forbidden", "registration is closed")
+	}
+	if len(password) < settings.PasswordMinLength || len(password) > security.MaxPasswordBytes {
+		return Acceptance{}, apierr.New("invalid_request", "password does not meet the configured length policy")
+	}
+	passwordHash, err := s.Accounts.Passwords.Hash(password)
+	if err != nil {
+		return Acceptance{}, err
+	}
+	var accepted Acceptance
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		current, err := s.Accounts.Settings.GetTx(ctx, q)
+		if err != nil {
+			return err
+		}
+		if current.RegistrationMode == "closed" {
+			return apierr.New("forbidden", "registration is closed")
+		}
+		if len(password) < current.PasswordMinLength {
+			return apierr.New("invalid_request", "password does not meet the configured minimum length")
+		}
+		inv, err := q.GetInvitationForRegistration(ctx, db.GetInvitationForRegistrationParams{TokenHash: sum[:]})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("invalid_grant", "invitation token is invalid or expired")
+		}
+		if err != nil {
+			return err
+		}
+		if inv.EmailNormalized != normalized || inv.MemberID.Valid {
+			return apierr.New("invalid_grant", "invitation token is invalid or expired")
+		}
+		if err := activeSpaceTx(ctx, q, inv.SpaceID); err != nil {
+			return err
+		}
+		user, err := s.Accounts.CreatePendingInvitedUserTx(ctx, q, normalized, passwordHash)
+		if err != nil {
+			return err
+		}
+		if err := q.CreatePendingInvitationRegistration(ctx, db.CreatePendingInvitationRegistrationParams{
+			UserID: user.ID, InvitationID: inv.ID,
+		}); err != nil {
+			return err
+		}
+		accepted = Acceptance{SpaceID: inv.SpaceID, PendingVerification: true}
+		return nil
+	})
+	var constraint *pgconn.PgError
+	if errors.As(err, &constraint) && constraint.Code == "23505" {
+		return Acceptance{}, apierr.New("conflict", "an account with this email already exists")
+	}
+	return accepted, err
+}
+
+func (s *Service) FinalizeVerifiedUserTx(ctx context.Context, q *db.Queries, userID string) error {
+	if s == nil || s.Store == nil {
+		return errors.New("invitation store is required")
+	}
+	invitationID, err := q.GetPendingInvitationForUser(ctx, db.GetPendingInvitationForUserParams{UserID: userID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
+	if err != nil {
+		return err
+	}
+	if user.Status != "active" || !user.EmailVerifiedAt.Valid || user.DisabledAt.Valid {
+		return apierr.New("UNAUTHENTICATED", "the user account is unavailable")
+	}
+	inv, err := q.ConsumeInvitationByID(ctx, db.ConsumeInvitationByIDParams{ID: invitationID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	if err != nil {
+		return err
+	}
+	if user.EmailNormalized != inv.EmailNormalized || inv.MemberID.Valid {
+		return apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	if _, err := acceptNewMemberTx(ctx, q, inv, userID, user.EmailNormalized); err != nil {
+		return err
+	}
+	return q.DeletePendingInvitationRegistration(ctx, db.DeletePendingInvitationRegistrationParams{UserID: userID})
+}
+
 // AcceptVerifiedUser creates a new human member and consumes the invitation in
 // the same transaction. Existing-member invitations require authority-delta
 // coverage and are rejected until that path is implemented.
@@ -171,53 +301,61 @@ func (s *Service) AcceptVerifiedUser(ctx context.Context, raw, userID string) (A
 		if inv.MemberID.Valid {
 			return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "binding to an existing member is not available")
 		}
-		if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: user.ID}); err != nil {
-			return err
-		} else if operators != 0 {
-			return apierr.New("CONFLICT", "an operator identity cannot become a member")
+		accepted, err = acceptNewMemberTx(ctx, q, inv, user.ID, user.EmailNormalized)
+		return err
+	})
+	return accepted, err
+}
+
+func acceptNewMemberTx(ctx context.Context, q *db.Queries, inv db.InvitationToken, userID, email string) (Acceptance, error) {
+	if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: userID}); err != nil {
+		return Acceptance{}, err
+	} else if operators != 0 {
+		return Acceptance{}, apierr.New("CONFLICT", "an operator identity cannot become a member")
+	}
+	if err := activeSpaceTx(ctx, q, inv.SpaceID); err != nil {
+		return Acceptance{}, err
+	}
+	member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
+		ID: string(ids.New[ids.MemberID]("mem")), SpaceID: inv.SpaceID,
+		Name: email, Type: "human", BindingPolicy: "single",
+	})
+	if err != nil {
+		return Acceptance{}, err
+	}
+	if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: userID, MemberID: member.ID}); err != nil {
+		return Acceptance{}, err
+	}
+	if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: inv.SpaceID}); err != nil {
+		return Acceptance{}, err
+	}
+	if err := audit.Write(ctx, q, "user", userID, "invitation.accept", inv.ID, "success"); err != nil {
+		return Acceptance{}, err
+	}
+	return Acceptance{SpaceID: inv.SpaceID, MemberID: member.ID}, nil
+}
+
+func activeSpaceTx(ctx context.Context, q *db.Queries, invitedSpaceID string) error {
+	seen := map[string]struct{}{}
+	spaceID := invitedSpaceID
+	for depth := 0; depth < 64; depth++ {
+		if _, found := seen[spaceID]; found {
+			return apierr.New("INVALID_RESOURCE", "Space hierarchy contains a cycle")
 		}
-		seen := map[string]struct{}{}
-		spaceID := inv.SpaceID
-		for depth := 0; depth < 64; depth++ {
-			if _, found := seen[spaceID]; found {
-				return apierr.New("INVALID_RESOURCE", "Space hierarchy contains a cycle")
-			}
-			seen[spaceID] = struct{}{}
-			space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID})
-			if errors.Is(err, pgx.ErrNoRows) || err == nil && space.Status != "active" {
-				return apierr.New("SPACE_INACTIVE", "the invited Space is unavailable")
-			}
-			if err != nil {
-				return err
-			}
-			if !space.ParentID.Valid {
-				break
-			}
-			spaceID = space.ParentID.String
-			if depth == 63 {
-				return apierr.New("INVALID_RESOURCE", "Space hierarchy is too deep")
-			}
+		seen[spaceID] = struct{}{}
+		space, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && space.Status != "active" {
+			return apierr.New("SPACE_INACTIVE", "the invited Space is unavailable")
 		}
-		member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
-			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: inv.SpaceID,
-			Name: user.EmailNormalized, Type: "human", BindingPolicy: "single",
-		})
 		if err != nil {
 			return err
 		}
-		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: user.ID, MemberID: member.ID}); err != nil {
-			return err
+		if !space.ParentID.Valid {
+			return nil
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: inv.SpaceID}); err != nil {
-			return err
-		}
-		if err := audit.Write(ctx, q, "user", user.ID, "invitation.accept", inv.ID, "success"); err != nil {
-			return err
-		}
-		accepted = Acceptance{SpaceID: inv.SpaceID, MemberID: member.ID}
-		return nil
-	})
-	return accepted, err
+		spaceID = space.ParentID.String
+	}
+	return apierr.New("INVALID_RESOURCE", "Space hierarchy is too deep")
 }
 
 func newToken() (string, []byte, error) {

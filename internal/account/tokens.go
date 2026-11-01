@@ -29,6 +29,37 @@ func opaqueToken(prefix string) (string, []byte, error) {
 	sum := sha256.Sum256([]byte(raw))
 	return raw, sum[:], nil
 }
+
+func (s *Service) CreatePendingInvitedUserTx(ctx context.Context, q *db.Queries, email, passwordHash string) (User, error) {
+	if s == nil || s.Mailer == nil {
+		return User{}, apierr.New("UNAVAILABLE", "email verification delivery is unavailable")
+	}
+	u, err := q.CreateUser(ctx, db.CreateUserParams{
+		ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email,
+		PasswordHash: passwordHash, Status: "pending",
+	})
+	if err != nil {
+		return User{}, err
+	}
+	verification, verificationHash, err := opaqueToken("ev_")
+	if err != nil {
+		return User{}, err
+	}
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
+	if err := q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{
+		ID: string(ids.New[ids.ID]("evt")), UserID: u.ID,
+		TokenHash: verificationHash, ExpiresAt: pgTime(expiresAt),
+	}); err != nil {
+		return User{}, err
+	}
+	if err := s.Mailer.EnqueueVerificationTx(ctx, q, email, secret.New(verification), expiresAt); err != nil {
+		return User{}, err
+	}
+	if err := audit.Write(ctx, q, "public", u.ID, "auth.register", u.ID, "success"); err != nil {
+		return User{}, err
+	}
+	return toPublicUser(u.ID, u.Email, false, u.Status, u.CreatedAt.Time), nil
+}
 func (s *Service) CreateEmailVerification(ctx context.Context, userID string) (string, error) {
 	raw, hash, e := opaqueToken("ev_")
 	if e != nil {
@@ -67,6 +98,15 @@ func (s *Service) VerifyEmail(ctx context.Context, raw string, ips ...net.IP) er
 		userID = v
 		if _, e = q.MarkEmailVerified(ctx, db.MarkEmailVerifiedParams{ID: userID}); e != nil {
 			return e
+		}
+		if s.Invitations != nil {
+			if err := s.Invitations.FinalizeVerifiedUserTx(ctx, q, userID); err != nil {
+				return err
+			}
+		} else if _, err := q.GetPendingInvitationForUser(ctx, db.GetPendingInvitationForUserParams{UserID: userID}); err == nil {
+			return apierr.New("UNAVAILABLE", "invitation acceptance is unavailable")
+		} else if !errors.Is(err, pgx.ErrNoRows) {
+			return err
 		}
 		return audit.Write(ctx, q, "public", userID, "auth.email.verify", userID, "success")
 	})
