@@ -124,18 +124,21 @@ type FactorsOutput struct {
 type FactorsInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Kind  string `json:"kind" enum:"totp,backup_code"`
-		Name  string `json:"name,omitempty" maxLength:"100"`
-		Count int    `json:"count,omitempty" minimum:"5" maximum:"20"`
+		Kind        string          `json:"kind" enum:"totp,backup_code,passkey"`
+		Name        string          `json:"name,omitempty" maxLength:"100"`
+		Count       int             `json:"count,omitempty" minimum:"5" maximum:"20"`
+		ChallengeID string          `json:"challenge_id,omitempty"`
+		Credential  json.RawMessage `json:"credential,omitempty"`
 	}
 }
 type FactorCreateOutput struct {
 	Body struct {
 		Data struct {
-			Codes    []string `json:"codes,omitempty"`
-			FactorID string   `json:"factor_id,omitempty"`
-			Secret   string   `json:"secret,omitempty"`
-			URI      string   `json:"otpauth_uri,omitempty"`
+			Codes    []string                 `json:"codes,omitempty"`
+			FactorID string                   `json:"factor_id,omitempty"`
+			Secret   string                   `json:"secret,omitempty"`
+			URI      string                   `json:"otpauth_uri,omitempty"`
+			Passkey  *factor.PasskeyChallenge `json:"passkey,omitempty"`
 		} `json:"data"`
 	}
 }
@@ -409,8 +412,23 @@ func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*FactorCreate
 	if a.Factors == nil {
 		return nil, apierr.New("UNAVAILABLE", "factor service is unavailable")
 	}
-	if in.Body.Kind != "backup_code" && in.Body.Kind != "totp" {
+	if in.Body.Kind != "backup_code" && in.Body.Kind != "totp" && in.Body.Kind != "passkey" {
 		return nil, apierr.New("VALIDATION_FAILED", "factor kind is invalid")
+	}
+	if in.Body.Kind == "passkey" && in.Body.ChallengeID != "" {
+		if in.Body.Name != "" || in.Body.Count != 0 || len(in.Body.Credential) == 0 {
+			return nil, apierr.New("VALIDATION_FAILED", "passkey response is invalid")
+		}
+		factorID, err := a.Factors.FinishPasskeyEnrollment(ctx, claims.Subject, claims.SessionID, in.Body.ChallengeID, in.Body.Credential)
+		if err != nil {
+			return nil, err
+		}
+		out := &FactorCreateOutput{}
+		out.Body.Data.FactorID = factorID
+		return out, nil
+	}
+	if in.Body.ChallengeID != "" || len(in.Body.Credential) != 0 || (in.Body.Kind == "passkey" && in.Body.Count != 0) {
+		return nil, apierr.New("VALIDATION_FAILED", "factor creation request is invalid")
 	}
 	request := map[string]any{"kind": in.Body.Kind}
 	if in.Body.Name != "" {
@@ -422,6 +440,15 @@ func (a *API) createFactor(ctx context.Context, in *FactorsInput) (*FactorCreate
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.factors.create", request)
 	if err != nil {
 		return nil, err
+	}
+	if in.Body.Kind == "passkey" {
+		challenge, err := a.Factors.BeginPasskeyEnrollment(ctx, claims.Subject, claims.SessionID, in.Body.Name)
+		if err != nil {
+			return nil, err
+		}
+		out := &FactorCreateOutput{}
+		out.Body.Data.Passkey = &challenge
+		return out, nil
 	}
 	if in.Body.Kind == "totp" {
 		name := strings.TrimSpace(in.Body.Name)

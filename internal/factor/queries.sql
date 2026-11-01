@@ -48,3 +48,19 @@ SELECT * FROM factors WHERE user_id = sqlc.arg(user_id) AND kind = 'totp' ORDER 
 -- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = sqlc.arg(step)::bigint, last_used_at = now()
 WHERE id = sqlc.arg(id) AND counter < sqlc.arg(step)::bigint RETURNING id;
+
+-- name: CreatePasskeyChallenge :exec
+INSERT INTO passkey_challenges (id, user_id, session_id, name, session_data, expires_at)
+VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(session_id), sqlc.arg(name), sqlc.arg(session_data), sqlc.arg(expires_at));
+
+-- name: LockPasskeyChallenge :one
+SELECT id, user_id, session_id, name, session_data, expires_at, consumed_at, created_at
+FROM passkey_challenges WHERE id = sqlc.arg(id) FOR UPDATE;
+
+-- name: ConsumePasskeyChallenge :exec
+UPDATE passkey_challenges SET consumed_at = now()
+WHERE id = sqlc.arg(id) AND consumed_at IS NULL AND expires_at > now();
+
+-- name: ListPasskeysForUser :many
+SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at
+FROM factors WHERE user_id = sqlc.arg(user_id) AND kind = 'webauthn' ORDER BY id;

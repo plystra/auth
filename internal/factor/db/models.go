@@ -21,3 +21,14 @@ type Factor struct {
 	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
 	SecretHash       []byte             `json:"secret_hash"`
 }
+
+type PasskeyChallenge struct {
+	ID          string             `json:"id"`
+	UserID      string             `json:"user_id"`
+	SessionID   string             `json:"session_id"`
+	Name        string             `json:"name"`
+	SessionData []byte             `json:"session_data"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}

@@ -321,6 +321,17 @@ type OutboxEvent struct {
 	DeliveredAt pgtype.Timestamptz `json:"delivered_at"`
 }
 
+type PasskeyChallenge struct {
+	ID          string             `json:"id"`
+	UserID      string             `json:"user_id"`
+	SessionID   string             `json:"session_id"`
+	Name        string             `json:"name"`
+	SessionData []byte             `json:"session_data"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type PasswordResetToken struct {
 	ID         string             `json:"id"`
 	UserID     string             `json:"user_id"`

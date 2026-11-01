@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
@@ -26,10 +27,11 @@ import (
 )
 
 type Service struct {
-	Store   *store.Store
-	DataKey secret.String
-	Limiter *store.RateLimiter
-	StepUp  stepup.Consumer
+	Store    *store.Store
+	DataKey  secret.String
+	Limiter  *store.RateLimiter
+	StepUp   stepup.Consumer
+	WebAuthn *webauthn.WebAuthn
 }
 type Enrollment struct {
 	FactorID string        `json:"factor_id"`

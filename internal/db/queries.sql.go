@@ -246,6 +246,20 @@ func (q *Queries) ConsumeBackupCode(ctx context.Context, arg ConsumeBackupCodePa
 	return err
 }
 
+const consumePasskeyChallenge = `-- name: ConsumePasskeyChallenge :exec
+UPDATE passkey_challenges SET consumed_at = now()
+WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+`
+
+type ConsumePasskeyChallengeParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) ConsumePasskeyChallenge(ctx context.Context, arg ConsumePasskeyChallengeParams) error {
+	_, err := q.db.Exec(ctx, consumePasskeyChallenge, arg.ID)
+	return err
+}
+
 const consumeTOTPStep = `-- name: ConsumeTOTPStep :one
 UPDATE factors SET counter = $1::bigint, last_used_at = now()
 WHERE id = $2 AND counter < $1::bigint RETURNING id
@@ -751,6 +765,32 @@ func (q *Queries) CreateOAuthRefreshCredential(ctx context.Context, arg CreateOA
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const createPasskeyChallenge = `-- name: CreatePasskeyChallenge :exec
+INSERT INTO passkey_challenges (id, user_id, session_id, name, session_data, expires_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+`
+
+type CreatePasskeyChallengeParams struct {
+	ID          string             `json:"id"`
+	UserID      string             `json:"user_id"`
+	SessionID   string             `json:"session_id"`
+	Name        string             `json:"name"`
+	SessionData []byte             `json:"session_data"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreatePasskeyChallenge(ctx context.Context, arg CreatePasskeyChallengeParams) error {
+	_, err := q.db.Exec(ctx, createPasskeyChallenge,
+		arg.ID,
+		arg.UserID,
+		arg.SessionID,
+		arg.Name,
+		arg.SessionData,
+		arg.ExpiresAt,
+	)
+	return err
 }
 
 const createPermission = `-- name: CreatePermission :one
@@ -2399,6 +2439,59 @@ func (q *Queries) ListMembersInSpace(ctx context.Context, arg ListMembersInSpace
 	return items, nil
 }
 
+const listPasskeysForUser = `-- name: ListPasskeysForUser :many
+SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at
+FROM factors WHERE user_id = $1 AND kind = 'webauthn' ORDER BY id
+`
+
+type ListPasskeysForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+type ListPasskeysForUserRow struct {
+	ID               string             `json:"id"`
+	UserID           string             `json:"user_id"`
+	Kind             string             `json:"kind"`
+	Name             string             `json:"name"`
+	SecretCiphertext []byte             `json:"secret_ciphertext"`
+	CredentialID     []byte             `json:"credential_id"`
+	PublicKey        []byte             `json:"public_key"`
+	Counter          int64              `json:"counter"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	LastUsedAt       pgtype.Timestamptz `json:"last_used_at"`
+}
+
+func (q *Queries) ListPasskeysForUser(ctx context.Context, arg ListPasskeysForUserParams) ([]ListPasskeysForUserRow, error) {
+	rows, err := q.db.Query(ctx, listPasskeysForUser, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPasskeysForUserRow{}
+	for rows.Next() {
+		var i ListPasskeysForUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Kind,
+			&i.Name,
+			&i.SecretCiphertext,
+			&i.CredentialID,
+			&i.PublicKey,
+			&i.Counter,
+			&i.CreatedAt,
+			&i.LastUsedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRolePermissions = `-- name: ListRolePermissions :many
 SELECT p.key, p.status, p.delegable
 FROM role_permissions rp
@@ -2655,6 +2748,31 @@ func (q *Queries) LockOAuthRefreshCredentialByHash(ctx context.Context, arg Lock
 		&i.HomeGroupID,
 		&i.CreatedByMemberID,
 		&i.OauthClientID,
+	)
+	return i, err
+}
+
+const lockPasskeyChallenge = `-- name: LockPasskeyChallenge :one
+SELECT id, user_id, session_id, name, session_data, expires_at, consumed_at, created_at
+FROM passkey_challenges WHERE id = $1 FOR UPDATE
+`
+
+type LockPasskeyChallengeParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) LockPasskeyChallenge(ctx context.Context, arg LockPasskeyChallengeParams) (PasskeyChallenge, error) {
+	row := q.db.QueryRow(ctx, lockPasskeyChallenge, arg.ID)
+	var i PasskeyChallenge
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.SessionID,
+		&i.Name,
+		&i.SessionData,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
 	)
 	return i, err
 }

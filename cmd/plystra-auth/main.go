@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/spf13/cobra"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -220,7 +222,18 @@ func serve(ctx context.Context) error {
 			return fmt.Errorf("configure email job: %w", err)
 		}
 	}
-	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter}
+	issuerURL, err := url.Parse(c.Issuer)
+	if err != nil || issuerURL.Hostname() == "" || (issuerURL.Scheme != "https" && (issuerURL.Scheme != "http" || issuerURL.Hostname() != "localhost")) || issuerURL.User != nil || issuerURL.RawQuery != "" || issuerURL.Fragment != "" {
+		return errors.New("PLYSTRA_AUTH_ISSUER must be an HTTPS URL (HTTP is allowed for localhost) with no user info, query, or fragment")
+	}
+	passkeys, err := webauthn.New(&webauthn.Config{
+		RPID: issuerURL.Hostname(), RPDisplayName: "Plystra Auth",
+		RPOrigins: []string{issuerURL.Scheme + "://" + issuerURL.Host},
+	})
+	if err != nil {
+		return fmt.Errorf("configure passkey relying party: %w", err)
+	}
+	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter, WebAuthn: passkeys}
 	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	sessionSvc.Factors = factorSvc
 	sessionSvc.Settings = func(ctx context.Context) (session.Settings, error) {

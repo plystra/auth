@@ -339,6 +339,73 @@
         ],
         "type": "object"
       },
+      "AuthenticationExtensions": {
+        "additionalProperties": false,
+        "properties": {
+          "appid": {
+            "type": "string"
+          },
+          "appidExclude": {
+            "type": "string"
+          },
+          "credBlob": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "credProps": {
+            "type": "boolean"
+          },
+          "credentialProtectionPolicy": {
+            "type": "string"
+          },
+          "enforceCredentialProtectionPolicy": {
+            "type": "boolean"
+          },
+          "getCredBlob": {
+            "type": "boolean"
+          },
+          "hmacCreateSecret": {
+            "type": "boolean"
+          },
+          "hmacGetSecret": {
+            "$ref": "#/components/schemas/HMACGetSecretInputs"
+          },
+          "largeBlob": {
+            "$ref": "#/components/schemas/LargeBlobInputs"
+          },
+          "minPinLength": {
+            "type": "boolean"
+          },
+          "prf": {
+            "$ref": "#/components/schemas/PRFInputs"
+          },
+          "remoteClientDataJSON": {
+            "type": "string"
+          },
+          "uvm": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "AuthenticatorSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "authenticatorAttachment": {
+            "type": "string"
+          },
+          "requireResidentKey": {
+            "type": "boolean"
+          },
+          "residentKey": {
+            "type": "string"
+          },
+          "userVerification": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
       "AuthorizationDataOutputAcceptedDataBody": {
         "additionalProperties": false,
         "properties": {
@@ -758,6 +825,64 @@
         ],
         "type": "object"
       },
+      "CredentialCreation": {
+        "additionalProperties": false,
+        "properties": {
+          "mediation": {
+            "type": "string"
+          },
+          "publicKey": {
+            "$ref": "#/components/schemas/PublicKeyCredentialCreationOptions"
+          }
+        },
+        "required": [
+          "publicKey"
+        ],
+        "type": "object"
+      },
+      "CredentialDescriptor": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "transports": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id"
+        ],
+        "type": "object"
+      },
+      "CredentialParameter": {
+        "additionalProperties": false,
+        "properties": {
+          "alg": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "alg"
+        ],
+        "type": "object"
+      },
       "DataStruct": {
         "additionalProperties": false,
         "properties": {
@@ -787,6 +912,9 @@
           },
           "otpauth_uri": {
             "type": "string"
+          },
+          "passkey": {
+            "$ref": "#/components/schemas/PasskeyChallenge"
           },
           "secret": {
             "type": "string"
@@ -955,16 +1083,21 @@
       "FactorsInputBody": {
         "additionalProperties": false,
         "properties": {
+          "challenge_id": {
+            "type": "string"
+          },
           "count": {
             "format": "int64",
             "maximum": 20,
             "minimum": 5,
             "type": "integer"
           },
+          "credential": {},
           "kind": {
             "enum": [
               "totp",
-              "backup_code"
+              "backup_code",
+              "passkey"
             ],
             "type": "string"
           },
@@ -1092,6 +1225,23 @@
         },
         "type": "object"
       },
+      "HMACGetSecretInputs": {
+        "additionalProperties": false,
+        "properties": {
+          "salt1": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "salt2": {
+            "contentEncoding": "base64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "salt1"
+        ],
+        "type": "object"
+      },
       "InvitationResponse": {
         "additionalProperties": false,
         "properties": {
@@ -1119,6 +1269,22 @@
           "expires_at",
           "token"
         ],
+        "type": "object"
+      },
+      "LargeBlobInputs": {
+        "additionalProperties": false,
+        "properties": {
+          "read": {
+            "type": "boolean"
+          },
+          "support": {
+            "type": "string"
+          },
+          "write": {
+            "contentEncoding": "base64",
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "LogoutInputBody": {
@@ -1230,6 +1396,59 @@
         ],
         "type": "object"
       },
+      "PRFInputs": {
+        "additionalProperties": false,
+        "properties": {
+          "eval": {
+            "$ref": "#/components/schemas/PRFValues"
+          },
+          "evalByCredential": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PRFValues"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "PRFValues": {
+        "additionalProperties": false,
+        "properties": {
+          "first": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "second": {
+            "contentEncoding": "base64",
+            "type": "string"
+          }
+        },
+        "required": [
+          "first"
+        ],
+        "type": "object"
+      },
+      "PasskeyChallenge": {
+        "additionalProperties": false,
+        "properties": {
+          "challenge_id": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/CredentialCreation"
+          }
+        },
+        "required": [
+          "challenge_id",
+          "options",
+          "expires_at"
+        ],
+        "type": "object"
+      },
       "PermissionsOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1245,6 +1464,76 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "PublicKeyCredentialCreationOptions": {
+        "additionalProperties": false,
+        "properties": {
+          "attestation": {
+            "type": "string"
+          },
+          "attestationFormats": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "authenticatorSelection": {
+            "$ref": "#/components/schemas/AuthenticatorSelection"
+          },
+          "challenge": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "excludeCredentials": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialDescriptor"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "extensions": {
+            "$ref": "#/components/schemas/AuthenticationExtensions"
+          },
+          "hints": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "pubKeyCredParams": {
+            "items": {
+              "$ref": "#/components/schemas/CredentialParameter"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "rp": {
+            "$ref": "#/components/schemas/RelyingPartyEntity"
+          },
+          "timeout": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "user": {
+            "$ref": "#/components/schemas/UserEntity"
+          }
+        },
+        "required": [
+          "rp",
+          "user",
+          "challenge"
         ],
         "type": "object"
       },
@@ -1272,6 +1561,22 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "RelyingPartyEntity": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
         ],
         "type": "object"
       },
@@ -1619,6 +1924,24 @@
           "avatar_url",
           "public_metadata",
           "created_at"
+        ],
+        "type": "object"
+      },
+      "UserEntity": {
+        "additionalProperties": false,
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "id": {},
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "id",
+          "name"
         ],
         "type": "object"
       },
