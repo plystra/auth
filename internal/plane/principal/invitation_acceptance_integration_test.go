@@ -44,12 +44,20 @@ func TestVerifiedUserAcceptsInvitationThroughPrincipalHTTP(t *testing.T) {
 	handler := route.Middleware(route.Principal, mux)
 	accept := func(token string) *httptest.ResponseRecorder {
 		t.Helper()
-		request := httptest.NewRequest(http.MethodPost, "/v1/invitations/"+raw+"/accept", strings.NewReader(`{}`))
+		request := httptest.NewRequest(http.MethodPost, "/v1/invitations/accept", strings.NewReader(`{"token":"`+raw+`"}`))
 		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
 		return response
+	}
+	legacy := httptest.NewRequest(http.MethodPost, "/v1/invitations/"+raw+"/accept", strings.NewReader(`{}`))
+	legacy.Header.Set("Authorization", "Bearer "+invitedTokens.AccessToken)
+	legacy.Header.Set("Content-Type", "application/json")
+	legacyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(legacyResponse, legacy)
+	if legacyResponse.Code != http.StatusNotFound {
+		t.Fatalf("invitation token remains accepted in URL: status=%d", legacyResponse.Code)
 	}
 	wrong := accept(otherTokens.AccessToken)
 	if wrong.Code != http.StatusBadRequest || !strings.Contains(wrong.Body.String(), "invalid_grant") {

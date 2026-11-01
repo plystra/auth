@@ -43,8 +43,9 @@ type AuthOutput struct {
 }
 type AcceptInvitationInput struct {
 	Authorization string `header:"Authorization"`
-	Token         string `path:"token"`
-	Body          struct{}
+	Body          struct {
+		Token secret.String `json:"token"`
+	}
 }
 type AcceptInvitationOutput struct {
 	Body struct {
@@ -223,7 +224,7 @@ type SessionOutput struct {
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.sign_up", "POST", "/v1/auth/sign-up", route.Principal, "", []route.Subject{route.Public}), a.register)
-	route.Register(api, route.NewSpec("invitations.accept", "POST", "/v1/invitations/{token}/accept", route.Principal, "", []route.Subject{route.User}), a.acceptInvitation)
+	route.Register(api, route.NewSpec("invitations.accept", "POST", "/v1/invitations/accept", route.Principal, "", []route.Subject{route.User}), a.acceptInvitation)
 	route.Register(api, route.NewSpec("auth.sign_in", "POST", "/v1/auth/sign-in", route.Principal, "", []route.Subject{route.Public}), a.login)
 	route.Register(api, route.NewSpec("auth.sign_in_attempt", "POST", "/v1/auth/sign-in/{attempt_id}", route.Principal, "", []route.Subject{route.Public}), a.loginAttempt)
 	route.Register(api, route.NewSpec("auth.refresh", "POST", "/v1/auth/refresh", route.Principal, "", []route.Subject{route.Public}), a.refresh)
@@ -263,7 +264,7 @@ func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (
 	if err != nil {
 		return nil, err
 	}
-	accepted, err := a.Invitations.AcceptVerifiedUser(ctx, in.Token, claims.Subject)
+	accepted, err := a.Invitations.AcceptVerifiedUser(ctx, in.Body.Token.Value(), claims.Subject)
 	if err != nil {
 		return nil, err
 	}

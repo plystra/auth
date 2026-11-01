@@ -3,6 +3,14 @@
     "schemas": {
       "AcceptInvitationInputBody": {
         "additionalProperties": false,
+        "properties": {
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
         "type": "object"
       },
       "AcceptInvitationOutputBody": {
@@ -2028,21 +2036,13 @@
         "summary": "auth.step_up"
       }
     },
-    "/v1/invitations/{token}/accept": {
+    "/v1/invitations/accept": {
       "post": {
         "operationId": "invitations.accept",
         "parameters": [
           {
             "in": "header",
             "name": "Authorization",
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
-            "name": "token",
-            "required": true,
             "schema": {
               "type": "string"
             }
