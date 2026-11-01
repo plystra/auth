@@ -25,6 +25,28 @@ type AgentExpiryWorker struct {
 	Service AgentExpiryService
 }
 
+type EmailDeliveryService interface {
+	DeliverEmail(context.Context, []byte) error
+}
+
+type EmailDeliveryArgs struct {
+	Ciphertext []byte `json:"ciphertext"`
+}
+
+func (EmailDeliveryArgs) Kind() string { return "email_delivery" }
+
+type EmailDeliveryWorker struct {
+	river.WorkerDefaults[EmailDeliveryArgs]
+	Service EmailDeliveryService
+}
+
+func (w *EmailDeliveryWorker) Work(ctx context.Context, job *river.Job[EmailDeliveryArgs]) error {
+	if w.Service == nil {
+		return fmt.Errorf("email delivery service is not configured")
+	}
+	return w.Service.DeliverEmail(ctx, job.Args.Ciphertext)
+}
+
 func (w *AgentExpiryWorker) Work(ctx context.Context, _ *river.Job[AgentExpiryArgs]) error {
 	if w.Service == nil {
 		return fmt.Errorf("agent expiry service is not configured")
@@ -37,9 +59,11 @@ func (w *AgentExpiryWorker) Work(ctx context.Context, _ *river.Job[AgentExpiryAr
 // capability that owns a job; this producer is safe to use from business
 // transactions without opening a second connection.
 type Client struct {
-	pool    *pgxpool.Pool
-	river   *river.Client[pgx.Tx]
-	workers *river.Workers
+	pool                    *pgxpool.Pool
+	river                   *river.Client[pgx.Tx]
+	workers                 *river.Workers
+	agentExpiryRegistered   bool
+	emailDeliveryRegistered bool
 }
 
 func NewClient(pool *pgxpool.Pool) (*Client, error) {
@@ -54,8 +78,40 @@ func (c *Client) RegisterAgentExpiry(service AgentExpiryService) error {
 	if c == nil || c.pool == nil || c.river == nil {
 		return fmt.Errorf("river client is not configured")
 	}
-	if c.workers != nil {
+	if c.agentExpiryRegistered {
 		return fmt.Errorf("agent expiry job is already registered")
+	}
+	if err := c.ensureWorkers(); err != nil {
+		return err
+	}
+	river.AddWorker(c.workers, &AgentExpiryWorker{Service: service})
+	c.agentExpiryRegistered = true
+	c.river.PeriodicJobs().Add(river.NewPeriodicJob(
+		river.PeriodicInterval(time.Minute),
+		func() (river.JobArgs, *river.InsertOpts) { return AgentExpiryArgs{}, nil },
+		&river.PeriodicJobOpts{RunOnStart: true},
+	))
+	return nil
+}
+
+func (c *Client) RegisterEmailDelivery(service EmailDeliveryService) error {
+	if c == nil || c.pool == nil || c.river == nil || service == nil {
+		return fmt.Errorf("email delivery service is not configured")
+	}
+	if c.emailDeliveryRegistered {
+		return fmt.Errorf("email delivery job is already registered")
+	}
+	if err := c.ensureWorkers(); err != nil {
+		return err
+	}
+	river.AddWorker(c.workers, &EmailDeliveryWorker{Service: service})
+	c.emailDeliveryRegistered = true
+	return nil
+}
+
+func (c *Client) ensureWorkers() error {
+	if c.workers != nil {
+		return nil
 	}
 	workers := river.NewWorkers()
 	client, err := river.NewClient(riverpgxv5.New(c.pool), &river.Config{
@@ -67,12 +123,6 @@ func (c *Client) RegisterAgentExpiry(service AgentExpiryService) error {
 	}
 	c.river = client
 	c.workers = workers
-	river.AddWorker(c.workers, &AgentExpiryWorker{Service: service})
-	c.river.PeriodicJobs().Add(river.NewPeriodicJob(
-		river.PeriodicInterval(time.Minute),
-		func() (river.JobArgs, *river.InsertOpts) { return AgentExpiryArgs{}, nil },
-		&river.PeriodicJobOpts{RunOnStart: true},
-	))
 	return nil
 }
 

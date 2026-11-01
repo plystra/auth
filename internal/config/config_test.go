@@ -114,3 +114,36 @@ func TestLoadRejectsUnsafeAgentDelegationDepth(t *testing.T) {
 		t.Fatalf("Load() error = %v, want delegation depth validation", err)
 	}
 }
+
+func TestSMTPConfigurationRequiresCompleteCredentialsAndProductionDelivery(t *testing.T) {
+	base := Config{
+		DatabaseURL:             "postgres://app:secret@localhost/auth",
+		MigrationDatabaseURL:    "postgres://migration:secret@localhost/auth",
+		Issuer:                  "https://auth.test",
+		SessionHMACKeys:         strings.Repeat("k", 32),
+		DataKey:                 base64.StdEncoding.EncodeToString([]byte(strings.Repeat("d", 32))),
+		SigningKeyEncryptionKey: base64.StdEncoding.EncodeToString([]byte(strings.Repeat("e", 32))),
+		SigningKeyFile:          "encrypted.pem", AgentDelegationMaxDepth: 8,
+		ShutdownTimeout: 10, SMTPPort: 587, Environment: "production",
+	}
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "PLYSTRA_AUTH_SMTP_HOST") {
+		t.Fatalf("production without SMTP = %v", err)
+	}
+	base.SMTPHost = "smtp.example.test"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "SMTP host/from") {
+		t.Fatalf("SMTP without sender = %v", err)
+	}
+	base.SMTPFrom = "auth@example.test"
+	base.SMTPUsername = "user"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "username/password") {
+		t.Fatalf("partial SMTP credentials = %v", err)
+	}
+	base.SMTPPassword = "password"
+	if err := base.Validate(); err != nil {
+		t.Fatalf("complete production SMTP = %v", err)
+	}
+	base.SMTPPort = 0
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "PLYSTRA_AUTH_SMTP_PORT") {
+		t.Fatalf("invalid SMTP port = %v", err)
+	}
+}

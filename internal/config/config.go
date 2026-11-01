@@ -22,6 +22,11 @@ type Config struct {
 	DataKey                 string        `env:"PLYSTRA_AUTH_DATA_KEY,required"`
 	SigningKeyFile          string        `env:"PLYSTRA_AUTH_SIGNING_KEY_FILE"`
 	SigningKeyEncryptionKey string        `env:"PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY,required"`
+	SMTPHost                string        `env:"PLYSTRA_AUTH_SMTP_HOST"`
+	SMTPPort                int           `env:"PLYSTRA_AUTH_SMTP_PORT" envDefault:"587"`
+	SMTPFrom                string        `env:"PLYSTRA_AUTH_SMTP_FROM"`
+	SMTPUsername            string        `env:"PLYSTRA_AUTH_SMTP_USERNAME"`
+	SMTPPassword            string        `env:"PLYSTRA_AUTH_SMTP_PASSWORD"`
 	AgentDelegationMaxDepth int           `env:"PLYSTRA_AUTH_AGENT_DELEGATION_MAX_DEPTH" envDefault:"8"`
 	ShutdownTimeout         time.Duration `env:"PLYSTRA_AUTH_SHUTDOWN_TIMEOUT" envDefault:"10s"`
 	Environment             string        `env:"PLYSTRA_AUTH_ENVIRONMENT" envDefault:"development"`
@@ -77,6 +82,12 @@ func (c Config) Validate() error {
 	if c.AgentDelegationMaxDepth < 1 || c.AgentDelegationMaxDepth > 64 {
 		return errors.New("agent delegation max depth must be between 1 and 64")
 	}
+	if c.SMTPPort < 1 || c.SMTPPort > 65535 {
+		return errors.New("PLYSTRA_AUTH_SMTP_PORT must be between 1 and 65535")
+	}
+	if (c.SMTPHost == "") != (c.SMTPFrom == "") || (c.SMTPUsername == "") != (c.SMTPPassword == "") {
+		return errors.New("SMTP host/from and username/password must be configured together")
+	}
 	if strings.EqualFold(c.Environment, "production") && strings.TrimSpace(c.SigningKeyFile) == "" {
 		return errors.New("signing key file is required in production")
 	}
@@ -88,6 +99,9 @@ func (c Config) Validate() error {
 		}
 		if applicationURL.User.Username() == migrationURL.User.Username() {
 			return errors.New("production database URLs must use distinct application and migration roles")
+		}
+		if c.SMTPHost == "" {
+			return errors.New("PLYSTRA_AUTH_SMTP_HOST and PLYSTRA_AUTH_SMTP_FROM are required in production")
 		}
 	}
 	return nil

@@ -17,6 +17,8 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/mail"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/space"
@@ -40,6 +42,7 @@ type Service struct {
 	Settings      *space.Service
 	Limiter       *store.RateLimiter
 	Authorization *authorization.Service
+	Mailer        *mail.Service
 }
 type RegisterInput struct {
 	Email    string
@@ -88,6 +91,9 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 	if settings.RegistrationMode != "open" {
 		return AuthResult{}, apierr.New("forbidden", "registration is not open")
 	}
+	if settings.RequireEmailVerification && s.Mailer == nil {
+		return AuthResult{}, apierr.New("UNAVAILABLE", "email verification delivery is unavailable")
+	}
 	if len(in.Password) < settings.PasswordMinLength {
 		return AuthResult{}, apierr.New("invalid_request", "password does not meet the configured minimum length")
 	}
@@ -128,11 +134,18 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 			}
 		}
 		if requireEmailVerification {
-			_, verificationHash, err := opaqueToken("ev_")
+			if s.Mailer == nil {
+				return apierr.New("UNAVAILABLE", "email verification delivery is unavailable")
+			}
+			verification, verificationHash, err := opaqueToken("ev_")
 			if err != nil {
 				return err
 			}
-			if err := q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: string(ids.New[ids.ID]("evt")), UserID: u.ID, TokenHash: verificationHash, ExpiresAt: pgTime(time.Now().UTC().Add(24 * time.Hour))}); err != nil {
+			expiresAt := time.Now().UTC().Add(24 * time.Hour)
+			if err := q.CreateEmailVerificationToken(ctx, db.CreateEmailVerificationTokenParams{ID: string(ids.New[ids.ID]("evt")), UserID: u.ID, TokenHash: verificationHash, ExpiresAt: pgTime(expiresAt)}); err != nil {
+				return err
+			}
+			if err := s.Mailer.EnqueueVerificationTx(ctx, q, email, secret.New(verification), expiresAt); err != nil {
 				return err
 			}
 		}

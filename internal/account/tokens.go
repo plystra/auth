@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 )
 
@@ -101,7 +102,14 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string, ips ..
 		return "", e
 	}
 	e = s.Store.InTx(ctx, func(q *db.Queries) error {
-		return q.CreatePasswordResetToken(ctx, db.CreatePasswordResetTokenParams{ID: string(ids.New[ids.ID]("prt")), UserID: u.ID, TokenHash: hash, ExpiresAt: pgTime(time.Now().UTC().Add(time.Hour))})
+		expiresAt := time.Now().UTC().Add(time.Hour)
+		if err := q.CreatePasswordResetToken(ctx, db.CreatePasswordResetTokenParams{ID: string(ids.New[ids.ID]("prt")), UserID: u.ID, TokenHash: hash, ExpiresAt: pgTime(expiresAt)}); err != nil {
+			return err
+		}
+		if s.Mailer != nil {
+			return s.Mailer.EnqueuePasswordResetTx(ctx, q, email, secret.New(raw), expiresAt)
+		}
+		return nil
 	})
 	return raw, e
 }

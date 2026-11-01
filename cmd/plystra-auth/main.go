@@ -30,6 +30,7 @@ import (
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/jobs"
+	"github.com/plystra/auth/internal/mail"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/observability"
 	"github.com/plystra/auth/internal/operator"
@@ -202,6 +203,23 @@ func serve(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	var mailSvc *mail.Service
+	if c.SMTPHost != "" {
+		sender, err := mail.NewSMTPTransport(mail.SMTPConfig{
+			Host: c.SMTPHost, Port: c.SMTPPort, From: c.SMTPFrom,
+			Username: c.SMTPUsername, Password: secret.New(c.SMTPPassword),
+		})
+		if err != nil {
+			return fmt.Errorf("configure SMTP delivery: %w", err)
+		}
+		mailSvc, err = mail.New(secret.New(dataKey), st.Jobs, sender)
+		if err != nil {
+			return fmt.Errorf("configure mail delivery: %w", err)
+		}
+		if err := st.Jobs.RegisterEmailDelivery(mailSvc); err != nil {
+			return fmt.Errorf("configure email job: %w", err)
+		}
+	}
 	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter}
 	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	sessionSvc.Factors = factorSvc
@@ -215,7 +233,7 @@ func serve(ctx context.Context) error {
 	authorizationSvc.StepUp = sessionSvc
 	agentSvc.StepUp = sessionSvc
 	factorSvc.StepUp = sessionSvc
-	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc}
+	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc, Mailer: mailSvc}
 	apps := &application.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: &invitation.Service{Store: st}, Factors: factorSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc}

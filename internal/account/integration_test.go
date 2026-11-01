@@ -17,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
+	"github.com/plystra/auth/internal/mail"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -49,7 +50,7 @@ func TestEmailNormalizationIsUniqueAndRegistrationDefaultsClosed(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)
 	settings := &space.Service{Store: st}
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: settings}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: settings, Mailer: newTestMailer(t, st)}
 	if _, err := accounts.Register(ctx, RegisterInput{Email: "closed@example.test", Password: "a sufficiently long password"}, nil, ""); err == nil {
 		t.Fatal("registration was open by default")
 	} else {
@@ -178,7 +179,7 @@ func TestConcurrentRegistrationSameEmailHasSingleSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	settings := &space.Service{Store: st}
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: settings}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: settings, Mailer: newTestMailer(t, st)}
 
 	const attempts = 8
 	start := make(chan struct{})
@@ -231,7 +232,7 @@ func TestRegistrationRollsBackUserAndDefaultMembershipWhenAuditFails(t *testing.
 		t.Fatal(err)
 	}
 	authz := &authorization.Service{Store: st}
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz, Mailer: newTestMailer(t, st)}
 	if _, err := accounts.Register(ctx, RegisterInput{Email: "rollback@example.test", Password: "a sufficiently long password"}, nil, ""); err == nil {
 		t.Fatal("registration succeeded despite audit failure")
 	}
@@ -254,13 +255,20 @@ func TestRegistrationCreatesDefaultMemberBindingAndGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	authz := &authorization.Service{Store: st}
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Authorization: authz, Mailer: newTestMailer(t, st)}
 	result, err := accounts.Register(ctx, RegisterInput{Email: "joined@example.test", Password: "a sufficiently long password"}, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if result.User.Status != "pending" {
 		t.Fatalf("registered user status = %q, want pending", result.User.Status)
+	}
+	var mailJobs int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'email_delivery'`).Scan(&mailJobs); err != nil {
+		t.Fatal(err)
+	}
+	if mailJobs != 1 {
+		t.Fatalf("verification mail jobs = %d, want 1", mailJobs)
 	}
 	var memberID string
 	if err := st.Pool.QueryRow(ctx, `
@@ -278,6 +286,55 @@ func TestRegistrationCreatesDefaultMemberBindingAndGrant(t *testing.T) {
 	}
 	if grants != 1 || audits != 2 {
 		t.Fatalf("registration state: grants=%d audits=%d, want one grant and two audit entries", grants, audits)
+	}
+}
+
+func TestRegistrationRejectsUndeliverableVerificationWithoutCreatingAccount(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE instance_settings SET registration_mode = 'open', require_email_verification = true`); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}}
+	if _, err := accounts.Register(ctx, RegisterInput{Email: "undeliverable@example.test", Password: "a sufficiently long password"}, nil, ""); !hasAccountCode(err, "UNAVAILABLE") {
+		t.Fatalf("registration without mail delivery = %v", err)
+	}
+	var users int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE email_normalized = 'undeliverable@example.test'`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if users != 0 {
+		t.Fatal("registration created an unreachable pending account")
+	}
+}
+
+func TestPasswordResetQueuesEncryptedDeliveryForExistingAccountOnly(t *testing.T) {
+	ctx := context.Background()
+	st := newAccountStore(t)
+	if err := insertAccountUser(ctx, st, "usr_mail_reset", "reset-mail@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Mailer: newTestMailer(t, st)}
+	if token, err := accounts.RequestPasswordReset(ctx, "absent@example.test"); err != nil || token != "" {
+		t.Fatalf("unknown account reset = %q, %v", token, err)
+	}
+	token, err := accounts.RequestPasswordReset(ctx, "RESET-MAIL@example.test")
+	if err != nil || token == "" {
+		t.Fatalf("known account reset = %q, %v", token, err)
+	}
+	var args []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT args FROM river_job WHERE kind = 'email_delivery'`).Scan(&args); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(args, []byte(token)) || bytes.Contains(args, []byte("reset-mail@example.test")) {
+		t.Fatal("password reset River job contains plaintext delivery material")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM river_job WHERE kind = 'email_delivery'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("password reset jobs = %d, want one", count)
 	}
 }
 
@@ -964,6 +1021,19 @@ func TestPasswordResetRollsBackWhenAuditFails(t *testing.T) {
 	} else if !active {
 		t.Fatal("existing session was revoked after audit failure")
 	}
+}
+
+type testMailSender struct{}
+
+func (testMailSender) Send(context.Context, string, string, string) error { return nil }
+
+func newTestMailer(t *testing.T, st *store.Store) *mail.Service {
+	t.Helper()
+	mailer, err := mail.New(secret.New(strings.Repeat("d", 32)), st.Jobs, testMailSender{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mailer
 }
 
 func newAccountStore(t *testing.T) *store.Store {
