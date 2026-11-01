@@ -13,6 +13,11 @@ FOR UPDATE;
 DELETE FROM factors
 WHERE id = sqlc.arg(id) AND user_id = sqlc.arg(user_id);
 
+-- name: InvalidatePasswordStepUpForUser :exec
+UPDATE sessions
+SET step_up_operation = NULL, step_up_digest = NULL, step_up_method = NULL, step_up_expires_at = NULL
+WHERE user_id = sqlc.arg(user_id) AND step_up_method = 'password';
+
 -- name: CreateBackupCode :one
 INSERT INTO factors (id, user_id, kind, name, secret_hash)
 VALUES (sqlc.arg(id), sqlc.arg(user_id), 'backup_code', sqlc.arg(name), sqlc.arg(secret_hash))

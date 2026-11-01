@@ -225,6 +225,21 @@ func (q *Queries) GetUnusedBackupCodeByHash(ctx context.Context, arg GetUnusedBa
 	return i, err
 }
 
+const invalidatePasswordStepUpForUser = `-- name: InvalidatePasswordStepUpForUser :exec
+UPDATE sessions
+SET step_up_operation = NULL, step_up_digest = NULL, step_up_method = NULL, step_up_expires_at = NULL
+WHERE user_id = $1 AND step_up_method = 'password'
+`
+
+type InvalidatePasswordStepUpForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) InvalidatePasswordStepUpForUser(ctx context.Context, arg InvalidatePasswordStepUpForUserParams) error {
+	_, err := q.db.Exec(ctx, invalidatePasswordStepUpForUser, arg.UserID)
+	return err
+}
+
 const listFactors = `-- name: ListFactors :many
 SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at FROM factors WHERE user_id = $1 ORDER BY created_at
 `

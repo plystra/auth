@@ -425,6 +425,7 @@ type Session struct {
 	StepUpDigest    []byte             `json:"step_up_digest"`
 	StepUpExpiresAt pgtype.Timestamptz `json:"step_up_expires_at"`
 	AuthMethods     []string           `json:"auth_methods"`
+	StepUpMethod    pgtype.Text        `json:"step_up_method"`
 }
 
 type SignInAttempt struct {

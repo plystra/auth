@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/stepup"
@@ -59,7 +60,8 @@ type RefreshOutput struct {
 type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
-		Code      string          `json:"mfa_code" minLength:"6" maxLength:"6"`
+		Code      string          `json:"mfa_code,omitempty" minLength:"6" maxLength:"6"`
+		Password  secret.String   `json:"password,omitempty" maxLength:"1024"`
 		Operation string          `json:"operation"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
@@ -294,8 +296,27 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 	if err != nil {
 		return nil, err
 	}
+	if (in.Body.Code == "") == (in.Body.Password.Value() == "") {
+		return nil, apierr.New("VALIDATION_FAILED", "provide exactly one of mfa_code or password")
+	}
 	if !principalStepUpOperation(in.Body.Operation) {
 		return nil, apierr.New("VALIDATION_FAILED", "operation is not supported for principal step-up")
+	}
+	if in.Body.Password.Value() != "" {
+		var request map[string]json.RawMessage
+		if err := json.Unmarshal(in.Body.Request, &request); err != nil || len(request) != 2 {
+			return nil, apierr.New("VALIDATION_FAILED", "password step-up is only available for first TOTP enrollment")
+		}
+		var kind, name string
+		if err := json.Unmarshal(request["kind"], &kind); err != nil {
+			return nil, apierr.New("VALIDATION_FAILED", "first TOTP enrollment request is invalid")
+		}
+		if err := json.Unmarshal(request["name"], &name); err != nil {
+			return nil, apierr.New("VALIDATION_FAILED", "first TOTP enrollment request is invalid")
+		}
+		if in.Body.Operation != "me.factors.create" || kind != "totp" || name == "" || name != strings.TrimSpace(name) || len(name) > 100 {
+			return nil, apierr.New("VALIDATION_FAILED", "password step-up is only available for first TOTP enrollment")
+		}
 	}
 	digest, err := stepup.Digest(in.Body.Request)
 	if err != nil {
@@ -305,7 +326,12 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 	if len(parts) != 2 || claims.SessionID == "" {
 		return nil, apierr.New("UNAUTHENTICATED", "a user access-token session is required")
 	}
-	if err := a.Sessions.StepUp(ctx, parts[1], in.Body.Code, in.Body.Operation, digest); err != nil {
+	if in.Body.Password.Value() != "" {
+		err = a.Sessions.StepUpFirstTOTP(ctx, parts[1], in.Body.Password, digest)
+	} else {
+		err = a.Sessions.StepUp(ctx, parts[1], in.Body.Code, in.Body.Operation, digest)
+	}
+	if err != nil {
 		return nil, err
 	}
 	out := &StepUpOutput{}

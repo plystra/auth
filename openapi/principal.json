@@ -1426,12 +1426,15 @@
           "operation": {
             "type": "string"
           },
+          "password": {
+            "maxLength": 1024,
+            "type": "string"
+          },
           "request": {
             "minLength": 2
           }
         },
         "required": [
-          "mfa_code",
           "operation",
           "request"
         ],

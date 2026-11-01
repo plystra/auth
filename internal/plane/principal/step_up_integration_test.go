@@ -206,6 +206,152 @@ func TestBackupCodeFactorHTTPRoutesUseDocumentedUserSurface(t *testing.T) {
 	}
 }
 
+func TestFirstTOTPEnrollmentPasswordStepUpHTTPFlow(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	password := "a sufficiently long current password"
+	hash, err := security.DefaultPasswordHasher().Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = 'usr_principal_actor'`, hash); err != nil {
+		t.Fatal(err)
+	}
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Factors: factors}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		if body != "" {
+			r.Header.Set("Content-Type", "application/json")
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		return response
+	}
+	stepBody := `{"password":"a sufficiently long current password","operation":"me.factors.create","request":{"kind":"totp","name":"phone"}}`
+	wrong := request(http.MethodPost, "/v1/auth/step-up", `{"password":"wrong password","operation":"me.factors.create","request":{"kind":"totp","name":"phone"}}`)
+	if wrong.Code != http.StatusUnauthorized || !strings.Contains(wrong.Body.String(), "UNAUTHENTICATED") {
+		t.Fatalf("wrong password step-up status=%d", wrong.Code)
+	}
+	other := request(http.MethodPost, "/v1/auth/step-up", `{"password":"a sufficiently long current password","operation":"me.agents.create","request":{"kind":"totp","name":"phone"}}`)
+	if other.Code != http.StatusBadRequest {
+		t.Fatalf("password proof accepted for another operation: status=%d", other.Code)
+	}
+	step := request(http.MethodPost, "/v1/auth/step-up", stepBody)
+	if step.Code != http.StatusOK {
+		t.Fatalf("first TOTP step-up status=%d", step.Code)
+	}
+	created := request(http.MethodPost, "/v1/me/factors", `{"kind":"totp","name":"phone"}`)
+	if created.Code != http.StatusOK {
+		t.Fatalf("first TOTP enrollment status=%d", created.Code)
+	}
+	var enrollment struct {
+		Data struct {
+			ID     string `json:"factor_id"`
+			Secret string `json:"secret"`
+			URI    string `json:"otpauth_uri"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &enrollment); err != nil {
+		t.Fatal(err)
+	}
+	if enrollment.Data.ID == "" || enrollment.Data.Secret == "" || !strings.HasPrefix(enrollment.Data.URI, "otpauth://totp/") {
+		t.Fatal("first TOTP enrollment did not return the factor and one-time secret")
+	}
+	listed := request(http.MethodGet, "/v1/me/factors", "")
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), enrollment.Data.Secret) || strings.Contains(listed.Body.String(), enrollment.Data.URI) {
+		t.Fatalf("factor listing status=%d or disclosed the enrollment secret", listed.Code)
+	}
+	if again := request(http.MethodPost, "/v1/me/factors", `{"kind":"totp","name":"phone"}`); again.Code != http.StatusForbidden {
+		t.Fatalf("password step-up proof was reused: status=%d", again.Code)
+	}
+	if after := request(http.MethodPost, "/v1/auth/step-up", stepBody); after.Code != http.StatusForbidden || !strings.Contains(after.Body.String(), "MFA_REQUIRED") {
+		t.Fatalf("password was accepted after TOTP enrollment: status=%d", after.Code)
+	}
+}
+
+func TestPasswordStepUpProofInvalidatedWhenAnotherTOTPIsEnrolled(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	password := "a sufficiently long current password"
+	hash, err := security.DefaultPasswordHasher().Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = 'usr_principal_actor'`, hash); err != nil {
+		t.Fatal(err)
+	}
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Factors: factors}
+	step := &StepUpInput{Authorization: "Bearer " + tokens.AccessToken}
+	step.Body.Password = secret.New(password)
+	step.Body.Operation = "me.factors.create"
+	step.Body.Request = json.RawMessage(`{"kind":"totp","name":"phone"}`)
+	if _, err := api.stepUp(ctx, step); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := factors.BeginTOTP(ctx, "usr_principal_actor", "principal-actor@example.test"); err != nil {
+		t.Fatal(err)
+	}
+	create := &FactorsInput{Authorization: step.Authorization}
+	create.Body.Kind = "totp"
+	create.Body.Name = "phone"
+	if _, err := api.createFactor(ctx, create); err == nil {
+		t.Fatal("password proof survived another TOTP enrollment")
+	} else {
+		assertPrincipalError(t, err, "STEP_UP_REQUIRED")
+	}
+}
+
+func TestFirstTOTPPasswordStepUpLimitsFailuresAcrossRequests(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	hash, err := security.DefaultPasswordHasher().Hash("a sufficiently long current password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET password_hash = $1 WHERE id = 'usr_principal_actor'`, hash); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
+	step := &StepUpInput{Authorization: "Bearer " + tokens.AccessToken}
+	step.Body.Operation = "me.factors.create"
+	step.Body.Request = json.RawMessage(`{"kind":"totp","name":"phone"}`)
+	step.Body.Password = secret.New("wrong password")
+	for attempt := 0; attempt < 5; attempt++ {
+		if _, err := api.stepUp(ctx, step); err == nil {
+			t.Fatal("wrong password issued a step-up proof")
+		} else {
+			assertPrincipalError(t, err, "UNAUTHENTICATED")
+		}
+	}
+	step.Body.Password = secret.New("a sufficiently long current password")
+	if _, err := api.stepUp(ctx, step); err == nil {
+		t.Fatal("correct password bypassed the failed-attempt limit")
+	} else {
+		assertPrincipalError(t, err, "rate_limited")
+	}
+}
+
 func TestTOTPFactorEnrollmentRequiresStepUpAndReturnsSecretOnce(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)

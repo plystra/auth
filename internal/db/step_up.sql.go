@@ -15,13 +15,19 @@ const consumeSessionStepUp = `-- name: ConsumeSessionStepUp :one
 UPDATE sessions
 SET step_up_operation = NULL,
     step_up_digest = NULL,
+    step_up_method = NULL,
     step_up_expires_at = NULL
-WHERE id = $1
+WHERE sessions.id = $1
   AND step_up_operation = $2
   AND step_up_digest = $3
   AND step_up_expires_at > now()
   AND revoked_at IS NULL
   AND expires_at > now()
+  AND (step_up_method = 'totp' OR (
+      step_up_method = 'password'
+      AND step_up_operation = 'me.factors.create'
+      AND NOT EXISTS (SELECT 1 FROM factors WHERE user_id = sessions.user_id AND kind = 'totp')
+  ))
 RETURNING user_id
 `
 
@@ -96,8 +102,9 @@ const setSessionStepUp = `-- name: SetSessionStepUp :one
 UPDATE sessions
 SET step_up_operation = $1,
     step_up_digest = $2,
+    step_up_method = $3,
     step_up_expires_at = now() + interval '5 minutes'
-WHERE id = $3
+WHERE id = $4
   AND revoked_at IS NULL
   AND expires_at > now()
 RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at,
@@ -108,6 +115,7 @@ RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_
 type SetSessionStepUpParams struct {
 	Operation pgtype.Text `json:"operation"`
 	Digest    []byte      `json:"digest"`
+	Method    pgtype.Text `json:"method"`
 	ID        string      `json:"id"`
 }
 
@@ -130,7 +138,12 @@ type SetSessionStepUpRow struct {
 }
 
 func (q *Queries) SetSessionStepUp(ctx context.Context, arg SetSessionStepUpParams) (SetSessionStepUpRow, error) {
-	row := q.db.QueryRow(ctx, setSessionStepUp, arg.Operation, arg.Digest, arg.ID)
+	row := q.db.QueryRow(ctx, setSessionStepUp,
+		arg.Operation,
+		arg.Digest,
+		arg.Method,
+		arg.ID,
+	)
 	var i SetSessionStepUpRow
 	err := row.Scan(
 		&i.ID,

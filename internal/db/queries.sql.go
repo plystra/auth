@@ -1691,6 +1691,21 @@ func (q *Queries) InsertIdempotencyKey(ctx context.Context, arg InsertIdempotenc
 	return i, err
 }
 
+const invalidatePasswordStepUpForUser = `-- name: InvalidatePasswordStepUpForUser :exec
+UPDATE sessions
+SET step_up_operation = NULL, step_up_digest = NULL, step_up_method = NULL, step_up_expires_at = NULL
+WHERE user_id = $1 AND step_up_method = 'password'
+`
+
+type InvalidatePasswordStepUpForUserParams struct {
+	UserID string `json:"user_id"`
+}
+
+func (q *Queries) InvalidatePasswordStepUpForUser(ctx context.Context, arg InvalidatePasswordStepUpForUserParams) error {
+	_, err := q.db.Exec(ctx, invalidatePasswordStepUpForUser, arg.UserID)
+	return err
+}
+
 const linkUserMember = `-- name: LinkUserMember :exec
 INSERT INTO user_members (user_id, member_id) VALUES ($1, $2) ON CONFLICT DO NOTHING
 `

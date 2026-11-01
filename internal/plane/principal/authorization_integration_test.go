@@ -1449,7 +1449,8 @@ func seedStepUpProof(t *testing.T, st *store.Store, sessionID, operation string,
 	}
 	if _, err := st.Pool.Exec(context.Background(), `
 		UPDATE sessions
-		SET step_up_operation = $2, step_up_digest = $3, step_up_expires_at = now() + interval '5 minutes'
+		SET step_up_operation = $2, step_up_digest = $3, step_up_method = 'totp',
+		    step_up_expires_at = now() + interval '5 minutes'
 		WHERE id = $1
 	`, sessionID, operation, digest); err != nil {
 		t.Fatal(err)

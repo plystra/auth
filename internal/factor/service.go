@@ -77,6 +77,9 @@ func (s *Service) beginTOTP(ctx context.Context, userID, email, name string) (En
 	}
 	var enrollment Enrollment
 	e = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID}); err != nil {
+			return err
+		}
 		var err error
 		enrollment, err = s.beginTOTPWithQueries(ctx, q, userID, name, key.Secret(), key.URL(), blob)
 		return err
@@ -106,6 +109,9 @@ func (s *Service) EnrollTOTPForUser(ctx context.Context, userID, email, name str
 	}
 	var enrollment Enrollment
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID}); err != nil {
+			return err
+		}
 		if _, required := stepup.RequirementFromContext(ctx); required {
 			if s.StepUp == nil {
 				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
@@ -145,6 +151,9 @@ func (s *Service) BeginTOTPTx(ctx context.Context, q *db.Queries, userID, email 
 func (s *Service) beginTOTPWithQueries(ctx context.Context, q *db.Queries, userID, name, raw, uri string, blob []byte) (Enrollment, error) {
 	id := ids.New[ids.FactorID]("fac")
 	if _, err := q.CreateFactor(ctx, db.CreateFactorParams{ID: string(id), UserID: userID, Kind: "totp", Name: name, SecretCiphertext: blob}); err != nil {
+		return Enrollment{}, err
+	}
+	if err := q.InvalidatePasswordStepUpForUser(ctx, db.InvalidatePasswordStepUpForUserParams{UserID: userID}); err != nil {
 		return Enrollment{}, err
 	}
 	return Enrollment{FactorID: string(id), Secret: secret.New(raw), URI: uri}, nil
