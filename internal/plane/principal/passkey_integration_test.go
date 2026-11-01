@@ -12,6 +12,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,10 +23,12 @@ import (
 	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/stepup"
 )
@@ -265,6 +268,146 @@ func TestPasskeyEnrollmentConcurrentFinishAndAuditRollback(t *testing.T) {
 	}
 }
 
+func TestPasskeyFirstFactorSignInRejectsClonesAndPreservesAMR(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	web, err := webauthn.New(&webauthn.Config{RPID: "auth.test", RPDisplayName: "Plystra Auth", RPOrigins: []string{"https://auth.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions, WebAuthn: web}
+	sessions.Factors = factors
+	enrollmentSession, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "enrollment", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedStepUpProof(t, st, enrollmentSession.SessionID, "me.factors.create", map[string]any{"kind": "passkey", "name": "login-key"})
+	enrollmentCtx, err := principalPasskeyStepUpContext(enrollmentSession.SessionID, "login-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	challenge, err := factors.BeginPasskeyEnrollment(enrollmentCtx, "usr_principal_actor", enrollmentSession.SessionID, "login-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, credentialID, private := testPasskeyCredentialWithKey(t, challenge.Options.Response.Challenge.String(), "https://auth.test", "auth.test", true)
+	if _, err := factors.FinishPasskeyEnrollment(ctx, "usr_principal_actor", enrollmentSession.SessionID, challenge.ID, registration); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &account.Service{Store: st, Sessions: sessions, Authorization: authz}
+	api := &API{Accounts: accounts, Sessions: sessions, Signer: signer}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	post := func(path string, body []byte) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(string(body)))
+		r.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, r)
+		return response
+	}
+	begin := func(email string) account.SignInChallenge {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"email": email, "method": "passkey"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := post("/v1/auth/sign-in", body)
+		if response.Code != http.StatusOK {
+			t.Fatalf("passkey sign-in begin status=%d body=%s", response.Code, response.Body.String())
+		}
+		var parsed struct {
+			Data account.SignInChallenge `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		return parsed.Data
+	}
+	known := begin("principal-actor@example.test")
+	unknown := begin("unknown-passkey@example.test")
+	if known.NextStep != "passkey" || unknown.NextStep != known.NextStep || known.PasskeyOptions == nil || unknown.PasskeyOptions == nil ||
+		len(known.PasskeyOptions.Response.AllowedCredentials) != 0 || len(unknown.PasskeyOptions.Response.AllowedCredentials) != 0 ||
+		known.PasskeyOptions.Response.RelyingPartyID != unknown.PasskeyOptions.Response.RelyingPartyID {
+		t.Fatal("passkey sign-in start exposed account or credential existence")
+	}
+	assertion := func(challenge account.SignInChallenge, origin string, counter uint32) []byte {
+		t.Helper()
+		credential := testPasskeyAssertion(t, private, credentialID, challenge.PasskeyOptions.Response.Challenge.String(), origin, "auth.test", "usr_principal_actor", counter)
+		body, err := json.Marshal(map[string]any{"credential": json.RawMessage(credential)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	unknownResult := post("/v1/auth/sign-in/"+unknown.AttemptID, assertion(unknown, "https://auth.test", 1))
+	if unknownResult.Code != http.StatusUnauthorized || !strings.Contains(unknownResult.Body.String(), "invalid_credentials") {
+		t.Fatalf("unknown account passkey response status=%d body=%s", unknownResult.Code, unknownResult.Body.String())
+	}
+	badOrigin := post("/v1/auth/sign-in/"+known.AttemptID, assertion(known, "https://evil.test", 1))
+	if badOrigin.Code != http.StatusUnauthorized || !strings.Contains(badOrigin.Body.String(), "invalid_credentials") {
+		t.Fatalf("wrong-origin passkey response status=%d body=%s", badOrigin.Code, badOrigin.Body.String())
+	}
+	if replay := post("/v1/auth/sign-in/"+known.AttemptID, assertion(known, "https://auth.test", 1)); replay.Code != http.StatusBadRequest {
+		t.Fatalf("failed passkey assertion reused a challenge: status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	wrongRP := begin("principal-actor@example.test")
+	wrongRPCredential := testPasskeyAssertion(t, private, credentialID, wrongRP.PasskeyOptions.Response.Challenge.String(), "https://auth.test", "evil.test", "usr_principal_actor", 1)
+	wrongRPBody, err := json.Marshal(map[string]any{"credential": json.RawMessage(wrongRPCredential)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wrong := post("/v1/auth/sign-in/"+wrongRP.AttemptID, wrongRPBody); wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-RP passkey response status=%d body=%s", wrong.Code, wrong.Body.String())
+	}
+	known = begin("principal-actor@example.test")
+	completed := post("/v1/auth/sign-in/"+known.AttemptID, assertion(known, "https://auth.test", 1))
+	if completed.Code != http.StatusOK {
+		t.Fatalf("passkey sign-in status=%d body=%s", completed.Code, completed.Body.String())
+	}
+	var result struct {
+		Data account.AuthResult `json:"data"`
+	}
+	if err := json.Unmarshal(completed.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Data.Tokens == nil {
+		t.Fatal("passkey sign-in did not issue a session")
+	}
+	claims, err := signer.Verify(result.Data.Tokens.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Assurance != 2 || !slices.Equal(claims.AMR, []string{"webauthn"}) || claims.MemberID != actor.ID {
+		t.Fatalf("passkey claims aal=%d amr=%v member=%s", claims.Assurance, claims.AMR, claims.MemberID)
+	}
+	refreshed, err := sessions.Refresh(ctx, result.Data.Tokens.RefreshToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshClaims, err := signer.Verify(refreshed.AccessToken, time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil || refreshClaims.Assurance != 2 || !slices.Equal(refreshClaims.AMR, []string{"webauthn"}) {
+		t.Fatalf("refreshed passkey claims=%+v err=%v", refreshClaims, err)
+	}
+	var storedCount int64
+	if err := st.Pool.QueryRow(ctx, `SELECT counter FROM factors WHERE credential_id = $1`, credentialID).Scan(&storedCount); err != nil || storedCount != 1 {
+		t.Fatalf("passkey counter=%d err=%v", storedCount, err)
+	}
+	if replay := post("/v1/auth/sign-in/"+known.AttemptID, assertion(known, "https://auth.test", 2)); replay.Code != http.StatusBadRequest {
+		t.Fatalf("replayed passkey attempt status=%d body=%s", replay.Code, replay.Body.String())
+	}
+	cloned := begin("principal-actor@example.test")
+	cloneResult := post("/v1/auth/sign-in/"+cloned.AttemptID, assertion(cloned, "https://auth.test", 1))
+	if cloneResult.Code != http.StatusUnauthorized || !strings.Contains(cloneResult.Body.String(), "invalid_credentials") {
+		t.Fatalf("cloned passkey status=%d body=%s", cloneResult.Code, cloneResult.Body.String())
+	}
+	var cloneAudits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'factor.passkey.clone_detected' AND actor_id = 'usr_principal_actor'`).Scan(&cloneAudits); err != nil || cloneAudits != 1 {
+		t.Fatalf("clone audit count=%d err=%v", cloneAudits, err)
+	}
+}
+
 func principalPasskeyStepUpContext(sessionID, name string) (context.Context, error) {
 	digest, err := stepup.DigestValue(map[string]any{"kind": "passkey", "name": name})
 	if err != nil {
@@ -274,6 +417,11 @@ func principalPasskeyStepUpContext(sessionID, name string) (context.Context, err
 }
 
 func testPasskeyCredential(t *testing.T, challenge, origin, rpID string, verified bool) ([]byte, []byte) {
+	response, credentialID, _ := testPasskeyCredentialWithKey(t, challenge, origin, rpID, verified)
+	return response, credentialID
+}
+
+func testPasskeyCredentialWithKey(t *testing.T, challenge, origin, rpID string, verified bool) ([]byte, []byte, *ecdsa.PrivateKey) {
 	t.Helper()
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -327,5 +475,38 @@ func testPasskeyCredential(t *testing.T, challenge, origin, rpID string, verifie
 	if err != nil {
 		t.Fatal(err)
 	}
-	return response, credentialID
+	return response, credentialID, private
+}
+
+func testPasskeyAssertion(t *testing.T, private *ecdsa.PrivateKey, credentialID []byte, challenge, origin, rpID, userID string, counter uint32) []byte {
+	t.Helper()
+	rpHash := sha256.Sum256([]byte(rpID))
+	authData := append([]byte(nil), rpHash[:]...)
+	authData = append(authData, byte(protocol.FlagUserPresent|protocol.FlagUserVerified))
+	authData = binary.BigEndian.AppendUint32(authData, counter)
+	clientData, err := json.Marshal(map[string]any{"type": "webauthn.get", "challenge": challenge, "origin": origin, "crossOrigin": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientHash := sha256.Sum256(clientData)
+	signed := append(append([]byte(nil), authData...), clientHash[:]...)
+	digest := sha256.Sum256(signed)
+	signature, err := ecdsa.SignASN1(rand.Reader, private, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := base64.RawURLEncoding.EncodeToString(credentialID)
+	response, err := json.Marshal(map[string]any{
+		"id": id, "rawId": id, "type": "public-key",
+		"response": map[string]any{
+			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
+			"signature":         base64.RawURLEncoding.EncodeToString(signature),
+			"userHandle":        base64.RawURLEncoding.EncodeToString([]byte(userID)),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
 }

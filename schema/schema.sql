@@ -1342,3 +1342,12 @@ CREATE INDEX passkey_challenges_active_idx ON passkey_challenges (user_id, expir
 
 CREATE UNIQUE INDEX factors_webauthn_credential_id_idx ON factors (credential_id)
     WHERE kind = 'webauthn';
+
+
+ALTER TABLE sign_in_attempts
+    ADD COLUMN method text NOT NULL DEFAULT 'password' CHECK (method IN ('password', 'passkey')),
+    ADD COLUMN passkey_session jsonb;
+
+ALTER TABLE sign_in_attempts
+    ADD CONSTRAINT sign_in_attempts_passkey_session_check
+    CHECK ((method = 'passkey') = (passkey_session IS NOT NULL));

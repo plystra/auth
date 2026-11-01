@@ -2,11 +2,13 @@ package account
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
@@ -23,9 +25,43 @@ const (
 )
 
 type SignInChallenge struct {
-	AttemptID string    `json:"attempt_id"`
-	NextStep  string    `json:"next_step"`
-	ExpiresAt time.Time `json:"expires_at"`
+	AttemptID      string                        `json:"attempt_id"`
+	NextStep       string                        `json:"next_step"`
+	ExpiresAt      time.Time                     `json:"expires_at"`
+	PasskeyOptions *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
+}
+
+func (s *Service) BeginPasskeySignIn(ctx context.Context, in LoginInput) (SignInChallenge, error) {
+	email := strings.TrimSpace(strings.ToLower(in.Email))
+	if !validEmail(email) {
+		return SignInChallenge{}, apierr.New("invalid_request", "a valid email is required")
+	}
+	if err := s.allowLoginRateLimits(ctx, email, in.IP); err != nil {
+		return SignInChallenge{}, err
+	}
+	if s.Sessions == nil || s.Sessions.Factors == nil {
+		return SignInChallenge{}, apierr.New("UNAVAILABLE", "passkey sign-in is unavailable")
+	}
+	options, sessionData, expiresAt, err := s.Sessions.Factors.BeginPasskeyLogin()
+	if err != nil {
+		return SignInChallenge{}, err
+	}
+	var userID pgtype.Text
+	row, err := s.Store.Queries().GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email})
+	if err == nil {
+		userID = pgtype.Text{String: row.ID, Valid: true}
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return SignInChallenge{}, err
+	}
+	attempt, err := s.Store.Queries().CreatePasskeySignInAttempt(ctx, db.CreatePasskeySignInAttemptParams{
+		ID: string(ids.New[ids.SignInAttemptID]("sia")), UserID: userID,
+		EmailNormalized: email, Ip: nullableText(rateIdentity(in.IP)), UserAgent: nullableText(in.UserAgent),
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}, PasskeySession: sessionData,
+	})
+	if err != nil {
+		return SignInChallenge{}, err
+	}
+	return SignInChallenge{AttemptID: attempt.ID, NextStep: "passkey", ExpiresAt: expiresAt, PasskeyOptions: options}, nil
 }
 
 // BeginSignIn creates a short-lived server-side workflow. The response is the
@@ -87,7 +123,7 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 		if err != nil {
 			return err
 		}
-		if !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || attempt.PasswordVerifiedAt.Valid {
+		if attempt.Method != "password" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || attempt.PasswordVerifiedAt.Valid {
 			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 		}
 		if !attempt.UserID.Valid {
@@ -194,7 +230,7 @@ func (s *Service) CompleteSignInTOTP(ctx context.Context, attemptID, code string
 		if err != nil {
 			return err
 		}
-		if !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || !attempt.PasswordVerifiedAt.Valid || !attempt.UserID.Valid {
+		if attempt.Method != "password" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || !attempt.PasswordVerifiedAt.Valid || !attempt.UserID.Valid {
 			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 		}
 		user, err = q.GetUserByID(ctx, db.GetUserByIDParams{ID: attempt.UserID.String})
@@ -239,6 +275,96 @@ func (s *Service) CompleteSignInTOTP(ctx context.Context, attemptID, code string
 		return AuthResult{}, err
 	}
 	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, user.ID, memberID, ip, userAgent, 2, []string{"pwd", "otp"})
+	if err != nil {
+		return AuthResult{}, err
+	}
+	return AuthResult{User: toPublicUser(user.ID, user.Email, user.EmailVerifiedAt.Valid, user.Status, user.CreatedAt.Time), Tokens: &tokens}, nil
+}
+
+func (s *Service) CompletePasskeySignIn(ctx context.Context, attemptID string, response json.RawMessage, ip net.IP, userAgent string) (AuthResult, error) {
+	attemptID = strings.TrimSpace(attemptID)
+	if !ids.SignInAttemptID(attemptID).Valid() {
+		return AuthResult{}, apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
+	}
+	if err := s.allowSignInAttemptRateLimits(ctx, attemptID, ip); err != nil {
+		return AuthResult{}, err
+	}
+	if s.Sessions == nil || s.Sessions.Factors == nil {
+		return AuthResult{}, apierr.New("UNAVAILABLE", "passkey sign-in is unavailable")
+	}
+	var user db.GetUserByIDRow
+	var authenticationErr *apierr.Error
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		attempt, err := q.LockSignInAttempt(ctx, db.LockSignInAttemptParams{ID: attemptID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
+		}
+		if err != nil {
+			return err
+		}
+		if attempt.Method != "passkey" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid {
+			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
+		}
+		if !attempt.UserID.Valid {
+			if _, err := q.IncrementSignInAttemptFailure(ctx, db.IncrementSignInAttemptFailureParams{ID: attemptID, MaxFailures: int32(maxSignInFailures)}); err != nil {
+				return err
+			}
+			if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
+				return err
+			}
+			authenticationErr = apierr.New("invalid_credentials", "passkey is invalid")
+			return nil
+		}
+		user, err = q.GetUserByID(ctx, db.GetUserByIDParams{ID: attempt.UserID.String})
+		if err != nil {
+			return err
+		}
+		if user.Status != "active" || user.DisabledAt.Valid || user.PasswordResetRequiredAt.Valid {
+			if _, err := q.IncrementSignInAttemptFailure(ctx, db.IncrementSignInAttemptFailureParams{ID: attemptID, MaxFailures: int32(maxSignInFailures)}); err != nil {
+				return err
+			}
+			if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
+				return err
+			}
+			authenticationErr = apierr.New("invalid_credentials", "passkey is invalid")
+			return nil
+		}
+		err = s.Sessions.Factors.VerifyPasskeyTx(ctx, q, user.ID, attempt.PasskeySession, response)
+		var public *apierr.Error
+		if errors.Is(err, factor.ErrInvalidPasskey) || errors.Is(err, factor.ErrClonedPasskey) || (errors.As(err, &public) && public.Code == "UNAUTHENTICATED") {
+			if _, failureErr := q.IncrementSignInAttemptFailure(ctx, db.IncrementSignInAttemptFailureParams{ID: attemptID, MaxFailures: int32(maxSignInFailures)}); failureErr != nil {
+				return failureErr
+			}
+			if errors.Is(err, factor.ErrClonedPasskey) {
+				if auditErr := audit.Write(ctx, q, "user", user.ID, "factor.passkey.clone_detected", user.ID, "failure"); auditErr != nil {
+					return auditErr
+				}
+			}
+			if consumeErr := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); consumeErr != nil {
+				return consumeErr
+			}
+			authenticationErr = apierr.New("invalid_credentials", "passkey is invalid")
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "user", user.ID, "factor.passkey.sign_in", user.ID, "success")
+	})
+	if err != nil {
+		return AuthResult{}, err
+	}
+	if authenticationErr != nil {
+		return AuthResult{}, authenticationErr
+	}
+	memberID, err := s.defaultMemberID(ctx, user.ID)
+	if err != nil {
+		return AuthResult{}, err
+	}
+	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, user.ID, memberID, ip, userAgent, 2, []string{"webauthn"})
 	if err != nil {
 		return AuthResult{}, err
 	}

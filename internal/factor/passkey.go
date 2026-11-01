@@ -1,6 +1,7 @@
 package factor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,9 @@ type PasskeyChallenge struct {
 }
 
 const passkeyChallengeLifetime = 5 * time.Minute
+
+var ErrInvalidPasskey = errors.New("invalid passkey assertion")
+var ErrClonedPasskey = errors.New("passkey authenticator counter did not advance")
 
 type passkeyUser struct {
 	id          string
@@ -63,12 +67,86 @@ func (s *Service) passkeyUserTx(ctx context.Context, q *db.Queries, userID strin
 		var credential webauthn.Credential
 		err = json.Unmarshal(plain, &credential)
 		clear(plain)
-		if err != nil || len(credential.ID) == 0 || !strings.EqualFold(row.Kind, "webauthn") {
+		if err != nil || len(credential.ID) == 0 || !bytes.Equal(row.CredentialID, credential.ID) ||
+			(row.PublicKey != nil && !bytes.Equal(row.PublicKey, credential.PublicKey)) ||
+			!strings.EqualFold(row.Kind, "webauthn") || int64(credential.Authenticator.SignCount) != row.Counter {
 			return passkeyUser{}, apierr.New("UNAVAILABLE", "stored passkey is invalid")
 		}
 		user.credentials = append(user.credentials, credential)
 	}
 	return user, nil
+}
+
+func (s *Service) BeginPasskeyLogin() (*protocol.CredentialAssertion, []byte, time.Time, error) {
+	if s == nil || s.WebAuthn == nil {
+		return nil, nil, time.Time{}, apierr.New("UNAVAILABLE", "passkey sign-in is unavailable")
+	}
+	assertion, session, err := s.WebAuthn.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		return nil, nil, time.Time{}, err
+	}
+	session.Expires = time.Now().UTC().Add(passkeyChallengeLifetime)
+	encoded, err := json.Marshal(session)
+	return assertion, encoded, session.Expires, err
+}
+
+func (s *Service) VerifyPasskeyTx(ctx context.Context, q *db.Queries, userID string, sessionData, rawResponse []byte) error {
+	if s == nil || s.WebAuthn == nil || len(rawResponse) == 0 || len(rawResponse) > 64*1024 {
+		return ErrInvalidPasskey
+	}
+	user, err := s.passkeyUserTx(ctx, q, userID)
+	if err != nil {
+		return err
+	}
+	var session webauthn.SessionData
+	if err := json.Unmarshal(sessionData, &session); err != nil || session.Challenge == "" {
+		return apierr.New("UNAVAILABLE", "stored passkey sign-in challenge is invalid")
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBytes(rawResponse)
+	if err != nil {
+		return ErrInvalidPasskey
+	}
+	credential, err := s.WebAuthn.ValidateDiscoverableLogin(func(rawID, userHandle []byte) (webauthn.User, error) {
+		if !bytes.Equal(userHandle, []byte(userID)) {
+			return nil, ErrInvalidPasskey
+		}
+		for _, owned := range user.credentials {
+			if bytes.Equal(rawID, owned.ID) {
+				return user, nil
+			}
+		}
+		return nil, ErrInvalidPasskey
+	}, session, parsed)
+	if err != nil || !credential.Flags.UserVerified {
+		return ErrInvalidPasskey
+	}
+	if credential.Authenticator.CloneWarning {
+		return ErrClonedPasskey
+	}
+	plain, err := json.Marshal(credential)
+	if err != nil {
+		return err
+	}
+	aead, err := s.cipher()
+	if err != nil {
+		return err
+	}
+	ciphertext, err := seal(aead, plain)
+	clear(plain)
+	if err != nil {
+		return err
+	}
+	updated, err := q.UpdatePasskeyAfterLogin(ctx, db.UpdatePasskeyAfterLoginParams{
+		CredentialID: credential.ID, UserID: userID, SecretCiphertext: ciphertext,
+		Counter: int64(credential.Authenticator.SignCount),
+	})
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return apierr.New("UNAVAILABLE", "stored passkey is unavailable")
+	}
+	return nil
 }
 
 func (s *Service) BeginPasskeyEnrollment(ctx context.Context, userID, sessionID, name string) (PasskeyChallenge, error) {
@@ -114,7 +192,7 @@ func (s *Service) BeginPasskeyEnrollment(ctx context.Context, userID, sessionID,
 		}); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "user", userID, "factor.passkey.begin", id, "success"); err != nil {
+		if err := audit.Write(ctx, q, "user", userID, "factor.passkey.begin", userID, "success"); err != nil {
 			return err
 		}
 		result = PasskeyChallenge{ID: id, Options: creation, ExpiresAt: session.Expires}
@@ -168,7 +246,7 @@ func (s *Service) FinishPasskeyEnrollment(ctx context.Context, userID, sessionID
 			return err
 		}
 		if validationErr != nil {
-			return audit.Write(ctx, q, "user", userID, "factor.passkey.finish", challengeID, "failure")
+			return audit.Write(ctx, q, "user", userID, "factor.passkey.finish", userID, "failure")
 		}
 		plain, err := json.Marshal(credential)
 		if err != nil {
@@ -186,7 +264,7 @@ func (s *Service) FinishPasskeyEnrollment(ctx context.Context, userID, sessionID
 		factorID = string(ids.New[ids.FactorID]("fac"))
 		if _, err := q.CreateFactor(ctx, db.CreateFactorParams{
 			ID: factorID, UserID: userID, Kind: "webauthn", Name: challenge.Name,
-			SecretCiphertext: ciphertext, CredentialID: credential.ID,
+			SecretCiphertext: ciphertext, CredentialID: credential.ID, PublicKey: credential.PublicKey,
 			Counter: pgtype.Int8{Int64: int64(credential.Authenticator.SignCount), Valid: true},
 		}); err != nil {
 			return err

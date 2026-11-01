@@ -26,6 +26,56 @@ func (q *Queries) ConsumeSignInAttempt(ctx context.Context, arg ConsumeSignInAtt
 	return err
 }
 
+const createPasskeySignInAttempt = `-- name: CreatePasskeySignInAttempt :one
+INSERT INTO sign_in_attempts (
+    id, user_id, email_normalized, ip, user_agent, expires_at, method, passkey_session
+)
+VALUES (
+    $1, $2, $3,
+    $4, $5, $6, 'passkey', $7
+)
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at, method, passkey_session
+`
+
+type CreatePasskeySignInAttemptParams struct {
+	ID              string             `json:"id"`
+	UserID          pgtype.Text        `json:"user_id"`
+	EmailNormalized string             `json:"email_normalized"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	PasskeySession  []byte             `json:"passkey_session"`
+}
+
+func (q *Queries) CreatePasskeySignInAttempt(ctx context.Context, arg CreatePasskeySignInAttemptParams) (SignInAttempt, error) {
+	row := q.db.QueryRow(ctx, createPasskeySignInAttempt,
+		arg.ID,
+		arg.UserID,
+		arg.EmailNormalized,
+		arg.Ip,
+		arg.UserAgent,
+		arg.ExpiresAt,
+		arg.PasskeySession,
+	)
+	var i SignInAttempt
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.EmailNormalized,
+		&i.Ip,
+		&i.UserAgent,
+		&i.FailedAttempts,
+		&i.ExpiresAt,
+		&i.ConsumedAt,
+		&i.LockedAt,
+		&i.CreatedAt,
+		&i.PasswordVerifiedAt,
+		&i.Method,
+		&i.PasskeySession,
+	)
+	return i, err
+}
+
 const createSignInAttempt = `-- name: CreateSignInAttempt :one
 INSERT INTO sign_in_attempts (
     id, user_id, email_normalized, ip, user_agent, expires_at
@@ -34,7 +84,7 @@ VALUES (
     $1, $2, $3,
     $4, $5, $6
 )
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at, method, passkey_session
 `
 
 type CreateSignInAttemptParams struct {
@@ -68,6 +118,8 @@ func (q *Queries) CreateSignInAttempt(ctx context.Context, arg CreateSignInAttem
 		&i.LockedAt,
 		&i.CreatedAt,
 		&i.PasswordVerifiedAt,
+		&i.Method,
+		&i.PasskeySession,
 	)
 	return i, err
 }
@@ -97,7 +149,7 @@ UPDATE sign_in_attempts
 SET failed_attempts = failed_attempts + 1,
     locked_at = CASE WHEN failed_attempts + 1 >= $1 THEN now() ELSE locked_at END
 WHERE id = $2
-RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
+RETURNING id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at, method, passkey_session
 `
 
 type IncrementSignInAttemptFailureParams struct {
@@ -120,12 +172,14 @@ func (q *Queries) IncrementSignInAttemptFailure(ctx context.Context, arg Increme
 		&i.LockedAt,
 		&i.CreatedAt,
 		&i.PasswordVerifiedAt,
+		&i.Method,
+		&i.PasskeySession,
 	)
 	return i, err
 }
 
 const lockSignInAttempt = `-- name: LockSignInAttempt :one
-SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at
+SELECT id, user_id, email_normalized, ip, user_agent, failed_attempts, expires_at, consumed_at, locked_at, created_at, password_verified_at, method, passkey_session
 FROM sign_in_attempts
 WHERE id = $1
 FOR UPDATE
@@ -150,6 +204,8 @@ func (q *Queries) LockSignInAttempt(ctx context.Context, arg LockSignInAttemptPa
 		&i.LockedAt,
 		&i.CreatedAt,
 		&i.PasswordVerifiedAt,
+		&i.Method,
+		&i.PasskeySession,
 	)
 	return i, err
 }

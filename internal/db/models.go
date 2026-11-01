@@ -457,6 +457,8 @@ type SignInAttempt struct {
 	LockedAt           pgtype.Timestamptz `json:"locked_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	PasswordVerifiedAt pgtype.Timestamptz `json:"password_verified_at"`
+	Method             string             `json:"method"`
+	PasskeySession     []byte             `json:"passkey_session"`
 }
 
 type Space struct {

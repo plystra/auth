@@ -160,7 +160,8 @@ type LoginInput struct {
 }
 type SignInStartInput struct {
 	Body struct {
-		Email string `json:"email"`
+		Email  string `json:"email"`
+		Method string `json:"method,omitempty" enum:"password,passkey"`
 	}
 	XForwardedFor string `header:"X-Forwarded-For"`
 	UserAgent     string `header:"User-Agent"`
@@ -168,8 +169,9 @@ type SignInStartInput struct {
 type SignInAttemptInput struct {
 	AttemptID string `path:"attempt_id"`
 	Body      struct {
-		Password string `json:"password,omitempty"`
-		MFACode  string `json:"mfa_code,omitempty"`
+		Password   string          `json:"password,omitempty"`
+		MFACode    string          `json:"mfa_code,omitempty"`
+		Credential json.RawMessage `json:"credential,omitempty"`
 	}
 	XForwardedFor string `header:"X-Forwarded-For"`
 	UserAgent     string `header:"User-Agent"`
@@ -288,7 +290,17 @@ func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutp
 	if len(ip) == 0 && in.XForwardedFor != "" {
 		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))
 	}
-	result, e := a.Accounts.BeginSignIn(ctx, account.LoginInput{Email: in.Body.Email, IP: ip, UserAgent: in.UserAgent})
+	login := account.LoginInput{Email: in.Body.Email, IP: ip, UserAgent: in.UserAgent}
+	var result account.SignInChallenge
+	var e error
+	switch in.Body.Method {
+	case "passkey":
+		result, e = a.Accounts.BeginPasskeySignIn(ctx, login)
+	case "", "password":
+		result, e = a.Accounts.BeginSignIn(ctx, login)
+	default:
+		return nil, apierr.New("VALIDATION_FAILED", "sign-in method is invalid")
+	}
 	if e != nil {
 		return nil, e
 	}
@@ -297,7 +309,17 @@ func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutp
 	return out, nil
 }
 func (a *API) loginAttempt(ctx context.Context, in *SignInAttemptInput) (*AuthOutput, error) {
-	if in.Body.Password != "" && in.Body.MFACode != "" {
+	steps := 0
+	if in.Body.Password != "" {
+		steps++
+	}
+	if in.Body.MFACode != "" {
+		steps++
+	}
+	if len(in.Body.Credential) != 0 {
+		steps++
+	}
+	if steps != 1 {
 		return nil, apierr.New("VALIDATION_FAILED", "submit one sign-in step at a time")
 	}
 	ip := requestinfo.Get(ctx).IP
@@ -306,7 +328,9 @@ func (a *API) loginAttempt(ctx context.Context, in *SignInAttemptInput) (*AuthOu
 	}
 	var result account.AuthResult
 	var err error
-	if in.Body.MFACode != "" {
+	if len(in.Body.Credential) != 0 {
+		result, err = a.Accounts.CompletePasskeySignIn(ctx, in.AttemptID, in.Body.Credential, ip, in.UserAgent)
+	} else if in.Body.MFACode != "" {
 		result, err = a.Accounts.CompleteSignInTOTP(ctx, in.AttemptID, in.Body.MFACode, ip, in.UserAgent)
 	} else {
 		result, err = a.Accounts.CompleteSignIn(ctx, in.AttemptID, in.Body.Password, ip, in.UserAgent)

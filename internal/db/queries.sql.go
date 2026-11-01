@@ -3163,6 +3163,32 @@ func (q *Queries) UpdateGroupParent(ctx context.Context, arg UpdateGroupParentPa
 	return err
 }
 
+const updatePasskeyAfterLogin = `-- name: UpdatePasskeyAfterLogin :execrows
+UPDATE factors SET secret_ciphertext = $1,
+    counter = $2, last_used_at = now()
+WHERE credential_id = $3 AND user_id = $4 AND kind = 'webauthn'
+`
+
+type UpdatePasskeyAfterLoginParams struct {
+	SecretCiphertext []byte `json:"secret_ciphertext"`
+	Counter          int64  `json:"counter"`
+	CredentialID     []byte `json:"credential_id"`
+	UserID           string `json:"user_id"`
+}
+
+func (q *Queries) UpdatePasskeyAfterLogin(ctx context.Context, arg UpdatePasskeyAfterLoginParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updatePasskeyAfterLogin,
+		arg.SecretCiphertext,
+		arg.Counter,
+		arg.CredentialID,
+		arg.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const updateRole = `-- name: UpdateRole :one
 UPDATE roles
 SET name = $1, description = $2

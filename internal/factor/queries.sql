@@ -64,3 +64,8 @@ WHERE id = sqlc.arg(id) AND consumed_at IS NULL AND expires_at > now();
 -- name: ListPasskeysForUser :many
 SELECT id, user_id, kind, name, secret_ciphertext, credential_id, public_key, counter, created_at, last_used_at
 FROM factors WHERE user_id = sqlc.arg(user_id) AND kind = 'webauthn' ORDER BY id;
+
+-- name: UpdatePasskeyAfterLogin :execrows
+UPDATE factors SET secret_ciphertext = sqlc.arg(secret_ciphertext),
+    counter = sqlc.arg(counter), last_used_at = now()
+WHERE credential_id = sqlc.arg(credential_id) AND user_id = sqlc.arg(user_id) AND kind = 'webauthn';
