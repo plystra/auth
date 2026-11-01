@@ -115,6 +115,106 @@ func TestInvitationTokenConcurrentConsumptionIsSingleUse(t *testing.T) {
 	}
 }
 
+func TestInvitationAcceptanceRequiresVerifiedMatchingAccountAndActiveSpace(t *testing.T) {
+	ctx := context.Background()
+	st := newInvitationStore(t)
+	svc := &Service{Store: st}
+	const userID = "usr_invitation_accept"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ($1, 'invitee@example.test', 'invitee@example.test', 'hash', 'active')
+	`, userID); err != nil {
+		t.Fatal(err)
+	}
+	_, raw, err := svc.Create(ctx, CreateInput{SpaceID: "spc_01h00000000000000000000000", Email: "invitee@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AcceptVerifiedUser(ctx, raw, userID); !hasCode(err, "EMAIL_VERIFICATION_REQUIRED") {
+		t.Fatalf("unverified account acceptance = %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET email_verified_at = now() WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET email_normalized = 'different@example.test' WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AcceptVerifiedUser(ctx, raw, userID); !hasCode(err, "invalid_grant") {
+		t.Fatalf("mismatched email acceptance = %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET email_normalized = 'invitee@example.test' WHERE id = $1`, userID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = 'spc_01h00000000000000000000000'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AcceptVerifiedUser(ctx, raw, userID); !hasCode(err, "SPACE_INACTIVE") {
+		t.Fatalf("suspended Space acceptance = %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'active' WHERE id = 'spc_01h00000000000000000000000'`); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := svc.AcceptVerifiedUser(ctx, raw, userID)
+	if err != nil || accepted.MemberID == "" {
+		t.Fatalf("valid invitation was consumed by a rejected attempt: accepted=%+v err=%v", accepted, err)
+	}
+	existing, existingRaw, err := svc.Create(ctx, CreateInput{
+		SpaceID: "spc_01h00000000000000000000000", Email: "invitee@example.test", MemberID: "mem_invitation_target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AcceptVerifiedUser(ctx, existingRaw, userID); !hasCode(err, "AUTHORITY_DELTA_NOT_COVERED") {
+		t.Fatalf("existing-member invitation bypassed delta coverage: %v", err)
+	}
+	var consumed int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM invitation_tokens WHERE id = $1 AND consumed_at IS NOT NULL`, existing.ID).Scan(&consumed); err != nil {
+		t.Fatal(err)
+	}
+	if consumed != 0 {
+		t.Fatal("rejected existing-member invitation was consumed")
+	}
+}
+
+func TestInvitationAcceptanceRollsBackOnAuditFailure(t *testing.T) {
+	ctx := context.Background()
+	st := newInvitationStore(t)
+	svc := &Service{Store: st}
+	const userID = "usr_invitation_rollback"
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO users (id, email, email_normalized, password_hash, status, email_verified_at)
+		VALUES ($1, 'rollback@example.test', 'rollback@example.test', 'hash', 'active', now())
+	`, userID); err != nil {
+		t.Fatal(err)
+	}
+	inv, raw, err := svc.Create(ctx, CreateInput{SpaceID: "spc_01h00000000000000000000000", Email: "rollback@example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_invitation_acceptance_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN RAISE EXCEPTION 'invitation acceptance audit rejected by test'; END;
+		$$;
+		CREATE TRIGGER test_reject_invitation_acceptance_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_invitation_acceptance_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.AcceptVerifiedUser(ctx, raw, userID); err == nil {
+		t.Fatal("acceptance succeeded despite audit failure")
+	}
+	var members, consumed int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE name = 'rollback@example.test'`).Scan(&members); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM invitation_tokens WHERE id = $1 AND consumed_at IS NOT NULL`, inv.ID).Scan(&consumed); err != nil {
+		t.Fatal(err)
+	}
+	if members != 0 || consumed != 0 {
+		t.Fatalf("audit failure left members=%d consumed=%d", members, consumed)
+	}
+}
+
 func newInvitationStore(t *testing.T) *store.Store {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

@@ -41,6 +41,16 @@ type AuthOutput struct {
 		Data account.AuthResult `json:"data"`
 	}
 }
+type AcceptInvitationInput struct {
+	Authorization string `header:"Authorization"`
+	Token         string `path:"token"`
+	Body          struct{}
+}
+type AcceptInvitationOutput struct {
+	Body struct {
+		Data invitation.Acceptance `json:"data"`
+	}
+}
 type SignInStartOutput struct {
 	Body struct {
 		Data account.SignInChallenge `json:"data"`
@@ -213,6 +223,7 @@ type SessionOutput struct {
 
 func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.sign_up", "POST", "/v1/auth/sign-up", route.Principal, "", []route.Subject{route.Public}), a.register)
+	route.Register(api, route.NewSpec("invitations.accept", "POST", "/v1/invitations/{token}/accept", route.Principal, "", []route.Subject{route.User}), a.acceptInvitation)
 	route.Register(api, route.NewSpec("auth.sign_in", "POST", "/v1/auth/sign-in", route.Principal, "", []route.Subject{route.Public}), a.login)
 	route.Register(api, route.NewSpec("auth.sign_in_attempt", "POST", "/v1/auth/sign-in/{attempt_id}", route.Principal, "", []route.Subject{route.Public}), a.loginAttempt)
 	route.Register(api, route.NewSpec("auth.refresh", "POST", "/v1/auth/refresh", route.Principal, "", []route.Subject{route.Public}), a.refresh)
@@ -242,6 +253,22 @@ func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) 
 	}
 	out := &AuthOutput{}
 	out.Body.Data = result
+	return out, nil
+}
+func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (*AcceptInvitationOutput, error) {
+	if a.Invitations == nil {
+		return nil, apierr.New("UNAVAILABLE", "invitation service is unavailable")
+	}
+	claims, err := a.userClaims(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	accepted, err := a.Invitations.AcceptVerifiedUser(ctx, in.Token, claims.Subject)
+	if err != nil {
+		return nil, err
+	}
+	out := &AcceptInvitationOutput{}
+	out.Body.Data = accepted
 	return out, nil
 }
 func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutput, error) {

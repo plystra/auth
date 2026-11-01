@@ -1,6 +1,38 @@
 {
   "components": {
     "schemas": {
+      "AcceptInvitationInputBody": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "AcceptInvitationOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Acceptance"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "Acceptance": {
+        "additionalProperties": false,
+        "properties": {
+          "member_id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id",
+          "member_id"
+        ],
+        "type": "object"
+      },
       "AcceptedData": {
         "additionalProperties": false,
         "properties": {
@@ -1994,6 +2026,61 @@
           }
         },
         "summary": "auth.step_up"
+      }
+    },
+    "/v1/invitations/{token}/accept": {
+      "post": {
+        "operationId": "invitations.accept",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "token",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptInvitationOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "invitations.accept"
       }
     },
     "/v1/me": {

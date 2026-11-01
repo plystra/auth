@@ -40,6 +40,11 @@ type Invitation struct {
 	CreatedAt       time.Time
 }
 
+type Acceptance struct {
+	SpaceID  string `json:"space_id"`
+	MemberID string `json:"member_id"`
+}
+
 // Create creates a single-use invitation token. The raw token is returned only
 // to the caller; the database stores its one-way digest.
 func (s *Service) Create(ctx context.Context, in CreateInput) (Invitation, string, error) {
@@ -125,6 +130,94 @@ func (s *Service) Consume(ctx context.Context, raw string) (Invitation, error) {
 		return Invitation{}, err
 	}
 	return fromRow(row), nil
+}
+
+// AcceptVerifiedUser creates a new human member and consumes the invitation in
+// the same transaction. Existing-member invitations require authority-delta
+// coverage and are rejected until that path is implemented.
+func (s *Service) AcceptVerifiedUser(ctx context.Context, raw, userID string) (Acceptance, error) {
+	if s == nil || s.Store == nil {
+		return Acceptance{}, errors.New("invitation store is required")
+	}
+	if len(raw) != 46 || !strings.HasPrefix(raw, "iv_") || userID == "" {
+		return Acceptance{}, apierr.New("invalid_grant", "invitation token is invalid or expired")
+	}
+	sum := sha256.Sum256([]byte(raw))
+	var accepted Acceptance
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		user, err := q.LockUserForStatus(ctx, db.LockUserForStatusParams{ID: userID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("UNAUTHENTICATED", "the user account is unavailable")
+		}
+		if err != nil {
+			return err
+		}
+		if user.Status != "active" || user.DisabledAt.Valid {
+			return apierr.New("UNAUTHENTICATED", "the user account is unavailable")
+		}
+		if !user.EmailVerifiedAt.Valid {
+			return apierr.New("EMAIL_VERIFICATION_REQUIRED", "verify your email before accepting the invitation")
+		}
+		inv, err := q.ConsumeInvitationToken(ctx, db.ConsumeInvitationTokenParams{TokenHash: sum[:]})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("invalid_grant", "invitation token is invalid or expired")
+		}
+		if err != nil {
+			return err
+		}
+		if user.EmailNormalized != inv.EmailNormalized {
+			return apierr.New("invalid_grant", "invitation token is invalid or expired")
+		}
+		if inv.MemberID.Valid {
+			return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "binding to an existing member is not available")
+		}
+		if operators, err := q.CountOperatorsForUser(ctx, db.CountOperatorsForUserParams{UserID: user.ID}); err != nil {
+			return err
+		} else if operators != 0 {
+			return apierr.New("CONFLICT", "an operator identity cannot become a member")
+		}
+		seen := map[string]struct{}{}
+		spaceID := inv.SpaceID
+		for depth := 0; depth < 64; depth++ {
+			if _, found := seen[spaceID]; found {
+				return apierr.New("INVALID_RESOURCE", "Space hierarchy contains a cycle")
+			}
+			seen[spaceID] = struct{}{}
+			space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID})
+			if errors.Is(err, pgx.ErrNoRows) || err == nil && space.Status != "active" {
+				return apierr.New("SPACE_INACTIVE", "the invited Space is unavailable")
+			}
+			if err != nil {
+				return err
+			}
+			if !space.ParentID.Valid {
+				break
+			}
+			spaceID = space.ParentID.String
+			if depth == 63 {
+				return apierr.New("INVALID_RESOURCE", "Space hierarchy is too deep")
+			}
+		}
+		member, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{
+			ID: string(ids.New[ids.MemberID]("mem")), SpaceID: inv.SpaceID,
+			Name: user.EmailNormalized, Type: "human", BindingPolicy: "single",
+		})
+		if err != nil {
+			return err
+		}
+		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: user.ID, MemberID: member.ID}); err != nil {
+			return err
+		}
+		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: inv.SpaceID}); err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "user", user.ID, "invitation.accept", inv.ID, "success"); err != nil {
+			return err
+		}
+		accepted = Acceptance{SpaceID: inv.SpaceID, MemberID: member.ID}
+		return nil
+	})
+	return accepted, err
 }
 
 func newToken() (string, []byte, error) {
