@@ -76,6 +76,51 @@ func TestServerKeyUsesCurrentInstallationMemberAuthority(t *testing.T) {
 	}
 }
 
+func TestServerKeyLosesAndRegainsSpaceAfterInstallationLifecycle(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, key, sessions := newServerFixture(t)
+	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
+	var installationID string
+	if err := st.Pool.QueryRow(ctx, `SELECT id FROM application_installations WHERE application_id = 'app_server_test' AND space_id = $1`, spaceID).Scan(&installationID); err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Applications: apps, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("lifecycle key test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	check := func() *httptest.ResponseRecorder {
+		t.Helper()
+		body := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, actor.ID, actor.ID, spaceID)
+		req := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	assertCheck := func(want string) {
+		t.Helper()
+		result := check()
+		if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), want) {
+			t.Fatalf("authz.check after installation state change = %d %s, want %q", result.Code, result.Body.String(), want)
+		}
+	}
+	assertCheck(`"decision":"allow"`)
+	for _, step := range []struct {
+		action string
+		want   string
+	}{
+		{"suspend", `"deny_code":"APPLICATION_NOT_INSTALLED"`},
+		{"resume", `"decision":"allow"`},
+		{"uninstall", `"deny_code":"APPLICATION_NOT_INSTALLED"`},
+	} {
+		if _, err := apps.ChangeInstallationStatus(ctx, actor.ID, spaceID, installationID, step.action); err != nil {
+			t.Fatalf("%s installation: %v", step.action, err)
+		}
+		assertCheck(step.want)
+	}
+}
+
 func TestServerKeySourceIPAllowlistUsesDirectPeerNotForwardedHeaders(t *testing.T) {
 	ctx := context.Background()
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)

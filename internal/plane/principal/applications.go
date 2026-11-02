@@ -35,6 +35,12 @@ type installApplicationInput struct {
 	}
 }
 
+type installationLifecycleInput struct {
+	Authorization  string `header:"Authorization"`
+	ID             string `path:"id"`
+	InstallationID string `path:"ins_id"`
+}
+
 type applicationKeyPathInput struct {
 	Authorization string `header:"Authorization"`
 	ApplicationID string `path:"app_id"`
@@ -75,6 +81,9 @@ func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("applications.register", "POST", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.registerApplication)
 	route.Register(api, route.NewSpec("installations.list", "GET", "/v1/spaces/{id}/installations", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listInstallations)
 	route.Register(api, route.NewSpec("installations.create", "POST", "/v1/spaces/{id}/installations", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.installApplication)
+	route.Register(api, route.NewSpec("installations.suspend", "POST", "/v1/spaces/{id}/installations/{ins_id}/suspend", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.suspendInstallation)
+	route.Register(api, route.NewSpec("installations.resume", "POST", "/v1/spaces/{id}/installations/{ins_id}/resume", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.resumeInstallation)
+	route.Register(api, route.NewSpec("installations.uninstall", "POST", "/v1/spaces/{id}/installations/{ins_id}/uninstall", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.uninstallInstallation)
 	route.Register(api, route.NewSpec("applications.keys.list", "GET", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplicationKeys)
 	route.Register(api, route.NewSpec("applications.keys.create", "POST", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.createApplicationKey)
 	route.Register(api, route.NewSpec("applications.keys.rotate", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/rotate", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateApplicationKey)
@@ -215,6 +224,45 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	}
 	out := &authorizationDataOutput[application.Installation]{}
 	out.Body.Data = installed
+	return out, nil
+}
+
+func (a *API) suspendInstallation(ctx context.Context, in *installationLifecycleInput) (*authorizationDataOutput[application.Installation], error) {
+	return a.changeInstallationStatus(ctx, in, "suspend")
+}
+
+func (a *API) resumeInstallation(ctx context.Context, in *installationLifecycleInput) (*authorizationDataOutput[application.Installation], error) {
+	return a.changeInstallationStatus(ctx, in, "resume")
+}
+
+func (a *API) uninstallInstallation(ctx context.Context, in *installationLifecycleInput) (*authorizationDataOutput[application.Installation], error) {
+	return a.changeInstallationStatus(ctx, in, "uninstall")
+}
+
+func (a *API) changeInstallationStatus(ctx context.Context, in *installationLifecycleInput, action string) (*authorizationDataOutput[application.Installation], error) {
+	if a.Applications == nil {
+		return nil, apierr.New("UNAVAILABLE", "application installations are unavailable")
+	}
+	if _, err := a.authenticatePrincipal(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	spaceID, err := a.Applications.InstallationSpace(ctx, in.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	if spaceID != in.ID {
+		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
+	}
+	actor, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	if err != nil {
+		return nil, err
+	}
+	installation, err := a.Applications.ChangeInstallationStatus(ctx, actor.ID, spaceID, in.InstallationID, action)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[application.Installation]{}
+	out.Body.Data = installation
 	return out, nil
 }
 

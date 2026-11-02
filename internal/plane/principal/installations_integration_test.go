@@ -7,12 +7,15 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
 )
@@ -174,5 +177,244 @@ func TestPrivateApplicationInstallationStaysInPublisherTreeAndRollsBackAuditFail
 	}
 	if installations != 0 || members != 0 || roles != 0 {
 		t.Fatalf("audit failure left installation=%d member=%d role=%d", installations, members, roles)
+	}
+}
+
+func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *testing.T) {
+	ctx := context.Background()
+	st, authz, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	raw, err := apps.CreateKey(ctx, appID, "lifecycle", []string{"auth.authz:check"}, &expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := apps.AuthenticateKey(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertKeyInstallation := func(wantCode string) {
+		t.Helper()
+		memberID, code, err := apps.ResolveKeyInstallation(ctx, key, spaceID)
+		if err != nil || code != wantCode || (wantCode == "" && memberID == "") {
+			t.Fatalf("resolved installation member=%q code=%q error=%v, want code %q", memberID, code, err, wantCode)
+		}
+	}
+	assertKeyInstallation("")
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(action, targetSpace string) *httptest.ResponseRecorder {
+		t.Helper()
+		path := "/v1/spaces/" + targetSpace + "/installations/" + installed.ID + "/" + action
+		req := httptest.NewRequest(http.MethodPost, path, nil)
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if mismatched := post("suspend", "spc_other"); mismatched.Code != http.StatusNotFound {
+		t.Fatalf("installation lifecycle accepted a mismatched Space: %d %s", mismatched.Code, mismatched.Body.String())
+	}
+	if suspended := post("suspend", spaceID); suspended.Code != http.StatusOK || !strings.Contains(suspended.Body.String(), `"status":"suspended"`) {
+		t.Fatalf("suspend installation = %d %s", suspended.Code, suspended.Body.String())
+	}
+	assertKeyInstallation("APPLICATION_NOT_INSTALLED")
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: installed.MemberID, Permission: "auth.authz:check", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Deny || decision.Code != "ACTOR_MEMBER_INACTIVE" {
+		t.Fatalf("suspended application member still held authority: %+v, %v", decision, err)
+	}
+	if repeated := post("suspend", spaceID); repeated.Code != http.StatusOK {
+		t.Fatalf("repeated suspend = %d %s", repeated.Code, repeated.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE applications SET status = 'suspended' WHERE id = $1`, appID); err != nil {
+		t.Fatal(err)
+	}
+	if blocked := post("resume", spaceID); blocked.Code != http.StatusConflict {
+		t.Fatalf("resume while application is suspended = %d %s", blocked.Code, blocked.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE applications SET status = 'active' WHERE id = $1`, appID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actorID); err != nil {
+		t.Fatal(err)
+	}
+	deniedResume := post("resume", spaceID)
+	if deniedResume.Code != http.StatusForbidden || !strings.Contains(deniedResume.Body.String(), "AUTHORITY_DELTA_NOT_COVERED") {
+		t.Fatalf("resume without assignment coverage = %d %s", deniedResume.Code, deniedResume.Body.String())
+	}
+	assertKeyInstallation("APPLICATION_NOT_INSTALLED")
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = NULL WHERE holder_member_id = $1`, actorID); err != nil {
+		t.Fatal(err)
+	}
+	if resumed := post("resume", spaceID); resumed.Code != http.StatusOK || !strings.Contains(resumed.Body.String(), `"status":"active"`) {
+		t.Fatalf("resume installation = %d %s", resumed.Code, resumed.Body.String())
+	}
+	assertKeyInstallation("")
+	if removed := post("uninstall", spaceID); removed.Code != http.StatusOK || !strings.Contains(removed.Body.String(), `"status":"uninstalled"`) {
+		t.Fatalf("uninstall installation = %d %s", removed.Code, removed.Body.String())
+	}
+	assertKeyInstallation("APPLICATION_NOT_INSTALLED")
+	if resumed := post("resume", spaceID); resumed.Code != http.StatusNotFound {
+		t.Fatalf("uninstalled application was resumed: %d %s", resumed.Code, resumed.Body.String())
+	}
+	if repeated := post("uninstall", spaceID); repeated.Code != http.StatusOK {
+		t.Fatalf("repeated uninstall = %d %s", repeated.Code, repeated.Body.String())
+	}
+	var memberStatus string
+	var activeGrants int
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM members WHERE id = $1`, installed.MemberID).Scan(&memberStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, installed.MemberID).Scan(&activeGrants); err != nil {
+		t.Fatal(err)
+	}
+	if memberStatus != "removed" || activeGrants != 0 {
+		t.Fatalf("uninstalled member status=%q active_grants=%d", memberStatus, activeGrants)
+	}
+	listed, err := apps.ListInstallations(ctx, spaceID)
+	if err != nil || len(listed) != 0 {
+		t.Fatalf("uninstalled installation remained listed: %+v, %v", listed, err)
+	}
+	var audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE resource_id = $1 AND action LIKE 'application.installation.%'`, installed.ID).Scan(&audits); err != nil || audits != 3 {
+		t.Fatalf("lifecycle audit rows=%d error=%v, want 3", audits, err)
+	}
+	reinstalled, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	if err != nil || reinstalled.ID == installed.ID || reinstalled.MemberID == installed.MemberID {
+		t.Fatalf("fresh installation after uninstall = %+v, %v", reinstalled, err)
+	}
+	assertKeyInstallation("")
+}
+
+func TestInstallationLifecycleAuditFailureRollsBackState(t *testing.T) {
+	ctx := context.Background()
+	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_installation_lifecycle_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action IN ('application.installation.suspend', 'application.installation.resume') THEN RAISE EXCEPTION 'audit rejected'; END IF; RETURN NEW; END;
+		$$;
+		CREATE TRIGGER reject_installation_lifecycle_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_installation_lifecycle_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/installations/"+installed.ID+"/suspend", nil)
+	req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code < 500 {
+		t.Fatalf("suspension committed despite audit failure: %d %s", response.Code, response.Body.String())
+	}
+	var installationStatus, memberStatus string
+	if err := st.Pool.QueryRow(ctx, `SELECT i.status, m.status FROM application_installations i JOIN members m ON m.id = i.member_id WHERE i.id = $1`, installed.ID).Scan(&installationStatus, &memberStatus); err != nil {
+		t.Fatal(err)
+	}
+	if installationStatus != "active" || memberStatus != "active" {
+		t.Fatalf("audit failure left installation=%q member=%q", installationStatus, memberStatus)
+	}
+	if _, err := st.Pool.Exec(ctx, `DROP TRIGGER reject_installation_lifecycle_audit ON audit_logs`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.ChangeInstallationStatus(ctx, actorID, spaceID, installed.ID, "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `CREATE TRIGGER reject_installation_lifecycle_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_installation_lifecycle_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	resumeRequest := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/installations/"+installed.ID+"/resume", nil)
+	resumeRequest.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	resumeResponse := httptest.NewRecorder()
+	handler.ServeHTTP(resumeResponse, resumeRequest)
+	if resumeResponse.Code < 500 {
+		t.Fatalf("resume committed despite audit failure: %d %s", resumeResponse.Code, resumeResponse.Body.String())
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT i.status, m.status FROM application_installations i JOIN members m ON m.id = i.member_id WHERE i.id = $1`, installed.ID).Scan(&installationStatus, &memberStatus); err != nil {
+		t.Fatal(err)
+	}
+	if installationStatus != "suspended" || memberStatus != "suspended" {
+		t.Fatalf("resume audit failure left installation=%q member=%q", installationStatus, memberStatus)
+	}
+}
+
+func TestInstallationResumeWithEmptyDeltaDoesNotRequireAssignmentRight(t *testing.T) {
+	ctx := context.Background()
+	st, authz, apps, actorID, spaceID, _, _, appID := installationFixture(t, []string{"auth.authz:check"})
+	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.ChangeInstallationStatus(ctx, actorID, spaceID, installed.ID, "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, installed.MemberID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actorID); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := apps.ChangeInstallationStatus(ctx, actorID, spaceID, installed.ID, "resume")
+	if err != nil || resumed.Status != "active" {
+		t.Fatalf("empty-delta resume = %+v, %v", resumed, err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: installed.MemberID, Permission: "auth.authz:check", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Deny {
+		t.Fatalf("empty-delta resume restored revoked authority: %+v, %v", decision, err)
+	}
+}
+
+func TestAgentInstallationLifecycleUsesOwnerEnvelope(t *testing.T) {
+	ctx := context.Background()
+	st, _, apps, ownerID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	installed, err := apps.InstallPrivateSpace(ctx, ownerID, appID, spaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: ownerID, Name: "install-agent", ExpiresAt: time.Now().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, ownerID, created.ID, "auth.applications:manage")
+	access, err := sessions.CreateAgentAccess(ctx, created.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	post := func(action string) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+spaceID+"/installations/"+installed.ID+"/"+action, nil)
+		req.Header.Set("Authorization", "Bearer "+access.AccessToken)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if suspended := post("suspend"); suspended.Code != http.StatusOK {
+		t.Fatalf("Agent suspension = %d %s", suspended.Code, suspended.Body.String())
+	}
+	if uncovered := post("resume"); uncovered.Code != http.StatusForbidden {
+		t.Fatalf("Agent resumed installation without assignment coverage: %d %s", uncovered.Code, uncovered.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now()
+		WHERE grantee_member_id = $1 AND permission_keys @> '["auth.applications:manage"]'::jsonb`, ownerID); err != nil {
+		t.Fatal(err)
+	}
+	if denied := post("resume"); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "OWNER_ENVELOPE_EXCLUDED") {
+		t.Fatalf("Agent resumed after owner lost governance permission: %d %s", denied.Code, denied.Body.String())
+	}
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM application_installations WHERE id = $1`, installed.ID).Scan(&status); err != nil || status != "suspended" {
+		t.Fatalf("owner envelope denial left installation status=%q error=%v", status, err)
 	}
 }

@@ -44,19 +44,22 @@ func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, 
 	return nil
 }
 
-// CoverApplicationInstallationTx evaluates the complete authority gained by a
-// new installation member. Only this path may cover an application recipient;
+// CoverApplicationInstallationTx evaluates the complete authority gained by an
+// activated installation member. Only this path may cover an application recipient;
 // ordinary grants to application members remain blocked by G8.
 func (s *Service) CoverApplicationInstallationTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, spaceID string) error {
-	if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, spaceID); err != nil {
-		return err
-	}
 	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
 	if err != nil {
 		return err
 	}
 	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
 	if err != nil {
+		return err
+	}
+	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+		return nil
+	}
+	if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, spaceID); err != nil {
 		return err
 	}
 	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, "application", spaceID, true, map[string]struct{}{})

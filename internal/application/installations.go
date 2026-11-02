@@ -164,3 +164,124 @@ func (s *Service) ListInstallations(ctx context.Context, spaceID string) ([]Inst
 	}
 	return installations, nil
 }
+
+func (s *Service) InstallationSpace(ctx context.Context, installationID string) (string, error) {
+	if s == nil || s.Store == nil {
+		return "", apierr.New("UNAVAILABLE", "application installations are unavailable")
+	}
+	spaceID, err := s.Store.Queries().GetInstallationTargetSpace(ctx, db.GetInstallationTargetSpaceParams{InstallationID: installationID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", apierr.New("NOT_FOUND", "installation was not found")
+	}
+	return spaceID, err
+}
+
+func (s *Service) ChangeInstallationStatus(ctx context.Context, actorMemberID, spaceID, installationID, action string) (Installation, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
+		return Installation{}, apierr.New("UNAVAILABLE", "application installations are unavailable")
+	}
+	var desiredStatus string
+	switch action {
+	case "suspend":
+		desiredStatus = "suspended"
+	case "resume":
+		desiredStatus = "active"
+	case "uninstall":
+		desiredStatus = "uninstalled"
+	default:
+		return Installation{}, apierr.New("VALIDATION_FAILED", "installation action is invalid")
+	}
+	var out Installation
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		row, err := q.LockInstallationForLifecycle(ctx, db.LockInstallationForLifecycleParams{
+			InstallationID: installationID, SpaceID: spaceID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "installation was not found in this Space")
+		}
+		if err != nil {
+			return err
+		}
+		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		}
+		if row.Status == "uninstalled" && action != "uninstall" {
+			return apierr.New("NOT_FOUND", "installation was not found")
+		}
+		if action == "resume" {
+			if row.ApplicationStatus != "active" {
+				return apierr.New("CONFLICT", "application is not active")
+			}
+			if row.Status == "active" && row.MemberStatus == "active" {
+				return installationResult(row, row.Status, &out)
+			}
+			if row.Status != "suspended" || row.MemberStatus != "suspended" {
+				return apierr.New("CONFLICT", "installation member state is inconsistent")
+			}
+		}
+		if action == "suspend" {
+			if row.MemberStatus == "removed" {
+				return apierr.New("CONFLICT", "installation member was removed")
+			}
+			if row.Status == "suspended" && row.MemberStatus == "suspended" {
+				return installationResult(row, row.Status, &out)
+			}
+		}
+		if action == "uninstall" && row.Status == "uninstalled" && row.MemberStatus == "removed" {
+			return installationResult(row, row.Status, &out)
+		}
+		memberStatus := desiredStatus
+		if action == "uninstall" {
+			memberStatus = "removed"
+		}
+		updated, err := q.SetInstallationMemberStatus(ctx, db.SetInstallationMemberStatusParams{
+			MemberID: row.MemberID, NewStatus: memberStatus,
+		})
+		if err != nil {
+			return err
+		}
+		if row.MemberStatus != memberStatus && updated != 1 {
+			return apierr.New("CONFLICT", "installation member state changed concurrently")
+		}
+		if row.Status != desiredStatus {
+			updated, err = q.SetInstallationLifecycleStatus(ctx, db.SetInstallationLifecycleStatusParams{
+				InstallationID: installationID, PreviousStatus: row.Status, NewStatus: desiredStatus,
+			})
+			if err != nil {
+				return err
+			}
+			if updated != 1 {
+				return apierr.New("CONFLICT", "installation state changed concurrently")
+			}
+		}
+		if action == "resume" {
+			if err := s.Authorization.CoverApplicationInstallationTx(ctx, q, actorMemberID, row.MemberID, row.SpaceID); err != nil {
+				return err
+			}
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "application.installation."+action, installationID, "success"); err != nil {
+			return err
+		}
+		return installationResult(row, desiredStatus, &out)
+	})
+	return out, err
+}
+
+func installationResult(row db.LockInstallationForLifecycleRow, status string, out *Installation) error {
+	var permissions []string
+	if err := json.Unmarshal(row.ApprovedPermissions, &permissions); err != nil {
+		return err
+	}
+	*out = Installation{
+		ID: row.ID, ApplicationID: row.ApplicationID, ApplicationName: row.ApplicationName,
+		SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope,
+		ApprovedPermissions: permissions, Status: status, CreatedAt: row.CreatedAt.Time,
+	}
+	return nil
+}

@@ -72,6 +72,32 @@ JOIN applications a ON a.id = i.application_id
 WHERE i.space_id = sqlc.arg(space_id) AND i.status <> 'uninstalled'
 ORDER BY i.created_at, i.id;
 
+-- name: GetInstallationTargetSpace :one
+SELECT space_id FROM application_installations WHERE id = sqlc.arg(installation_id);
+
+-- name: LockInstallationForLifecycle :one
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
+       i.approved_permissions, i.status, i.created_at,
+       a.name AS application_name, a.status AS application_status,
+       m.status AS member_status
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+WHERE i.id = sqlc.arg(installation_id) AND i.space_id = sqlc.arg(space_id)
+FOR UPDATE OF i, m;
+
+-- name: SetInstallationLifecycleStatus :execrows
+UPDATE application_installations SET status = sqlc.arg(new_status)
+WHERE id = sqlc.arg(installation_id) AND status = sqlc.arg(previous_status);
+
+-- name: SetInstallationMemberStatus :execrows
+UPDATE members
+SET status = sqlc.arg(new_status),
+    deleted_at = CASE WHEN sqlc.arg(new_status) = 'removed' THEN now() ELSE deleted_at END,
+    version = version + 1
+WHERE id = sqlc.arg(member_id) AND type = 'application'
+  AND status <> 'removed' AND status <> sqlc.arg(new_status);
+
 -- name: GetActiveApplicationInstallationForSpace :one
 WITH RECURSIVE ancestors AS (
     SELECT spaces.id, spaces.parent_id, 0 AS depth

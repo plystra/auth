@@ -476,6 +476,21 @@ func (q *Queries) GetApplicationForKeyManagement(ctx context.Context, arg GetApp
 	return i, err
 }
 
+const getInstallationTargetSpace = `-- name: GetInstallationTargetSpace :one
+SELECT space_id FROM application_installations WHERE id = $1
+`
+
+type GetInstallationTargetSpaceParams struct {
+	InstallationID string `json:"installation_id"`
+}
+
+func (q *Queries) GetInstallationTargetSpace(ctx context.Context, arg GetInstallationTargetSpaceParams) (string, error) {
+	row := q.db.QueryRow(ctx, getInstallationTargetSpace, arg.InstallationID)
+	var space_id string
+	err := row.Scan(&space_id)
+	return space_id, err
+}
+
 const getPrivateApplicationForInstall = `-- name: GetPrivateApplicationForInstall :one
 WITH RECURSIVE ancestors AS (
     SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
@@ -727,6 +742,58 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 	return items, nil
 }
 
+const lockInstallationForLifecycle = `-- name: LockInstallationForLifecycle :one
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
+       i.approved_permissions, i.status, i.created_at,
+       a.name AS application_name, a.status AS application_status,
+       m.status AS member_status
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+WHERE i.id = $1 AND i.space_id = $2
+FOR UPDATE OF i, m
+`
+
+type LockInstallationForLifecycleParams struct {
+	InstallationID string `json:"installation_id"`
+	SpaceID        string `json:"space_id"`
+}
+
+type LockInstallationForLifecycleRow struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	SpaceID             string             `json:"space_id"`
+	MemberID            string             `json:"member_id"`
+	RoleID              string             `json:"role_id"`
+	Scope               string             `json:"scope"`
+	ApprovedPermissions []byte             `json:"approved_permissions"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ApplicationName     string             `json:"application_name"`
+	ApplicationStatus   string             `json:"application_status"`
+	MemberStatus        string             `json:"member_status"`
+}
+
+func (q *Queries) LockInstallationForLifecycle(ctx context.Context, arg LockInstallationForLifecycleParams) (LockInstallationForLifecycleRow, error) {
+	row := q.db.QueryRow(ctx, lockInstallationForLifecycle, arg.InstallationID, arg.SpaceID)
+	var i LockInstallationForLifecycleRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.SpaceID,
+		&i.MemberID,
+		&i.RoleID,
+		&i.Scope,
+		&i.ApprovedPermissions,
+		&i.Status,
+		&i.CreatedAt,
+		&i.ApplicationName,
+		&i.ApplicationStatus,
+		&i.MemberStatus,
+	)
+	return i, err
+}
+
 const lockLegacyAPIKeyHashes = `-- name: LockLegacyAPIKeyHashes :many
 SELECT id, secret_hash FROM api_keys
 WHERE hash_scheme = 'sha256_legacy'
@@ -919,6 +986,47 @@ func (q *Queries) RevokeManagedAPIKey(ctx context.Context, arg RevokeManagedAPIK
 		&i.AllowSubjectAssertion,
 	)
 	return i, err
+}
+
+const setInstallationLifecycleStatus = `-- name: SetInstallationLifecycleStatus :execrows
+UPDATE application_installations SET status = $1
+WHERE id = $2 AND status = $3
+`
+
+type SetInstallationLifecycleStatusParams struct {
+	NewStatus      string `json:"new_status"`
+	InstallationID string `json:"installation_id"`
+	PreviousStatus string `json:"previous_status"`
+}
+
+func (q *Queries) SetInstallationLifecycleStatus(ctx context.Context, arg SetInstallationLifecycleStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setInstallationLifecycleStatus, arg.NewStatus, arg.InstallationID, arg.PreviousStatus)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setInstallationMemberStatus = `-- name: SetInstallationMemberStatus :execrows
+UPDATE members
+SET status = $1,
+    deleted_at = CASE WHEN $1 = 'removed' THEN now() ELSE deleted_at END,
+    version = version + 1
+WHERE id = $2 AND type = 'application'
+  AND status <> 'removed' AND status <> $1
+`
+
+type SetInstallationMemberStatusParams struct {
+	NewStatus string `json:"new_status"`
+	MemberID  string `json:"member_id"`
+}
+
+func (q *Queries) SetInstallationMemberStatus(ctx context.Context, arg SetInstallationMemberStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setInstallationMemberStatus, arg.NewStatus, arg.MemberID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const touchAPIKey = `-- name: TouchAPIKey :exec
