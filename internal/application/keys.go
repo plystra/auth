@@ -342,22 +342,22 @@ func (s *Service) RotateManagedKey(ctx context.Context, actorMemberID, applicati
 	return out, secret.New(raw), nil
 }
 
-func (s *Service) managedApplicationTx(ctx context.Context, q *db.Queries, actorMemberID, applicationID string) (db.GetApplicationForKeyManagementRow, error) {
-	row, err := q.GetApplicationForKeyManagement(ctx, db.GetApplicationForKeyManagementParams{ApplicationID: applicationID})
+func (s *Service) managedApplicationTx(ctx context.Context, q *db.Queries, actorMemberID, applicationID string) (db.LockApplicationForUpdateRow, error) {
+	row, err := q.LockApplicationForUpdate(ctx, db.LockApplicationForUpdateParams{ApplicationID: applicationID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return db.GetApplicationForKeyManagementRow{}, apierr.New("NOT_FOUND", "application was not found")
+		return db.LockApplicationForUpdateRow{}, apierr.New("NOT_FOUND", "application was not found")
 	}
 	if err != nil {
-		return db.GetApplicationForKeyManagementRow{}, err
+		return db.LockApplicationForUpdateRow{}, err
 	}
 	decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
 		MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
 	})
 	if err != nil {
-		return db.GetApplicationForKeyManagementRow{}, err
+		return db.LockApplicationForUpdateRow{}, err
 	}
 	if decision.Effect != engine.Allow {
-		return db.GetApplicationForKeyManagementRow{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		return db.LockApplicationForUpdateRow{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 	}
 	return row, nil
 }

@@ -65,6 +65,35 @@ func (s *Service) CoverApplicationInstallationTx(ctx context.Context, q *db.Quer
 	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, "application", spaceID, true, map[string]struct{}{})
 }
 
+// ApproveApplicationRoleTx adds the newly approved catalog permissions to an
+// installation role and covers only the authority gained by that change.
+func (s *Service) ApproveApplicationRoleTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, spaceID, roleID string, permissionIDs []string) error {
+	before, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
+	if err != nil {
+		return err
+	}
+	for _, permissionID := range permissionIDs {
+		if err := q.GrantRolePermission(ctx, db.GrantRolePermissionParams{RoleID: roleID, PermissionID: permissionID}); err != nil {
+			return err
+		}
+	}
+	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
+	if err != nil {
+		return err
+	}
+	change, err := delta.Evaluate(before, after, delta.Graph{})
+	if err != nil {
+		return err
+	}
+	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+		return nil
+	}
+	if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, spaceID); err != nil {
+		return err
+	}
+	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, "application", spaceID, true, map[string]struct{}{})
+}
+
 func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string, applicationInstallation bool, seen map[string]struct{}) error {
 	if len(change.Permissions) == 0 {
 		return nil

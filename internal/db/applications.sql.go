@@ -476,6 +476,27 @@ func (q *Queries) GetApplicationForKeyManagement(ctx context.Context, arg GetApp
 	return i, err
 }
 
+const getInstallationApplicationIdentity = `-- name: GetInstallationApplicationIdentity :one
+SELECT application_id, space_id FROM application_installations
+WHERE id = $1
+`
+
+type GetInstallationApplicationIdentityParams struct {
+	InstallationID string `json:"installation_id"`
+}
+
+type GetInstallationApplicationIdentityRow struct {
+	ApplicationID string `json:"application_id"`
+	SpaceID       string `json:"space_id"`
+}
+
+func (q *Queries) GetInstallationApplicationIdentity(ctx context.Context, arg GetInstallationApplicationIdentityParams) (GetInstallationApplicationIdentityRow, error) {
+	row := q.db.QueryRow(ctx, getInstallationApplicationIdentity, arg.InstallationID)
+	var i GetInstallationApplicationIdentityRow
+	err := row.Scan(&i.ApplicationID, &i.SpaceID)
+	return i, err
+}
+
 const getInstallationTargetSpace = `-- name: GetInstallationTargetSpace :one
 SELECT space_id FROM application_installations WHERE id = $1
 `
@@ -667,6 +688,35 @@ func (q *Queries) ListApplicationInstallationsInSpace(ctx context.Context, arg L
 	return items, nil
 }
 
+const listCurrentInstallationSpaces = `-- name: ListCurrentInstallationSpaces :many
+SELECT DISTINCT space_id FROM application_installations
+WHERE application_id = $1 AND status <> 'uninstalled'
+`
+
+type ListCurrentInstallationSpacesParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+func (q *Queries) ListCurrentInstallationSpaces(ctx context.Context, arg ListCurrentInstallationSpacesParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listCurrentInstallationSpaces, arg.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var space_id string
+		if err := rows.Scan(&space_id); err != nil {
+			return nil, err
+		}
+		items = append(items, space_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listManagedAPIKeys = `-- name: ListManagedAPIKeys :many
 SELECT id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
        last_used_at, revoked_at, created_at, allow_subject_assertion
@@ -777,6 +827,45 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockApplicationForUpdate = `-- name: LockApplicationForUpdate :one
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+FROM applications WHERE id = $1
+FOR UPDATE
+`
+
+type LockApplicationForUpdateParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+type LockApplicationForUpdateRow struct {
+	ID                  string             `json:"id"`
+	SpaceID             string             `json:"space_id"`
+	Name                string             `json:"name"`
+	ClientID            string             `json:"client_id"`
+	RedirectUris        []byte             `json:"redirect_uris"`
+	ManifestPermissions []byte             `json:"manifest_permissions"`
+	Visibility          string             `json:"visibility"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicationForUpdateParams) (LockApplicationForUpdateRow, error) {
+	row := q.db.QueryRow(ctx, lockApplicationForUpdate, arg.ApplicationID)
+	var i LockApplicationForUpdateRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ClientID,
+		&i.RedirectUris,
+		&i.ManifestPermissions,
+		&i.Visibility,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const lockInstallationForLifecycle = `-- name: LockInstallationForLifecycle :one
@@ -1025,6 +1114,25 @@ func (q *Queries) RevokeManagedAPIKey(ctx context.Context, arg RevokeManagedAPIK
 	return i, err
 }
 
+const setInstallationApprovedPermissions = `-- name: SetInstallationApprovedPermissions :execrows
+UPDATE application_installations
+SET approved_permissions = $1
+WHERE id = $2 AND status <> 'uninstalled'
+`
+
+type SetInstallationApprovedPermissionsParams struct {
+	ApprovedPermissions []byte `json:"approved_permissions"`
+	InstallationID      string `json:"installation_id"`
+}
+
+func (q *Queries) SetInstallationApprovedPermissions(ctx context.Context, arg SetInstallationApprovedPermissionsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setInstallationApprovedPermissions, arg.ApprovedPermissions, arg.InstallationID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setInstallationLifecycleStatus = `-- name: SetInstallationLifecycleStatus :execrows
 UPDATE application_installations SET status = $1
 WHERE id = $2 AND status = $3
@@ -1079,6 +1187,72 @@ func (q *Queries) TouchAPIKey(ctx context.Context, arg TouchAPIKeyParams) error 
 	return err
 }
 
+const trimAPIKeyGrantsToManifest = `-- name: TrimAPIKeyGrantsToManifest :exec
+UPDATE api_keys k
+SET scopes = COALESCE((
+    SELECT jsonb_agg(entry.key ORDER BY entry.key)
+    FROM jsonb_array_elements_text(k.scopes) AS entry(key)
+    WHERE $1::jsonb ? entry.key
+), '[]'::jsonb)
+WHERE k.application_id = $2
+  AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(k.scopes) AS entry(key)
+    WHERE NOT ($1::jsonb ? entry.key)
+  )
+`
+
+type TrimAPIKeyGrantsToManifestParams struct {
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	ApplicationID       string `json:"application_id"`
+}
+
+func (q *Queries) TrimAPIKeyGrantsToManifest(ctx context.Context, arg TrimAPIKeyGrantsToManifestParams) error {
+	_, err := q.db.Exec(ctx, trimAPIKeyGrantsToManifest, arg.ManifestPermissions, arg.ApplicationID)
+	return err
+}
+
+const trimInstallationApprovalsToManifest = `-- name: TrimInstallationApprovalsToManifest :exec
+UPDATE application_installations i
+SET approved_permissions = COALESCE((
+    SELECT jsonb_agg(entry.key ORDER BY entry.key)
+    FROM jsonb_array_elements_text(i.approved_permissions) AS entry(key)
+    WHERE $1::jsonb ? entry.key
+), '[]'::jsonb)
+WHERE i.application_id = $2 AND i.status <> 'uninstalled'
+  AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(i.approved_permissions) AS entry(key)
+    WHERE NOT ($1::jsonb ? entry.key)
+  )
+`
+
+type TrimInstallationApprovalsToManifestParams struct {
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	ApplicationID       string `json:"application_id"`
+}
+
+func (q *Queries) TrimInstallationApprovalsToManifest(ctx context.Context, arg TrimInstallationApprovalsToManifestParams) error {
+	_, err := q.db.Exec(ctx, trimInstallationApprovalsToManifest, arg.ManifestPermissions, arg.ApplicationID)
+	return err
+}
+
+const trimInstallationRolePermissionsToManifest = `-- name: TrimInstallationRolePermissionsToManifest :exec
+DELETE FROM role_permissions rp
+USING application_installations i, permissions p
+WHERE i.application_id = $1 AND i.status <> 'uninstalled'
+  AND rp.role_id = i.role_id AND p.id = rp.permission_id
+  AND NOT ($2::jsonb ? p.key)
+`
+
+type TrimInstallationRolePermissionsToManifestParams struct {
+	ApplicationID       string `json:"application_id"`
+	ManifestPermissions []byte `json:"manifest_permissions"`
+}
+
+func (q *Queries) TrimInstallationRolePermissionsToManifest(ctx context.Context, arg TrimInstallationRolePermissionsToManifestParams) error {
+	_, err := q.db.Exec(ctx, trimInstallationRolePermissionsToManifest, arg.ApplicationID, arg.ManifestPermissions)
+	return err
+}
+
 const updateAPIKeyHash = `-- name: UpdateAPIKeyHash :execrows
 UPDATE api_keys
 SET secret_hash = $1, hash_scheme = 'hmac_sha256',
@@ -1105,6 +1279,55 @@ func (q *Queries) UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashPara
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const updatePrivateApplication = `-- name: UpdatePrivateApplication :one
+UPDATE applications
+SET name = $1, redirect_uris = $2,
+    manifest_permissions = $3
+WHERE id = $4 AND visibility = 'private'
+RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+`
+
+type UpdatePrivateApplicationParams struct {
+	Name                string `json:"name"`
+	RedirectUris        []byte `json:"redirect_uris"`
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	ApplicationID       string `json:"application_id"`
+}
+
+type UpdatePrivateApplicationRow struct {
+	ID                  string             `json:"id"`
+	SpaceID             string             `json:"space_id"`
+	Name                string             `json:"name"`
+	ClientID            string             `json:"client_id"`
+	RedirectUris        []byte             `json:"redirect_uris"`
+	ManifestPermissions []byte             `json:"manifest_permissions"`
+	Visibility          string             `json:"visibility"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) UpdatePrivateApplication(ctx context.Context, arg UpdatePrivateApplicationParams) (UpdatePrivateApplicationRow, error) {
+	row := q.db.QueryRow(ctx, updatePrivateApplication,
+		arg.Name,
+		arg.RedirectUris,
+		arg.ManifestPermissions,
+		arg.ApplicationID,
+	)
+	var i UpdatePrivateApplicationRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ClientID,
+		&i.RedirectUris,
+		&i.ManifestPermissions,
+		&i.Visibility,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const validGraceAPIKeySecret = `-- name: ValidGraceAPIKeySecret :one

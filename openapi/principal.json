@@ -2472,6 +2472,30 @@
         ],
         "type": "object"
       },
+      "UpdateApplicationInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "manifest_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "type": "array"
+          },
+          "name": {
+            "maxLength": 120,
+            "type": "string"
+          },
+          "redirect_uris": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
       "UpdateRoleInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2577,6 +2601,61 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/applications/{app_id}": {
+      "patch": {
+        "operationId": "applications.update",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateApplicationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputPublishedApplicationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "applications.update"
+      }
+    },
     "/v1/applications/{app_id}/api-keys": {
       "get": {
         "operationId": "applications.keys.list",
@@ -4805,6 +4884,59 @@
           }
         },
         "summary": "installations.create"
+      }
+    },
+    "/v1/spaces/{id}/installations/{ins_id}/approvals": {
+      "put": {
+        "operationId": "installations.approve",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "ins_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputInstallationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "installations.approve"
       }
     },
     "/v1/spaces/{id}/installations/{ins_id}/resume": {

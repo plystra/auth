@@ -39,6 +39,64 @@ FROM applications
 WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
+-- name: LockApplicationForUpdate :one
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+FROM applications WHERE id = sqlc.arg(application_id)
+FOR UPDATE;
+
+-- name: UpdatePrivateApplication :one
+UPDATE applications
+SET name = sqlc.arg(name), redirect_uris = sqlc.arg(redirect_uris),
+    manifest_permissions = sqlc.arg(manifest_permissions)
+WHERE id = sqlc.arg(application_id) AND visibility = 'private'
+RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at;
+
+-- name: TrimInstallationApprovalsToManifest :exec
+UPDATE application_installations i
+SET approved_permissions = COALESCE((
+    SELECT jsonb_agg(entry.key ORDER BY entry.key)
+    FROM jsonb_array_elements_text(i.approved_permissions) AS entry(key)
+    WHERE sqlc.arg(manifest_permissions)::jsonb ? entry.key
+), '[]'::jsonb)
+WHERE i.application_id = sqlc.arg(application_id) AND i.status <> 'uninstalled'
+  AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(i.approved_permissions) AS entry(key)
+    WHERE NOT (sqlc.arg(manifest_permissions)::jsonb ? entry.key)
+  );
+
+-- name: TrimInstallationRolePermissionsToManifest :exec
+DELETE FROM role_permissions rp
+USING application_installations i, permissions p
+WHERE i.application_id = sqlc.arg(application_id) AND i.status <> 'uninstalled'
+  AND rp.role_id = i.role_id AND p.id = rp.permission_id
+  AND NOT (sqlc.arg(manifest_permissions)::jsonb ? p.key);
+
+-- name: ListCurrentInstallationSpaces :many
+SELECT DISTINCT space_id FROM application_installations
+WHERE application_id = sqlc.arg(application_id) AND status <> 'uninstalled';
+
+-- name: TrimAPIKeyGrantsToManifest :exec
+UPDATE api_keys k
+SET scopes = COALESCE((
+    SELECT jsonb_agg(entry.key ORDER BY entry.key)
+    FROM jsonb_array_elements_text(k.scopes) AS entry(key)
+    WHERE sqlc.arg(manifest_permissions)::jsonb ? entry.key
+), '[]'::jsonb)
+WHERE k.application_id = sqlc.arg(application_id)
+  AND EXISTS (
+    SELECT 1 FROM jsonb_array_elements_text(k.scopes) AS entry(key)
+    WHERE NOT (sqlc.arg(manifest_permissions)::jsonb ? entry.key)
+  );
+
+-- name: GetInstallationApplicationIdentity :one
+SELECT application_id, space_id FROM application_installations
+WHERE id = sqlc.arg(installation_id);
+
+-- name: SetInstallationApprovedPermissions :execrows
+UPDATE application_installations
+SET approved_permissions = sqlc.arg(approved_permissions)
+WHERE id = sqlc.arg(installation_id) AND status <> 'uninstalled';
+
 -- name: GetPrivateApplicationForInstall :one
 WITH RECURSIVE ancestors AS (
     SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = sqlc.arg(target_space_id) AND spaces.status = 'active'

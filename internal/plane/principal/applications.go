@@ -26,6 +26,16 @@ type registerApplicationInput struct {
 	}
 }
 
+type updateApplicationInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+	Body          struct {
+		Name                *string   `json:"name,omitempty" maxLength:"120"`
+		RedirectURIs        *[]string `json:"redirect_uris,omitempty" maxItems:"20"`
+		ManifestPermissions *[]string `json:"manifest_permissions,omitempty" maxItems:"100"`
+	}
+}
+
 type installApplicationInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
@@ -79,8 +89,10 @@ type applicationKeyCreation struct {
 func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("applications.list", "GET", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplications)
 	route.Register(api, route.NewSpec("applications.register", "POST", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.registerApplication)
+	route.Register(api, route.NewSpec("applications.update", "PATCH", "/v1/applications/{app_id}", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.updateApplication)
 	route.Register(api, route.NewSpec("installations.list", "GET", "/v1/spaces/{id}/installations", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listInstallations)
 	route.Register(api, route.NewSpec("installations.create", "POST", "/v1/spaces/{id}/installations", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.installApplication)
+	route.Register(api, route.NewSpec("installations.approve", "PUT", "/v1/spaces/{id}/installations/{ins_id}/approvals", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.approveInstallation)
 	route.Register(api, route.NewSpec("installations.suspend", "POST", "/v1/spaces/{id}/installations/{ins_id}/suspend", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.suspendInstallation)
 	route.Register(api, route.NewSpec("installations.resume", "POST", "/v1/spaces/{id}/installations/{ins_id}/resume", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.resumeInstallation)
 	route.Register(api, route.NewSpec("installations.uninstall", "POST", "/v1/spaces/{id}/installations/{ins_id}/uninstall", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.uninstallInstallation)
@@ -231,6 +243,33 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	return out, nil
 }
 
+func (a *API) approveInstallation(ctx context.Context, in *installationLifecycleInput) (*authorizationDataOutput[application.Installation], error) {
+	if a.Applications == nil {
+		return nil, apierr.New("UNAVAILABLE", "application installations are unavailable")
+	}
+	if _, err := a.authenticatePrincipal(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	spaceID, err := a.Applications.InstallationSpace(ctx, in.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	if spaceID != in.ID {
+		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
+	}
+	actor, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	if err != nil {
+		return nil, err
+	}
+	installation, err := a.Applications.ApproveInstallationManifest(ctx, actor.ID, spaceID, in.InstallationID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[application.Installation]{}
+	out.Body.Data = installation
+	return out, nil
+}
+
 func (a *API) suspendInstallation(ctx context.Context, in *installationLifecycleInput) (*authorizationDataOutput[application.Installation], error) {
 	return a.changeInstallationStatus(ctx, in, "suspend")
 }
@@ -310,5 +349,21 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	}
 	out := &authorizationDataOutput[application.PublishedApplication]{}
 	out.Body.Data = registered
+	return out, nil
+}
+
+func (a *API) updateApplication(ctx context.Context, in *updateApplicationInput) (*authorizationDataOutput[application.PublishedApplication], error) {
+	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	updated, err := a.Applications.UpdatePrivate(ctx, actorID, in.ApplicationID, application.UpdateInput{
+		Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs, ManifestPermissions: in.Body.ManifestPermissions,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[application.PublishedApplication]{}
+	out.Body.Data = updated
 	return out, nil
 }

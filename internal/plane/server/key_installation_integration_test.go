@@ -76,6 +76,44 @@ func TestServerKeyUsesCurrentInstallationMemberAuthority(t *testing.T) {
 	}
 }
 
+func TestServerKeyImmediatelyLosesRemovedManifestPermission(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, spaceID, key, sessions := newServerFixture(t)
+	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
+	api := &API{Applications: apps, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("manifest key test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	check := func() *httptest.ResponseRecorder {
+		t.Helper()
+		body := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, actor.ID, actor.ID, spaceID)
+		request := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+key)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+	if baseline := check(); baseline.Code != http.StatusOK || !strings.Contains(baseline.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("manifest key baseline = %d %s", baseline.Code, baseline.Body.String())
+	}
+	manifest := []string{"auth.tokens:introspect"}
+	if _, err := apps.UpdatePrivate(ctx, actor.ID, "app_server_test", application.UpdateInput{ManifestPermissions: &manifest}); err != nil {
+		t.Fatal(err)
+	}
+	denied := check()
+	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), `"code":"PERMISSION_DENIED"`) {
+		t.Fatalf("key retained removed manifest permission: %d %s", denied.Code, denied.Body.String())
+	}
+	var scopes []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT scopes FROM api_keys WHERE application_id = 'app_server_test' AND name = 'server-test'`).Scan(&scopes); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(scopes), "auth.authz:check") {
+		t.Fatalf("key still stores removed manifest permission: %s", scopes)
+	}
+}
+
 func TestServerKeyLosesAndRegainsSpaceAfterInstallationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, key, sessions := newServerFixture(t)
