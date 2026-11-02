@@ -19,7 +19,7 @@ import (
 func TestServerKeyUsesCurrentInstallationMemberAuthority(t *testing.T) {
 	ctx := context.Background()
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("installed key test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
@@ -79,7 +79,7 @@ func TestServerKeyUsesCurrentInstallationMemberAuthority(t *testing.T) {
 func TestIntrospectionStopsWhenInstallationLosesPermission(t *testing.T) {
 	ctx := context.Background()
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	issued, err := sessions.CreateForMember(ctx, "usr_server_actor", member.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +135,7 @@ func TestServerKeyRequiresInstallationAtAgentSubjectSpace(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET restrict_to = '[]'::jsonb WHERE application_id = 'app_server_test'`); err != nil {
 		t.Fatal(err)
 	}
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions, Agents: agents}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions, Agents: agents}
 	decision, err := api.check(ctx, &CheckInput{
 		Authorization: "Bearer " + key,
 		Body: CheckBody{

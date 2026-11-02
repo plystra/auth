@@ -1,5 +1,5 @@
 -- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.restrict_to,
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
        a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
@@ -7,6 +7,18 @@ WHERE k.prefix = sqlc.arg(prefix) LIMIT 1;
 
 -- name: TouchAPIKey :exec
 UPDATE api_keys SET last_used_at = now() WHERE id = sqlc.arg(id);
+
+-- name: LockLegacyAPIKeyHashes :many
+SELECT id, secret_hash FROM api_keys
+WHERE hash_scheme = 'sha256_legacy'
+ORDER BY id LIMIT 500
+FOR UPDATE;
+
+-- name: UpdateAPIKeyHash :execrows
+UPDATE api_keys
+SET secret_hash = sqlc.arg(secret_hash), hash_scheme = 'hmac_sha256'
+WHERE id = sqlc.arg(id) AND secret_hash = sqlc.arg(previous_hash)
+  AND hash_scheme = sqlc.arg(previous_scheme);
 
 -- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)

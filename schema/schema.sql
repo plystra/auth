@@ -1486,3 +1486,12 @@ SELECT 'ins_01h00000000000000000000040', app.id, app.space_id,
        'space', app.manifest_permissions, NULL
 FROM applications AS app WHERE app.id = 'app_01h00000000000000000000000'
 ON CONFLICT (id) DO NOTHING;
+
+
+-- Existing SHA-256 digests are wrapped with the deployment HMAC key by the
+-- service before it accepts requests. New keys are HMAC-protected at creation.
+ALTER TABLE api_keys
+    ADD COLUMN hash_scheme text NOT NULL DEFAULT 'sha256_legacy'
+        CHECK (hash_scheme IN ('sha256_legacy', 'hmac_sha256'));
+
+ALTER TABLE api_keys ALTER COLUMN hash_scheme SET DEFAULT 'hmac_sha256';

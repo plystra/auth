@@ -36,7 +36,7 @@ func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 		t.Fatal(err)
 	}
 	approvals := &approval.Service{Store: st, Authorization: authz, StepUp: sessions}
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions, Agents: agents, Approvals: approvals}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions, Agents: agents, Approvals: approvals}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("server approval test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)

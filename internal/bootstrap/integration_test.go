@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 )
 
 var bootstrapDB *testdb.Harness
+var testAPIKeyHMACKey = []byte(strings.Repeat("k", 32))
 
 func TestMain(m *testing.M) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
@@ -42,7 +44,7 @@ func TestInitializePopulatesDefaultManifestAndScopedKey(t *testing.T) {
 	ctx := context.Background()
 	st := newBootstrapStore(t)
 
-	result, err := Initialize(ctx, st)
+	result, err := Initialize(ctx, st, testAPIKeyHMACKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,9 +77,11 @@ func TestInitializePopulatesDefaultManifestAndScopedKey(t *testing.T) {
 	if prefix != parts[0] {
 		t.Fatalf("stored prefix = %q, want %q", prefix, parts[0])
 	}
-	wantHash := sha256.Sum256([]byte(parts[1]))
-	if !bytes.Equal(secretHash, wantHash[:]) {
-		t.Fatal("database does not store the API key digest")
+	secretDigest := sha256.Sum256([]byte(parts[1]))
+	wantHash := hmac.New(sha256.New, testAPIKeyHMACKey)
+	_, _ = wantHash.Write(secretDigest[:])
+	if !bytes.Equal(secretHash, wantHash.Sum(nil)) {
+		t.Fatal("database does not store the HMAC API key digest")
 	}
 	if len(secretHash) != sha256.Size {
 		t.Fatalf("secret hash length = %d, want %d", len(secretHash), sha256.Size)
@@ -120,7 +124,7 @@ func TestInitializeRecreatesDefaultInstallationAfterCleanup(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1`, DefaultSpaceID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Initialize(ctx, st); err != nil {
+	if _, err := Initialize(ctx, st, testAPIKeyHMACKey); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -135,10 +139,10 @@ func TestInitializeRecreatesDefaultInstallationAfterCleanup(t *testing.T) {
 func TestInitializeRejectsSecondInvocationWithoutCreatingAnotherKey(t *testing.T) {
 	ctx := context.Background()
 	st := newBootstrapStore(t)
-	if _, err := Initialize(ctx, st); err != nil {
+	if _, err := Initialize(ctx, st, testAPIKeyHMACKey); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Initialize(ctx, st); err == nil {
+	if _, err := Initialize(ctx, st, testAPIKeyHMACKey); err == nil {
 		t.Fatal("second bootstrap initialization succeeded")
 	} else {
 		var apiError *apierr.Error
@@ -175,7 +179,7 @@ func TestInitializeRollsBackDefaultsWhenKeyCreationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Initialize(ctx, st); err == nil {
+	if _, err := Initialize(ctx, st, testAPIKeyHMACKey); err == nil {
 		t.Fatal("bootstrap initialization succeeded despite key creation failure")
 	}
 	var spaces, applications, keys int

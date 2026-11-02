@@ -93,6 +93,7 @@ type ApiKey struct {
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 	RestrictTo            []byte             `json:"restrict_to"`
+	HashScheme            string             `json:"hash_scheme"`
 }
 
 type Application struct {

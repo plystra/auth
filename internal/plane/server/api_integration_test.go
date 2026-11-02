@@ -47,7 +47,7 @@ func TestMain(m *testing.M) {
 func TestAuthzCheckSubjectAssertionAndKeyScope(t *testing.T) {
 	ctx := context.Background()
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	if _, err := api.resolveSubject(ctx, application.Key{SpaceID: spaceID}, CheckSubject{MemberID: member.ID}, spaceID); err == nil {
 		t.Fatal("member_id subject assertion succeeded without explicit API-key enablement")
 	} else {
@@ -88,7 +88,7 @@ func TestAuthzCheckSubjectAssertionAndKeyScope(t *testing.T) {
 
 func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
@@ -124,7 +124,7 @@ func TestAuthzCheckRejectsInlineFactsWithDocumentedError(t *testing.T) {
 
 func TestAuthzBatchCheckEvaluatesItemsIndependently(t *testing.T) {
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
@@ -167,7 +167,7 @@ func TestAuthzExplainHTTPUsesGoldenTraceAndAuditsDenials(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET scopes = '["auth.authz:check", "auth.authz:explain", "auth.tokens:introspect"]'::jsonb WHERE prefix = $1`, strings.SplitN(key, ".", 2)[0]); err != nil {
 		t.Fatal(err)
 	}
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
@@ -219,8 +219,9 @@ func TestAuthzExplainHTTPUsesGoldenTraceAndAuditsDenials(t *testing.T) {
 		t.Fatalf("explain deny audit = action=%q outcome=%q resource=%q", action, outcome, resourceID)
 	}
 
-	apps := &application.Service{Store: st}
-	withoutExplain, err := apps.CreateKey(ctx, "app_server_test", "without-explain", []string{"auth.authz:check"}, nil)
+	apps := &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
+	expiresAt := time.Now().Add(time.Hour)
+	withoutExplain, err := apps.CreateKey(ctx, "app_server_test", "without-explain", []string{"auth.authz:check"}, &expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +254,7 @@ func assertExplainGolden(t *testing.T, name string, decision ExplainDecision) {
 
 func TestAuthzRoutesRejectUnknownFieldsAndUseDocumentedBodyLimits(t *testing.T) {
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("server test", "1.0.0")))
 	handler := route.Middleware(route.Server, mux)
@@ -308,7 +309,7 @@ func TestAuthzCheckTokenUsesSelectedMemberWhenUserHasMultipleMembers(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	resolved, err := api.resolveSubject(ctx, application.Key{SpaceID: spaceID, ClientID: "server-test-client"}, CheckSubject{Token: token}, spaceID)
 	if err != nil {
 		t.Fatal(err)
@@ -333,7 +334,7 @@ func TestAuthzCheckTokenUsesSelectedMemberWhenUserHasMultipleMembers(t *testing.
 func TestTokenIntrospectionRequiresTheApplicationAudience(t *testing.T) {
 	ctx := context.Background()
 	st, _, _, spaceID, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Sessions: sessions}
 	now := time.Now().UTC()
 	foreign, err := sessions.Signer.Sign(security.Claims{
 		Issuer: sessions.Signer.Issuer(), Subject: "usr_server_actor", Audience: "foreign-app",
@@ -359,7 +360,7 @@ func TestTokenIntrospectionRequiresTheApplicationAudience(t *testing.T) {
 func TestTokenIntrospectionRejectsInvalidExpiredAndRevokedTokens(t *testing.T) {
 	ctx := context.Background()
 	st, authz, _, _, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
 	issued, err := sessions.Create(ctx, "usr_server_actor", nil, "", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -443,11 +444,12 @@ func newServerFixture(t *testing.T) (*store.Store, *authorization.Service, autho
 	`, space.ID, member.ID); err != nil {
 		t.Fatal(err)
 	}
-	apps := &application.Service{Store: st, Authorization: authz}
+	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
 	if _, err := apps.InstallPrivateSpace(ctx, member.ID, "app_server_test", space.ID); err != nil {
 		t.Fatal(err)
 	}
-	key, err := apps.CreateKey(ctx, "app_server_test", "server-test", []string{"auth.authz:check", "auth.tokens:introspect"}, nil)
+	expiresAt := time.Now().Add(time.Hour)
+	key, err := apps.CreateKey(ctx, "app_server_test", "server-test", []string{"auth.authz:check", "auth.tokens:introspect"}, &expiresAt)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -142,6 +143,18 @@ func TestOperatorBootstrapOnlyRunsWithoutExistingOperators(t *testing.T) {
 	}
 	if result.UserID != "usr_operator_bootstrap" || !strings.HasPrefix(result.APIKey, "ply_sk_") || result.TOTPSecret == "" {
 		t.Fatalf("bootstrap result = %+v, want user, API key, and TOTP enrollment", result)
+	}
+	parts := strings.SplitN(result.APIKey, ".", 2)
+	var storedHash []byte
+	var hashScheme string
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash, hash_scheme FROM api_keys WHERE prefix = $1`, parts[0]).Scan(&storedHash, &hashScheme); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(parts[1]))
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(digest[:])
+	if hashScheme != "hmac_sha256" || !hmac.Equal(storedHash, mac.Sum(nil)) {
+		t.Fatal("operator bootstrap API key was not stored as an HMAC digest")
 	}
 	var count int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM operators`).Scan(&count); err != nil {

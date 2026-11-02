@@ -144,7 +144,7 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 		if err != nil {
 			return err
 		}
-		rawKey, prefix, keyHash, err := application.GenerateSecret()
+		rawKey, prefix, keyHash, err := application.GenerateSecret(s.HMACKeys[0])
 		if err != nil {
 			return err
 		}

@@ -286,7 +286,7 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 }
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.restrict_to,
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
        a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
@@ -303,6 +303,7 @@ type GetAPIKeyByPrefixRow struct {
 	Name                  string             `json:"name"`
 	Prefix                string             `json:"prefix"`
 	SecretHash            []byte             `json:"secret_hash"`
+	HashScheme            string             `json:"hash_scheme"`
 	Scopes                []byte             `json:"scopes"`
 	RestrictTo            []byte             `json:"restrict_to"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
@@ -325,6 +326,7 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.Name,
 		&i.Prefix,
 		&i.SecretHash,
+		&i.HashScheme,
 		&i.Scopes,
 		&i.RestrictTo,
 		&i.ExpiresAt,
@@ -614,6 +616,38 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 	return items, nil
 }
 
+const lockLegacyAPIKeyHashes = `-- name: LockLegacyAPIKeyHashes :many
+SELECT id, secret_hash FROM api_keys
+WHERE hash_scheme = 'sha256_legacy'
+ORDER BY id LIMIT 500
+FOR UPDATE
+`
+
+type LockLegacyAPIKeyHashesRow struct {
+	ID         string `json:"id"`
+	SecretHash []byte `json:"secret_hash"`
+}
+
+func (q *Queries) LockLegacyAPIKeyHashes(ctx context.Context) ([]LockLegacyAPIKeyHashesRow, error) {
+	rows, err := q.db.Query(ctx, lockLegacyAPIKeyHashes)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LockLegacyAPIKeyHashesRow{}
+	for rows.Next() {
+		var i LockLegacyAPIKeyHashesRow
+		if err := rows.Scan(&i.ID, &i.SecretHash); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const touchAPIKey = `-- name: TouchAPIKey :exec
 UPDATE api_keys SET last_used_at = now() WHERE id = $1
 `
@@ -625,4 +659,31 @@ type TouchAPIKeyParams struct {
 func (q *Queries) TouchAPIKey(ctx context.Context, arg TouchAPIKeyParams) error {
 	_, err := q.db.Exec(ctx, touchAPIKey, arg.ID)
 	return err
+}
+
+const updateAPIKeyHash = `-- name: UpdateAPIKeyHash :execrows
+UPDATE api_keys
+SET secret_hash = $1, hash_scheme = 'hmac_sha256'
+WHERE id = $2 AND secret_hash = $3
+  AND hash_scheme = $4
+`
+
+type UpdateAPIKeyHashParams struct {
+	SecretHash     []byte `json:"secret_hash"`
+	ID             string `json:"id"`
+	PreviousHash   []byte `json:"previous_hash"`
+	PreviousScheme string `json:"previous_scheme"`
+}
+
+func (q *Queries) UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateAPIKeyHash,
+		arg.SecretHash,
+		arg.ID,
+		arg.PreviousHash,
+		arg.PreviousScheme,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

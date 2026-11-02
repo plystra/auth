@@ -81,7 +81,7 @@ func initCommand() *cobra.Command {
 			return e
 		}
 		defer st.Close()
-		result, e := bootstrap.Initialize(cmd.Context(), st)
+		result, e := bootstrap.Initialize(cmd.Context(), st, parseKeys(c.SessionHMACKeys)[0])
 		if e != nil {
 			return e
 		}
@@ -249,6 +249,9 @@ func serve(ctx context.Context) error {
 	factorSvc.StepUp = sessionSvc
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc, Mailer: mailSvc}
 	apps := &application.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc, HMACKeys: parseKeys(c.SessionHMACKeys)}
+	if err := apps.UpgradeLegacyKeyHashes(ctx); err != nil {
+		return fmt.Errorf("upgrade application API key hashes: %w", err)
+	}
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
 	accounts.Invitations = invitationSvc

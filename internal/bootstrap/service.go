@@ -28,11 +28,11 @@ type Result struct {
 // Initialize creates the deployment defaults and one scoped bootstrap API key
 // in a single transaction. A second invocation refuses to create another
 // bootstrap key because the secret is intentionally only returned once.
-func Initialize(ctx context.Context, st *store.Store) (Result, error) {
+func Initialize(ctx context.Context, st *store.Store, hmacKey []byte) (Result, error) {
 	if st == nil {
 		return Result{}, errors.New("bootstrap store is required")
 	}
-	rawKey, prefix, hash, err := application.GenerateSecret()
+	rawKey, prefix, hash, err := application.GenerateSecret(hmacKey)
 	if err != nil {
 		return Result{}, err
 	}

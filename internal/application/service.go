@@ -230,6 +230,9 @@ type KeyRestriction struct {
 }
 
 func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) {
+	if s == nil || s.Store == nil || len(s.HMACKeys) == 0 {
+		return Key{}, apierr.New("UNAVAILABLE", "application API key authentication is unavailable")
+	}
 	parts := strings.SplitN(raw, ".", 2)
 	if len(parts) != 2 || !strings.HasPrefix(parts[0], "ply_sk_") {
 		return Key{}, apierr.New("unauthorized", "application API key is required")
@@ -241,8 +244,15 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 		}
 		return Key{}, e
 	}
-	sum := sha256.Sum256([]byte(parts[1]))
-	if !hmac.Equal(sum[:], row.SecretHash) {
+	valid := false
+	if row.HashScheme == "hmac_sha256" {
+		for _, key := range s.HMACKeys {
+			if hmac.Equal(apiKeyHash(key, parts[1]), row.SecretHash) {
+				valid = true
+			}
+		}
+	}
+	if !valid {
 		return Key{}, apierr.New("unauthorized", "application API key is invalid")
 	}
 	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) || row.ApplicationStatus != "active" {
@@ -408,18 +418,74 @@ func (s *Service) ConsumeAuthorizationCode(ctx context.Context, codeHash []byte,
 func nullableText(value string) pgtype.Text {
 	return pgtype.Text{String: value, Valid: value != ""}
 }
-func GenerateSecret() (string, string, []byte, error) {
+
+// UpgradeLegacyKeyHashes wraps existing SHA-256 digests before serving traffic.
+// The old digest is sufficient to perform this one-way migration without
+// recovering or reissuing the secret.
+func (s *Service) UpgradeLegacyKeyHashes(ctx context.Context) error {
+	if s == nil || s.Store == nil || len(s.HMACKeys) == 0 || len(s.HMACKeys[0]) < 32 {
+		return errors.New("application API key HMAC key of at least 32 bytes is required")
+	}
+	for {
+		processed := 0
+		err := s.Store.InTx(ctx, func(q *db.Queries) error {
+			rows, err := q.LockLegacyAPIKeyHashes(ctx)
+			if err != nil {
+				return err
+			}
+			for _, row := range rows {
+				if len(row.SecretHash) != sha256.Size {
+					return errors.New("legacy application API key has an invalid digest")
+				}
+				mac := hmac.New(sha256.New, s.HMACKeys[0])
+				_, _ = mac.Write(row.SecretHash)
+				updated, err := q.UpdateAPIKeyHash(ctx, db.UpdateAPIKeyHashParams{
+					ID: row.ID, SecretHash: mac.Sum(nil), PreviousHash: row.SecretHash, PreviousScheme: "sha256_legacy",
+				})
+				if err != nil {
+					return err
+				}
+				processed += int(updated)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if processed == 0 {
+			return nil
+		}
+	}
+}
+
+func apiKeyHash(key []byte, raw string) []byte {
+	sum := sha256.Sum256([]byte(raw))
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write(sum[:])
+	return mac.Sum(nil)
+}
+
+func GenerateSecret(key []byte) (string, string, []byte, error) {
+	if len(key) < 32 {
+		return "", "", nil, errors.New("application API key HMAC key must be at least 32 bytes")
+	}
 	b := make([]byte, 32)
 	if _, e := rand.Read(b); e != nil {
 		return "", "", nil, e
 	}
 	raw := base64.RawURLEncoding.EncodeToString(b)
 	prefix := "ply_sk_" + raw[:10]
-	sum := sha256.Sum256([]byte(raw))
-	return prefix + "." + raw, prefix, sum[:], nil
+	return prefix + "." + raw, prefix, apiKeyHash(key, raw), nil
 }
 func (s *Service) CreateKey(ctx context.Context, applicationID, name string, scopes []string, expires *time.Time) (string, error) {
-	raw, prefix, hash, e := GenerateSecret()
+	if s == nil || s.Store == nil || len(s.HMACKeys) == 0 {
+		return "", apierr.New("UNAVAILABLE", "application API key creation is unavailable")
+	}
+	now := time.Now()
+	if expires == nil || !expires.After(now) || expires.After(now.Add(365*24*time.Hour)) {
+		return "", apierr.New("VALIDATION_FAILED", "API key expiry must be in the future and within one year")
+	}
+	raw, prefix, hash, e := GenerateSecret(s.HMACKeys[0])
 	if e != nil {
 		return "", e
 	}
