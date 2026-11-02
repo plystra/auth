@@ -13,6 +13,8 @@ gen:
 	$(GO) run ./internal/tools/schema-snapshot
 	$(GO) run ./internal/tools/openapi
 
+# Each test package starts its own PostgreSQL container; cap concurrent startups.
+check: export GOFLAGS += -p=4
 check: gen
 	git diff --exit-code
 	$(MAKE) web-check
