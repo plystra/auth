@@ -66,6 +66,7 @@ type CheckRequest struct {
 	ResourceSpace string
 	ResourceGroup string
 	ResourceOwner string
+	approved      bool
 }
 
 // Check is the single authorization decision entry point shared by all
@@ -200,9 +201,10 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 		ResourceGroupAncestors: groupAncestors,
 		ResourceOwner:          in.ResourceOwner,
 		Assignments:            assignments,
+		ApprovalValid:          in.approved,
 	}
-	// G12 must load a verified, single-use approval from Auth state before
-	// setting ApprovalValid. Callers cannot assert approval as a request fact.
+	// Only CheckBusiness can set ApprovalValid after finding a persisted approval.
+	// Callers cannot assert approval as a request fact.
 	if in.ResourceOwner != "" && in.ResourceOwner != in.MemberID {
 		owned, ownerErr := q.CanResolveAgentOwnership(ctx, db.CanResolveAgentOwnershipParams{OwnerMemberID: in.MemberID, TargetMemberID: in.ResourceOwner})
 		if ownerErr != nil {

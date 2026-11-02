@@ -28,6 +28,7 @@ type AgentID string
 type AuditID string
 type OperatorSessionID string
 type InvitationID string
+type ApprovalID string
 type SignInAttemptID string
 type PasskeyChallengeID string
 
@@ -57,5 +58,6 @@ func (id AgentID) Valid() bool            { return valid(string(id), "agt") }
 func (id AuditID) Valid() bool            { return valid(string(id), "aud") }
 func (id OperatorSessionID) Valid() bool  { return valid(string(id), "ops") }
 func (id InvitationID) Valid() bool       { return valid(string(id), "ivt") }
+func (id ApprovalID) Valid() bool         { return valid(string(id), "apr") }
 func (id SignInAttemptID) Valid() bool    { return valid(string(id), "sia") }
 func (id PasskeyChallengeID) Valid() bool { return valid(string(id), "pch") }

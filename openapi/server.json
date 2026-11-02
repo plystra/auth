@@ -1,6 +1,50 @@
 {
   "components": {
     "schemas": {
+      "ApprovalCreateInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "grants": {},
+          "reason": {
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "request_digest": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "resource": {
+            "$ref": "#/components/schemas/CheckResource"
+          },
+          "roles": {},
+          "subject": {
+            "$ref": "#/components/schemas/CheckSubject"
+          }
+        },
+        "required": [
+          "subject",
+          "action",
+          "resource",
+          "request_digest"
+        ],
+        "type": "object"
+      },
+      "ApprovalCreateOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Request"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "BatchCheckBody": {
         "additionalProperties": false,
         "properties": {
@@ -268,6 +312,77 @@
           "data"
         ],
         "type": "object"
+      },
+      "Request": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "agent_member_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "request_digest": {
+            "type": "string"
+          },
+          "resource": {
+            "$ref": "#/components/schemas/Resource"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "agent_member_id",
+          "action",
+          "resource",
+          "request_digest",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "Resource": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "owner_member_id": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id",
+          "space_id"
+        ],
+        "type": "object"
       }
     }
   },
@@ -277,6 +392,53 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/server/v1/approvals": {
+      "post": {
+        "operationId": "approvals.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalCreateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApprovalCreateOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "approvals.create"
+      }
+    },
     "/server/v1/authz/batch-check": {
       "post": {
         "operationId": "authz.batch_check",

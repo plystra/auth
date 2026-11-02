@@ -23,6 +23,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/bootstrap"
@@ -249,9 +250,10 @@ func serve(ctx context.Context) error {
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc, Mailer: mailSvc}
 	apps := &application.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
+	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
 	accounts.Invitations = invitationSvc
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc}
-	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc}
+	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
 		return e

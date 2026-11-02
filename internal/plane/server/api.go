@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
@@ -27,6 +29,7 @@ type API struct {
 	Authorization *authorization.Service
 	Sessions      *session.Service
 	Agents        *agent.Service
+	Approvals     *approval.Service
 }
 
 type CheckSubject struct {
@@ -78,6 +81,25 @@ type CheckBody struct {
 	Resource CheckResource   `json:"resource"`
 	Grants   json.RawMessage `json:"grants,omitempty"`
 	Roles    json.RawMessage `json:"roles,omitempty"`
+}
+
+type ApprovalCreateInput struct {
+	Authorization string `header:"Authorization"`
+	Body          struct {
+		Subject       CheckSubject    `json:"subject"`
+		Action        string          `json:"action"`
+		Resource      CheckResource   `json:"resource"`
+		RequestDigest string          `json:"request_digest" minLength:"64" maxLength:"64"`
+		Reason        string          `json:"reason,omitempty" maxLength:"2000"`
+		Grants        json.RawMessage `json:"grants,omitempty"`
+		Roles         json.RawMessage `json:"roles,omitempty"`
+	}
+}
+
+type ApprovalCreateOutput struct {
+	Body struct {
+		Data approval.Request `json:"data"`
+	}
 }
 
 type CheckInput struct {
@@ -163,6 +185,39 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("authz.batch_check", "POST", "/server/v1/authz/batch-check", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(256*1024)), a.batchCheck)
 	route.Register(api, route.NewSpec("authz.explain", "POST", "/server/v1/authz/explain", route.Server, "auth.authz:explain", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.explain)
 	route.Register(api, route.NewSpec("tokens.introspect", "POST", "/server/v1/tokens/introspect", route.Server, "auth.tokens:introspect", []route.Subject{route.HumanAgent}), a.introspect)
+	route.Register(api, route.NewSpec("approvals.create", "POST", "/server/v1/approvals", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createApproval)
+}
+
+func (a *API) createApproval(ctx context.Context, in *ApprovalCreateInput) (*ApprovalCreateOutput, error) {
+	if a.Approvals == nil {
+		return nil, apierr.New("UNAVAILABLE", "approvals are unavailable")
+	}
+	body := CheckBody{Subject: in.Body.Subject, Action: in.Body.Action, Resource: in.Body.Resource, Grants: in.Body.Grants, Roles: in.Body.Roles}
+	key, err := a.key(ctx, in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	evaluation, err := a.evaluateWithKey(ctx, key, body, "auth.authz:check", false)
+	if err != nil {
+		return nil, err
+	}
+	if evaluation.decision.Code != "APPROVAL_REQUIRED" {
+		return nil, apierr.New("VALIDATION_FAILED", "the Agent action is not awaiting human approval")
+	}
+	digest, err := hex.DecodeString(in.Body.RequestDigest)
+	if err != nil || len(digest) != 32 {
+		return nil, apierr.New("VALIDATION_FAILED", "request_digest must be a SHA-256 hex digest")
+	}
+	created, err := a.Approvals.CreateBusiness(ctx, key.ID, evaluation.memberID, in.Body.Action, approval.Resource{
+		Type: in.Body.Resource.Type, ID: in.Body.Resource.ID, SpaceID: evaluation.spaceID,
+		GroupID: in.Body.Resource.GroupID, OwnerMemberID: in.Body.Resource.OwnerMemberID,
+	}, digest, in.Body.Reason)
+	if err != nil {
+		return nil, err
+	}
+	out := &ApprovalCreateOutput{}
+	out.Body.Data = created
+	return out, nil
 }
 
 func (a *API) check(ctx context.Context, in *CheckInput) (*CheckOutput, error) {
@@ -207,7 +262,7 @@ func (a *API) explain(ctx context.Context, in *CheckInput) (*ExplainOutput, erro
 	if err != nil {
 		return nil, err
 	}
-	evaluation, err := a.evaluateWithKey(ctx, key, in.Body, "auth.authz:explain")
+	evaluation, err := a.evaluateWithKey(ctx, key, in.Body, "auth.authz:explain", false)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +284,7 @@ func (a *API) explain(ctx context.Context, in *CheckInput) (*ExplainOutput, erro
 }
 
 func (a *API) checkWithKey(ctx context.Context, key application.Key, body CheckBody) (*CheckOutput, error) {
-	evaluation, err := a.evaluateWithKey(ctx, key, body, "auth.authz:check")
+	evaluation, err := a.evaluateWithKey(ctx, key, body, "auth.authz:check", true)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +298,7 @@ type authorizationEvaluation struct {
 	spaceID       string
 }
 
-func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body CheckBody, requiredScope string) (authorizationEvaluation, error) {
+func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body CheckBody, requiredScope string, consumeApproval bool) (authorizationEvaluation, error) {
 	if len(body.Grants) > 0 || len(body.Roles) > 0 || len(body.Subject.unknown) > 0 {
 		return authorizationEvaluation{}, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
 	}
@@ -277,10 +332,17 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		}
 		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
 	}
-	decision, policyVersion, err := a.Authorization.Check(ctx, authorization.CheckRequest{
+	check := authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
 		ResourceGroup: body.Resource.GroupID, ResourceOwner: body.Resource.OwnerMemberID,
-	})
+	}
+	var decision engine.Decision
+	var policyVersion int64
+	if consumeApproval {
+		decision, policyVersion, err = a.Authorization.CheckBusiness(ctx, check, body.Resource.Type, body.Resource.ID)
+	} else {
+		decision, policyVersion, err = a.Authorization.Check(ctx, check)
+	}
 	if err != nil {
 		return authorizationEvaluation{}, err
 	}

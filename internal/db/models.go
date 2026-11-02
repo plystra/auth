@@ -105,6 +105,27 @@ type Application struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
+type ApprovalRequest struct {
+	ID                    string             `json:"id"`
+	AgentMemberID         string             `json:"agent_member_id"`
+	ApproverMemberID      string             `json:"approver_member_id"`
+	PermissionKey         string             `json:"permission_key"`
+	ResourceType          string             `json:"resource_type"`
+	ResourceID            string             `json:"resource_id"`
+	ResourceSpaceID       string             `json:"resource_space_id"`
+	ResourceGroupID       pgtype.Text        `json:"resource_group_id"`
+	ResourceOwnerMemberID pgtype.Text        `json:"resource_owner_member_id"`
+	RequestDigest         []byte             `json:"request_digest"`
+	Reason                string             `json:"reason"`
+	Status                string             `json:"status"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	DecidedByUserID       pgtype.Text        `json:"decided_by_user_id"`
+	DecidedAt             pgtype.Timestamptz `json:"decided_at"`
+	ApprovedExpiresAt     pgtype.Timestamptz `json:"approved_expires_at"`
+	ConsumedAt            pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+}
+
 type AssignRight struct {
 	ID                      string             `json:"id"`
 	HolderMemberID          string             `json:"holder_member_id"`

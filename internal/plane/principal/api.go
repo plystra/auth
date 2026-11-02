@@ -11,6 +11,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/invitation"
@@ -30,6 +31,7 @@ type API struct {
 	Agents        *agent.Service
 	Invitations   *invitation.Service
 	Factors       *factor.Service
+	Approvals     *approval.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
@@ -252,6 +254,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.password_reset", "POST", "/v1/auth/password/reset", route.Principal, "", []route.Subject{route.Public}), a.passwordResetConfirm)
 	a.registerAgentRoutes(api)
 	a.registerAuthorizationRoutes(api)
+	a.registerApprovalRoutes(api)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
 	r := in.Body
@@ -404,7 +407,7 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 
 func principalStepUpOperation(operation string) bool {
 	switch operation {
-	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete":
+	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete", "approvals.approve", "approvals.reject":
 		return true
 	default:
 		return false

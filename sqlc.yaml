@@ -16,6 +16,7 @@ sql:
       - "internal/store"
       - "internal/operator/queries"
       - "internal/invitation/queries"
+      - "internal/approval/queries"
       - "internal/idempotency"
     database:
       uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
@@ -273,6 +274,25 @@ sql:
       go:
         package: "db"
         out: "internal/invitation/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        emit_empty_slices: true
+        omit_unused_structs: true
+        query_parameter_limit: 0
+
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "internal/approval/queries"
+    database:
+      uri: "${PLYSTRA_SQLC_VET_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/approval/db"
         sql_package: "pgx/v5"
         emit_json_tags: true
         emit_empty_slices: true
