@@ -278,6 +278,16 @@ func TestBusinessApprovalRechecksOwnerAndExpiry(t *testing.T) {
 	if _, err := f.store.Pool.Exec(ctx, `UPDATE members SET status = 'active' WHERE id = $1`, f.ownerID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, f.ownerID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = f.authz.CheckBusiness(ctx, f.check("inv_owner"), "invoice", "inv_owner")
+	if err != nil || decision.Code != "OWNER_ENVELOPE_EXCLUDED" {
+		t.Fatalf("owner without grant decision = %+v, %v", decision, err)
+	}
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = NULL WHERE grantee_member_id = $1`, f.ownerID); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := f.store.Pool.Exec(ctx, `UPDATE approval_requests SET approved_expires_at = now() - interval '1 second' WHERE id = $1`, created.ID); err != nil {
 		t.Fatal(err)
 	}
