@@ -124,7 +124,7 @@ func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applic
 		row, err := q.CreateApplicationInstallation(ctx, db.CreateApplicationInstallationParams{
 			ID: installationID, ApplicationID: applicationID, SpaceID: spaceID,
 			MemberID: memberID, RoleID: roleID, Scope: "space",
-			ApprovedPermissions: app.ManifestPermissions, InstalledBy: actorMemberID,
+			ApprovedPermissions: app.ManifestPermissions, InstalledBy: pgtype.Text{String: actorMemberID, Valid: true},
 		})
 		if err != nil {
 			var pgErr *pgconn.PgError

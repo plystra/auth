@@ -92,6 +92,7 @@ type ApiKey struct {
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+	RestrictTo            []byte             `json:"restrict_to"`
 }
 
 type Application struct {
@@ -118,7 +119,7 @@ type ApplicationInstallation struct {
 	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
 	ApprovedPermissions []byte             `json:"approved_permissions"`
 	Status              string             `json:"status"`
-	InstalledBy         string             `json:"installed_by"`
+	InstalledBy         pgtype.Text        `json:"installed_by"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 }
 

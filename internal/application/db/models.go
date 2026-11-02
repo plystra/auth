@@ -8,20 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-type ApiKey struct {
-	ID                    string             `json:"id"`
-	ApplicationID         string             `json:"application_id"`
-	Name                  string             `json:"name"`
-	Prefix                string             `json:"prefix"`
-	SecretHash            []byte             `json:"secret_hash"`
-	Scopes                []byte             `json:"scopes"`
-	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
-	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
-	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt             pgtype.Timestamptz `json:"created_at"`
-	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
-}
-
 type ApplicationInstallation struct {
 	ID                  string             `json:"id"`
 	ApplicationID       string             `json:"application_id"`
@@ -32,6 +18,6 @@ type ApplicationInstallation struct {
 	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
 	ApprovedPermissions []byte             `json:"approved_permissions"`
 	Status              string             `json:"status"`
-	InstalledBy         string             `json:"installed_by"`
+	InstalledBy         pgtype.Text        `json:"installed_by"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 }

@@ -40,6 +40,10 @@ func Initialize(ctx context.Context, st *store.Store) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	restrictions, err := json.Marshal([]application.KeyRestriction{{SpaceID: DefaultSpaceID}})
+	if err != nil {
+		return Result{}, err
+	}
 	result := Result{SpaceID: DefaultSpaceID, ApplicationID: DefaultApplicationID}
 	err = st.InTx(ctx, func(q *db.Queries) error {
 		if err := q.EnsureDefaultSpace(ctx); err != nil {
@@ -47,6 +51,18 @@ func Initialize(ctx context.Context, st *store.Store) (Result, error) {
 		}
 		if err := q.EnsureDefaultApplication(ctx); err != nil {
 			return err
+		}
+		for _, ensure := range []func(context.Context) error{
+			q.EnsureDefaultApplicationManifest,
+			q.EnsureDefaultApplicationMember,
+			q.EnsureDefaultApplicationRole,
+			q.EnsureDefaultApplicationRolePermissions,
+			q.EnsureDefaultApplicationGrant,
+			q.EnsureDefaultApplicationInstallation,
+		} {
+			if err := ensure(ctx); err != nil {
+				return err
+			}
 		}
 		count, err := q.CountAPIKeysForApplication(ctx, db.CountAPIKeysForApplicationParams{ApplicationID: DefaultApplicationID})
 		if err != nil {
@@ -62,6 +78,7 @@ func Initialize(ctx context.Context, st *store.Store) (Result, error) {
 			Prefix:                prefix,
 			SecretHash:            hash,
 			Scopes:                scopes,
+			RestrictTo:            restrictions,
 			ExpiresAt:             pgtype.Timestamptz{Time: time.Now().UTC().Add(365 * 24 * time.Hour), Valid: true},
 			AllowSubjectAssertion: false,
 		})

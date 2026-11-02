@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
 )
@@ -52,22 +54,22 @@ func TestInitializePopulatesDefaultManifestAndScopedKey(t *testing.T) {
 		t.Fatalf("bootstrap key has invalid format: %q", result.APIKey)
 	}
 
-	var applicationScopes, keyScopes []byte
+	var applicationScopes, manifest, keyScopes, restrictions []byte
 	var prefix string
 	var secretHash []byte
 	var expiresAt time.Time
 	if err := st.Pool.QueryRow(ctx, `
-		SELECT allowed_scopes
+		SELECT allowed_scopes, manifest_permissions
 		FROM applications
 		WHERE id = $1
-	`, DefaultApplicationID).Scan(&applicationScopes); err != nil {
+	`, DefaultApplicationID).Scan(&applicationScopes, &manifest); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Pool.QueryRow(ctx, `
-		SELECT prefix, secret_hash, scopes, expires_at
+		SELECT prefix, secret_hash, scopes, restrict_to, expires_at
 		FROM api_keys
 		WHERE application_id = $1
-	`, DefaultApplicationID).Scan(&prefix, &secretHash, &keyScopes, &expiresAt); err != nil {
+	`, DefaultApplicationID).Scan(&prefix, &secretHash, &keyScopes, &restrictions, &expiresAt); err != nil {
 		t.Fatal(err)
 	}
 	if prefix != parts[0] {
@@ -82,10 +84,51 @@ func TestInitializePopulatesDefaultManifestAndScopedKey(t *testing.T) {
 	}
 	wantScopes := []string{"auth.authz:check", "auth.tokens:introspect"}
 	assertJSONScopes(t, applicationScopes, wantScopes)
+	assertJSONScopes(t, manifest, wantScopes)
 	assertJSONScopes(t, keyScopes, wantScopes)
+	var restricted []struct {
+		SpaceID string `json:"space_id"`
+	}
+	if err := json.Unmarshal(restrictions, &restricted); err != nil || len(restricted) != 1 || restricted[0].SpaceID != DefaultSpaceID {
+		t.Fatalf("bootstrap key restrictions = %s, error = %v", restrictions, err)
+	}
+	var memberID, scope, status string
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT member_id, scope, status FROM application_installations
+		WHERE application_id = $1 AND space_id = $2
+	`, DefaultApplicationID, DefaultSpaceID).Scan(&memberID, &scope, &status); err != nil {
+		t.Fatal(err)
+	}
+	if scope != "space" || status != "active" {
+		t.Fatalf("bootstrap installation scope=%q status=%q", scope, status)
+	}
+	decision, _, err := (&authorization.Service{Store: st}).Check(ctx, authorization.CheckRequest{
+		MemberID: memberID, Permission: "auth.authz:check", ResourceSpace: DefaultSpaceID,
+	})
+	if err != nil || decision.Effect != engine.Allow {
+		t.Fatalf("bootstrap application member decision = %+v, %v", decision, err)
+	}
 	remaining := time.Until(expiresAt)
 	if remaining < 364*24*time.Hour || remaining > 366*24*time.Hour {
 		t.Fatalf("bootstrap key lifetime = %s, want approximately one year", remaining)
+	}
+}
+
+func TestInitializeRecreatesDefaultInstallationAfterCleanup(t *testing.T) {
+	ctx := context.Background()
+	st := newBootstrapStore(t)
+	if _, err := st.Pool.Exec(ctx, `DELETE FROM spaces WHERE id = $1`, DefaultSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Initialize(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `
+		SELECT count(*) FROM application_installations
+		WHERE application_id = $1 AND space_id = $2 AND status = 'active'
+	`, DefaultApplicationID, DefaultSpaceID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("recreated default installation count=%d error=%v", count, err)
 	}
 }
 

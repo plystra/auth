@@ -358,8 +358,8 @@ func TestTokenIntrospectionRequiresTheApplicationAudience(t *testing.T) {
 
 func TestTokenIntrospectionRejectsInvalidExpiredAndRevokedTokens(t *testing.T) {
 	ctx := context.Background()
-	st, _, _, _, key, sessions := newServerFixture(t)
-	api := &API{Applications: &application.Service{Store: st}, Sessions: sessions}
+	st, authz, _, _, key, sessions := newServerFixture(t)
+	api := &API{Applications: &application.Service{Store: st}, Authorization: authz, Sessions: sessions}
 	issued, err := sessions.Create(ctx, "usr_server_actor", nil, "", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -431,17 +431,31 @@ func newServerFixture(t *testing.T) (*store.Store, *authorization.Service, autho
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO applications (id, space_id, name, client_id)
-		VALUES ('app_server_test', $1, 'Server Test Application', 'server-test-client')
+		INSERT INTO applications (id, space_id, name, client_id, manifest_permissions)
+		VALUES ('app_server_test', $1, 'Server Test Application', 'server-test-client',
+		        '["auth.authz:check", "auth.authz:explain", "auth.tokens:introspect"]'::jsonb)
 	`, space.ID); err != nil {
 		t.Fatal(err)
 	}
-	apps := &application.Service{Store: st}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_server_app_manage', $1, '["auth.applications:manage"]'::jsonb, $2, 'space', $1, $2)
+	`, space.ID, member.ID); err != nil {
+		t.Fatal(err)
+	}
+	apps := &application.Service{Store: st, Authorization: authz}
+	if _, err := apps.InstallPrivateSpace(ctx, member.ID, "app_server_test", space.ID); err != nil {
+		t.Fatal(err)
+	}
 	key, err := apps.CreateKey(ctx, "app_server_test", "server-test", []string{"auth.authz:check", "auth.tokens:introspect"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allow_subject_assertion = true WHERE name = 'server-test'`); err != nil {
+	if _, err := st.Pool.Exec(ctx, `
+		UPDATE api_keys SET allow_subject_assertion = true,
+		    restrict_to = jsonb_build_array(jsonb_build_object('space_id', $1::text, 'include_descendants', false))
+		WHERE name = 'server-test'
+	`, space.ID); err != nil {
 		t.Fatal(err)
 	}
 	signer, err := security.GenerateSigner("https://auth.test")

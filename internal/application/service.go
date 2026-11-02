@@ -220,7 +220,13 @@ type Key struct {
 	ClientID              string
 	SpaceID               string
 	Scopes                []string
+	RestrictTo            []KeyRestriction
 	AllowSubjectAssertion bool
+}
+
+type KeyRestriction struct {
+	SpaceID            string `json:"space_id"`
+	IncludeDescendants bool   `json:"include_descendants"`
 }
 
 func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) {
@@ -239,7 +245,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	if !hmac.Equal(sum[:], row.SecretHash) {
 		return Key{}, apierr.New("unauthorized", "application API key is invalid")
 	}
-	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) {
+	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) || row.ApplicationStatus != "active" {
 		return Key{}, apierr.New("unauthorized", "application API key is revoked or expired")
 	}
 	if e = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -248,8 +254,57 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 		return Key{}, e
 	}
 	var scopes []string
-	_ = json.Unmarshal(row.Scopes, &scopes)
-	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
+	if err := json.Unmarshal(row.Scopes, &scopes); err != nil {
+		return Key{}, apierr.New("UNAVAILABLE", "API key permissions are invalid")
+	}
+	var restrictions []KeyRestriction
+	if err := json.Unmarshal(row.RestrictTo, &restrictions); err != nil {
+		return Key{}, apierr.New("UNAVAILABLE", "API key installation scope is invalid")
+	}
+	for _, restriction := range restrictions {
+		if restriction.SpaceID == "" {
+			return Key{}, apierr.New("UNAVAILABLE", "API key installation scope is invalid")
+		}
+	}
+	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, RestrictTo: restrictions, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
+}
+
+// ResolveKeyInstallation finds the application member whose current authority
+// covers the requested Space. A key restriction is checked before the
+// installation so a restricted key cannot reveal another installation.
+func (s *Service) ResolveKeyInstallation(ctx context.Context, key Key, targetSpaceID string) (string, string, error) {
+	if s == nil || s.Store == nil {
+		return "", "", apierr.New("UNAVAILABLE", "application installations are unavailable")
+	}
+	ancestors, err := s.Store.Queries().ListActiveSpaceAncestorsForKey(ctx, db.ListActiveSpaceAncestorsForKeyParams{TargetSpaceID: targetSpaceID})
+	if err != nil {
+		return "", "", err
+	}
+	if len(ancestors) == 0 {
+		return "", "APPLICATION_NOT_INSTALLED", nil
+	}
+	if len(key.RestrictTo) > 0 {
+		allowed := false
+		for _, restriction := range key.RestrictTo {
+			if restriction.SpaceID == targetSpaceID || (restriction.IncludeDescendants && slices.Contains(ancestors, restriction.SpaceID)) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", "KEY_SCOPE_EXCLUDED", nil
+		}
+	}
+	installation, err := s.Store.Queries().GetActiveApplicationInstallationForSpace(ctx, db.GetActiveApplicationInstallationForSpaceParams{
+		ApplicationID: key.ApplicationID, TargetSpaceID: targetSpaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "APPLICATION_NOT_INSTALLED", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return installation.MemberID, "", nil
 }
 
 func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient, error) {

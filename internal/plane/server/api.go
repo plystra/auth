@@ -175,9 +175,10 @@ type IntrospectOutput struct {
 }
 
 type resolvedSubject struct {
-	ID     string
-	Type   string
-	Scopes []string
+	ID      string
+	Type    string
+	SpaceID string
+	Scopes  []string
 }
 
 func (a *API) Register(api huma.API) {
@@ -239,9 +240,6 @@ func (a *API) batchCheck(ctx context.Context, in *BatchCheckInput) (*BatchCheckO
 	if err != nil {
 		return nil, err
 	}
-	if !contains(key.Scopes, "auth.authz:check") {
-		return nil, apierr.New("PERMISSION_DENIED", "API key is not scoped for authorization checks.")
-	}
 	out := &BatchCheckOutput{}
 	out.Body.Data = make([]CheckDecision, 0, len(in.Body.Requests))
 	for _, body := range in.Body.Requests {
@@ -302,9 +300,6 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	if len(body.Grants) > 0 || len(body.Roles) > 0 || len(body.Subject.unknown) > 0 {
 		return authorizationEvaluation{}, apierr.New("INLINE_GRANTS_NOT_ALLOWED", "authorization facts must come from Auth state, not the request")
 	}
-	if !contains(key.Scopes, requiredScope) {
-		return authorizationEvaluation{}, apierr.New("PERMISSION_DENIED", "API key is not scoped for this authorization operation.")
-	}
 	if a.Authorization == nil {
 		return authorizationEvaluation{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
@@ -312,16 +307,25 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	if spaceID == "" {
 		spaceID = key.SpaceID
 	}
-	if spaceID != key.SpaceID {
-		version, err := a.Authorization.PolicyVersion(ctx, spaceID)
-		if err != nil {
-			return authorizationEvaluation{}, err
-		}
-		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "KEY_SCOPE_EXCLUDED"}, policyVersion: version, spaceID: spaceID}, nil
+	keyDecision, keyVersion, err := a.keyOperationDecision(ctx, key, requiredScope, spaceID)
+	if err != nil {
+		return authorizationEvaluation{}, err
+	}
+	if keyDecision.Effect != engine.Allow {
+		return authorizationEvaluation{decision: keyDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
 	}
 	resolved, err := a.resolveSubject(ctx, key, body.Subject, spaceID)
 	if err != nil {
 		return authorizationEvaluation{}, err
+	}
+	if resolved.SpaceID != "" && resolved.SpaceID != spaceID {
+		subjectDecision, _, err := a.keyOperationDecision(ctx, key, requiredScope, resolved.SpaceID)
+		if err != nil {
+			return authorizationEvaluation{}, err
+		}
+		if subjectDecision.Effect != engine.Allow {
+			return authorizationEvaluation{decision: subjectDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
+		}
 	}
 	memberID := resolved.ID
 	permission := strings.TrimSpace(body.Action)
@@ -349,6 +353,29 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
 }
 
+func (a *API) keyOperationDecision(ctx context.Context, key application.Key, permission, spaceID string) (engine.Decision, int64, error) {
+	if !contains(key.Scopes, permission) {
+		return engine.Decision{}, 0, apierr.New("PERMISSION_DENIED", "API key is not scoped for this operation.")
+	}
+	if a.Applications == nil || a.Authorization == nil {
+		return engine.Decision{}, 0, apierr.New("UNAVAILABLE", "application authorization is unavailable")
+	}
+	memberID, denyCode, err := a.Applications.ResolveKeyInstallation(ctx, key, spaceID)
+	if err != nil {
+		return engine.Decision{}, 0, err
+	}
+	if denyCode != "" {
+		version, err := a.Authorization.PolicyVersion(ctx, spaceID)
+		if err != nil {
+			return engine.Decision{}, 0, err
+		}
+		return engine.Decision{Effect: engine.Deny, Code: denyCode}, version, nil
+	}
+	return a.Authorization.Check(ctx, authorization.CheckRequest{
+		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
+	})
+}
+
 func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
 	if subject.Token != "" {
 		if strings.HasPrefix(subject.Token, "ply_ag_") && a.Agents != nil {
@@ -356,7 +383,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			if err != nil {
 				return resolvedSubject{}, err
 			}
-			return resolvedSubject{ID: credential.MemberID, Type: "agent"}, nil
+			return resolvedSubject{ID: credential.MemberID, Type: "agent", SpaceID: credential.SpaceID}, nil
 		}
 		if a.Sessions == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
@@ -369,7 +396,10 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			return resolvedSubject{}, apierr.New("UNAUTHENTICATED", "the subject token is invalid")
 		}
 		if claims.Type == "agent" {
-			return resolvedSubject{ID: claims.Subject, Type: "agent", Scopes: claims.Scopes}, nil
+			if claims.SpaceID == "" {
+				return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "Agent token has no Space")
+			}
+			return resolvedSubject{ID: claims.Subject, Type: "agent", SpaceID: claims.SpaceID, Scopes: claims.Scopes}, nil
 		}
 		if a.Authorization == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
@@ -389,7 +419,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		if subject.MemberID != "" && subject.MemberID != member.ID {
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
 		}
-		return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
+		return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID}, nil
 	}
 	if subject.MemberID == "" {
 		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "subject.token is required")
@@ -398,7 +428,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "member_id subject assertions are not enabled for this API key")
 	}
 	if a.Authorization == nil {
-		return resolvedSubject{ID: subject.MemberID, Type: "human"}, nil
+		return resolvedSubject{ID: subject.MemberID, Type: "human", SpaceID: spaceID}, nil
 	}
 	member, err := a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
 	if err != nil {
@@ -410,7 +440,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
 		}
 	}
-	return resolvedSubject{ID: member.ID, Type: member.Kind}, nil
+	return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID}, nil
 }
 
 func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision, policyVersion int64) (*CheckOutput, error) {
@@ -520,8 +550,19 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 		return nil, err
 	}
 	out := &IntrospectOutput{}
-	out.Body.Data.Active = active
 	if active {
+		spaceID := claims.SpaceID
+		if spaceID == "" {
+			spaceID = key.SpaceID
+		}
+		decision, _, err := a.keyOperationDecision(ctx, key, "auth.tokens:introspect", spaceID)
+		if err != nil {
+			return nil, err
+		}
+		if decision.Effect != engine.Allow {
+			return out, nil
+		}
+		out.Body.Data.Active = true
 		out.Body.Data.Subject = claims.Subject
 		out.Body.Data.SessionID = claims.SessionID
 		out.Body.Data.ExpiresAt = claims.ExpiresAt

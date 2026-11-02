@@ -68,7 +68,9 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 }
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, expires_at, allow_subject_assertion) VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), $7, $8) RETURNING id, application_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
+INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, allow_subject_assertion)
+VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), COALESCE($7, '[]'::jsonb), $8, $9)
+RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 `
 
 type CreateAPIKeyParams struct {
@@ -78,11 +80,27 @@ type CreateAPIKeyParams struct {
 	Prefix                string             `json:"prefix"`
 	SecretHash            []byte             `json:"secret_hash"`
 	Scopes                interface{}        `json:"scopes"`
+	RestrictTo            interface{}        `json:"restrict_to"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
 
-func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (ApiKey, error) {
+type CreateAPIKeyRow struct {
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	SecretHash            []byte             `json:"secret_hash"`
+	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+}
+
+func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (CreateAPIKeyRow, error) {
 	row := q.db.QueryRow(ctx, createAPIKey,
 		arg.ID,
 		arg.ApplicationID,
@@ -90,10 +108,11 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		arg.Prefix,
 		arg.SecretHash,
 		arg.Scopes,
+		arg.RestrictTo,
 		arg.ExpiresAt,
 		arg.AllowSubjectAssertion,
 	)
-	var i ApiKey
+	var i CreateAPIKeyRow
 	err := row.Scan(
 		&i.ID,
 		&i.ApplicationID,
@@ -101,6 +120,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 		&i.Prefix,
 		&i.SecretHash,
 		&i.Scopes,
+		&i.RestrictTo,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
@@ -181,14 +201,14 @@ RETURNING id, application_id, space_id, member_id, role_id, scope, anchor_group_
 `
 
 type CreateApplicationInstallationParams struct {
-	ID                  string `json:"id"`
-	ApplicationID       string `json:"application_id"`
-	SpaceID             string `json:"space_id"`
-	MemberID            string `json:"member_id"`
-	RoleID              string `json:"role_id"`
-	Scope               string `json:"scope"`
-	ApprovedPermissions []byte `json:"approved_permissions"`
-	InstalledBy         string `json:"installed_by"`
+	ID                  string      `json:"id"`
+	ApplicationID       string      `json:"application_id"`
+	SpaceID             string      `json:"space_id"`
+	MemberID            string      `json:"member_id"`
+	RoleID              string      `json:"role_id"`
+	Scope               string      `json:"scope"`
+	ApprovedPermissions []byte      `json:"approved_permissions"`
+	InstalledBy         pgtype.Text `json:"installed_by"`
 }
 
 func (q *Queries) CreateApplicationInstallation(ctx context.Context, arg CreateApplicationInstallationParams) (ApplicationInstallation, error) {
@@ -266,7 +286,11 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 }
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion, a.space_id, a.name AS application_name, a.client_id FROM api_keys k JOIN applications a ON a.id = k.application_id WHERE k.prefix = $1 LIMIT 1
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.restrict_to,
+       k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
+       a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
+FROM api_keys k JOIN applications a ON a.id = k.application_id
+WHERE k.prefix = $1 LIMIT 1
 `
 
 type GetAPIKeyByPrefixParams struct {
@@ -280,6 +304,7 @@ type GetAPIKeyByPrefixRow struct {
 	Prefix                string             `json:"prefix"`
 	SecretHash            []byte             `json:"secret_hash"`
 	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
@@ -288,6 +313,7 @@ type GetAPIKeyByPrefixRow struct {
 	SpaceID               string             `json:"space_id"`
 	ApplicationName       string             `json:"application_name"`
 	ClientID              string             `json:"client_id"`
+	ApplicationStatus     string             `json:"application_status"`
 }
 
 func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixParams) (GetAPIKeyByPrefixRow, error) {
@@ -300,6 +326,7 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.Prefix,
 		&i.SecretHash,
 		&i.Scopes,
+		&i.RestrictTo,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
@@ -308,6 +335,51 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.SpaceID,
 		&i.ApplicationName,
 		&i.ClientID,
+		&i.ApplicationStatus,
+	)
+	return i, err
+}
+
+const getActiveApplicationInstallationForSpace = `-- name: GetActiveApplicationInstallationForSpace :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id, 0 AS depth
+    FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id, child.depth + 1
+    FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT i.id, i.member_id, i.space_id, i.scope
+FROM application_installations i
+JOIN ancestors ON ancestors.id = i.space_id
+JOIN applications a ON a.id = i.application_id
+WHERE i.application_id = $1
+  AND i.status = 'active' AND a.status = 'active'
+  AND ((i.scope = 'space' AND i.space_id = $2) OR i.scope = 'space_tree')
+ORDER BY ancestors.depth
+LIMIT 1
+`
+
+type GetActiveApplicationInstallationForSpaceParams struct {
+	ApplicationID string `json:"application_id"`
+	TargetSpaceID string `json:"target_space_id"`
+}
+
+type GetActiveApplicationInstallationForSpaceRow struct {
+	ID       string `json:"id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+	Scope    string `json:"scope"`
+}
+
+func (q *Queries) GetActiveApplicationInstallationForSpace(ctx context.Context, arg GetActiveApplicationInstallationForSpaceParams) (GetActiveApplicationInstallationForSpaceRow, error) {
+	row := q.db.QueryRow(ctx, getActiveApplicationInstallationForSpace, arg.ApplicationID, arg.TargetSpaceID)
+	var i GetActiveApplicationInstallationForSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.MemberID,
+		&i.SpaceID,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -391,6 +463,42 @@ func (q *Queries) GetPrivateApplicationForInstall(ctx context.Context, arg GetPr
 	return i, err
 }
 
+const listActiveSpaceAncestorsForKey = `-- name: ListActiveSpaceAncestorsForKey :many
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id
+    FROM spaces WHERE spaces.id = $1 AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id
+    FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT id FROM ancestors
+`
+
+type ListActiveSpaceAncestorsForKeyParams struct {
+	TargetSpaceID string `json:"target_space_id"`
+}
+
+func (q *Queries) ListActiveSpaceAncestorsForKey(ctx context.Context, arg ListActiveSpaceAncestorsForKeyParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listActiveSpaceAncestorsForKey, arg.TargetSpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listApplicationInstallationsInSpace = `-- name: ListApplicationInstallationsInSpace :many
 SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
        i.anchor_group_id, i.approved_permissions, i.status, i.installed_by, i.created_at,
@@ -415,7 +523,7 @@ type ListApplicationInstallationsInSpaceRow struct {
 	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
 	ApprovedPermissions []byte             `json:"approved_permissions"`
 	Status              string             `json:"status"`
-	InstalledBy         string             `json:"installed_by"`
+	InstalledBy         pgtype.Text        `json:"installed_by"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
 	ApplicationName     string             `json:"application_name"`
 }
