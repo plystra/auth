@@ -128,3 +128,24 @@ RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
 INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, allow_subject_assertion)
 VALUES (sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(name), sqlc.arg(prefix), sqlc.arg(secret_hash), COALESCE(sqlc.narg(scopes), '[]'::jsonb), COALESCE(sqlc.narg(restrict_to), '[]'::jsonb), sqlc.narg(expires_at), sqlc.arg(allow_subject_assertion))
 RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion;
+
+-- name: GetApplicationForKeyManagement :one
+SELECT id, space_id, manifest_permissions, status
+FROM applications WHERE id = sqlc.arg(application_id);
+
+-- name: ListManagedAPIKeys :many
+SELECT id, application_id, name, prefix, scopes, restrict_to, expires_at,
+       last_used_at, revoked_at, created_at, allow_subject_assertion
+FROM api_keys WHERE application_id = sqlc.arg(application_id)
+ORDER BY created_at, id;
+
+-- name: RevokeManagedAPIKey :one
+UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
+WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
+RETURNING id, application_id, name, prefix, scopes, restrict_to, expires_at,
+          last_used_at, revoked_at, created_at, allow_subject_assertion;
+
+-- name: GetActiveInstallationForKeyRestriction :one
+SELECT scope FROM application_installations
+WHERE application_id = sqlc.arg(application_id) AND space_id = sqlc.arg(space_id)
+  AND status = 'active';

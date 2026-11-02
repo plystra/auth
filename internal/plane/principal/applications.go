@@ -2,11 +2,13 @@ package principal
 
 import (
 	"context"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 )
 
 type applicationsPathInput struct {
@@ -33,11 +35,114 @@ type installApplicationInput struct {
 	}
 }
 
+type applicationKeyPathInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+}
+
+type createApplicationKeyInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+	Body          struct {
+		Name                  string                       `json:"name" minLength:"1" maxLength:"120"`
+		Grants                []string                     `json:"grants" minItems:"1" maxItems:"100"`
+		RestrictTo            []application.KeyRestriction `json:"restrict_to,omitempty" maxItems:"50"`
+		ExpiresAt             time.Time                    `json:"expires_at"`
+		AllowSubjectAssertion bool                         `json:"allow_subject_assertion,omitempty"`
+	}
+}
+
+type revokeApplicationKeyInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+	KeyID         string `path:"key_id"`
+}
+
+type applicationKeyCreation struct {
+	Key    application.ManagedKey `json:"key"`
+	Secret secret.String          `json:"secret"`
+}
+
 func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("applications.list", "GET", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplications)
 	route.Register(api, route.NewSpec("applications.register", "POST", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.registerApplication)
 	route.Register(api, route.NewSpec("installations.list", "GET", "/v1/spaces/{id}/installations", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listInstallations)
 	route.Register(api, route.NewSpec("installations.create", "POST", "/v1/spaces/{id}/installations", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.installApplication)
+	route.Register(api, route.NewSpec("applications.keys.list", "GET", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplicationKeys)
+	route.Register(api, route.NewSpec("applications.keys.create", "POST", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.createApplicationKey)
+	route.Register(api, route.NewSpec("applications.keys.revoke", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/revoke", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.revokeApplicationKey)
+}
+
+func (a *API) applicationKeyActor(ctx context.Context, authorizationHeader, applicationID string) (string, error) {
+	if a.Applications == nil {
+		return "", apierr.New("UNAVAILABLE", "application key management is unavailable")
+	}
+	if _, err := a.authenticatePrincipal(ctx, authorizationHeader); err != nil {
+		return "", err
+	}
+	spaceID, err := a.Applications.ApplicationSpace(ctx, applicationID)
+	if err != nil {
+		return "", err
+	}
+	actor, err := a.actorForSpace(ctx, authorizationHeader, spaceID, "auth.applications:manage")
+	if err != nil {
+		return "", err
+	}
+	return actor.ID, nil
+}
+
+func (a *API) listApplicationKeys(ctx context.Context, in *applicationKeyPathInput) (*authorizationDataOutput[[]application.ManagedKey], error) {
+	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	keys, err := a.Applications.ListManagedKeys(ctx, actorID, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[[]application.ManagedKey]{}
+	out.Body.Data = keys
+	return out, nil
+}
+
+func (a *API) createApplicationKey(ctx context.Context, in *createApplicationKeyInput) (*authorizationDataOutput[applicationKeyCreation], error) {
+	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	request := map[string]any{
+		"application_id": in.ApplicationID, "name": in.Body.Name, "grants": in.Body.Grants,
+		"restrict_to": in.Body.RestrictTo, "expires_at": in.Body.ExpiresAt,
+		"allow_subject_assertion": in.Body.AllowSubjectAssertion,
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.keys.create", request)
+	if err != nil {
+		return nil, err
+	}
+	key, raw, err := a.Applications.CreateManagedKey(ctx, actorID, in.ApplicationID, application.CreateManagedKeyInput{
+		Name: in.Body.Name, Grants: in.Body.Grants, RestrictTo: in.Body.RestrictTo,
+		ExpiresAt: in.Body.ExpiresAt, AllowSubjectAssertion: in.Body.AllowSubjectAssertion,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[applicationKeyCreation]{}
+	out.Body.Data = applicationKeyCreation{Key: key, Secret: raw}
+	return out, nil
+}
+
+func (a *API) revokeApplicationKey(ctx context.Context, in *revokeApplicationKeyInput) (*authorizationDataOutput[application.ManagedKey], error) {
+	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := a.Applications.RevokeManagedKey(ctx, actorID, in.ApplicationID, in.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[application.ManagedKey]{}
+	out.Body.Data = key
+	return out, nil
 }
 
 func (a *API) listInstallations(ctx context.Context, in *applicationsPathInput) (*authorizationDataOutput[[]application.Installation], error) {

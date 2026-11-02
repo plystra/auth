@@ -32,7 +32,8 @@ func Initialize(ctx context.Context, st *store.Store, hmacKey []byte) (Result, e
 	if st == nil {
 		return Result{}, errors.New("bootstrap store is required")
 	}
-	rawKey, prefix, hash, err := application.GenerateSecret(hmacKey)
+	keyID := string(ids.New[ids.APIKeyID]("key"))
+	rawKey, prefix, hash, err := application.GenerateSecret(keyID, hmacKey)
 	if err != nil {
 		return Result{}, err
 	}
@@ -72,7 +73,7 @@ func Initialize(ctx context.Context, st *store.Store, hmacKey []byte) (Result, e
 			return apierr.New("CONFLICT", "the deployment has already been initialized")
 		}
 		_, err = q.CreateAPIKey(ctx, db.CreateAPIKeyParams{
-			ID:                    string(ids.New[ids.APIKeyID]("key")),
+			ID:                    keyID,
 			ApplicationID:         DefaultApplicationID,
 			Name:                  "bootstrap",
 			Prefix:                prefix,

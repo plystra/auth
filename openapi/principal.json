@@ -235,6 +235,22 @@
         ],
         "type": "object"
       },
+      "ApplicationKeyCreation": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/ManagedKey"
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "secret"
+        ],
+        "type": "object"
+      },
       "ApprovalDecisionOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -448,6 +464,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputApplicationKeyCreationBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ApplicationKeyCreation"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputAssignmentRightBody": {
         "additionalProperties": false,
         "properties": {
@@ -574,6 +602,24 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputListManagedKeyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/ManagedKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputListMemberBody": {
         "additionalProperties": false,
         "properties": {
@@ -639,6 +685,18 @@
               "array",
               "null"
             ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "AuthorizationDataOutputManagedKeyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ManagedKey"
           }
         },
         "required": [
@@ -730,6 +788,50 @@
           "member_id",
           "email",
           "status"
+        ],
+        "type": "object"
+      },
+      "CreateApplicationKeyInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_subject_assertion": {
+            "type": "boolean"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "restrict_to": {
+            "items": {
+              "$ref": "#/components/schemas/KeyRestriction"
+            },
+            "maxItems": 50,
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "grants",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -1451,6 +1553,22 @@
         ],
         "type": "object"
       },
+      "KeyRestriction": {
+        "additionalProperties": false,
+        "properties": {
+          "include_descendants": {
+            "type": "boolean"
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id",
+          "include_descendants"
+        ],
+        "type": "object"
+      },
       "LargeBlobInputs": {
         "additionalProperties": false,
         "properties": {
@@ -1485,6 +1603,72 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "ManagedKey": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_subject_assertion": {
+            "type": "boolean"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "restrict_to": {
+            "items": {
+              "$ref": "#/components/schemas/KeyRestriction"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "revoked_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "application_id",
+          "name",
+          "prefix",
+          "grants",
+          "restrict_to",
+          "expires_at",
+          "created_at",
+          "allow_subject_assertion"
         ],
         "type": "object"
       },
@@ -2372,6 +2556,157 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/v1/applications/{app_id}/api-keys": {
+      "get": {
+        "operationId": "applications.keys.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputListManagedKeyBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "applications.keys.list"
+      },
+      "post": {
+        "operationId": "applications.keys.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateApplicationKeyInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputApplicationKeyCreationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "applications.keys.create"
+      }
+    },
+    "/v1/applications/{app_id}/api-keys/{key_id}/revoke": {
+      "post": {
+        "operationId": "applications.keys.revoke",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputManagedKeyBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "applications.keys.revoke"
+      }
+    },
     "/v1/approvals": {
       "get": {
         "operationId": "approvals.list",

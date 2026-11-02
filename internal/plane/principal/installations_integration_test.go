@@ -22,7 +22,7 @@ func installationFixture(t *testing.T, manifest []string) (*store.Store, *author
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
 	seedTestInlineGrant(t, st, spaceID, actor.ID, actor.ID, "auth.applications:manage")
-	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions}
+	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{[]byte(strings.Repeat("k", 32))}}
 	registered, err := apps.RegisterPrivate(ctx, actor.ID, application.RegisterInput{
 		SpaceID: spaceID, Name: "Billing", ManifestPermissions: manifest,
 	})

@@ -386,6 +386,24 @@ func (q *Queries) GetActiveApplicationInstallationForSpace(ctx context.Context, 
 	return i, err
 }
 
+const getActiveInstallationForKeyRestriction = `-- name: GetActiveInstallationForKeyRestriction :one
+SELECT scope FROM application_installations
+WHERE application_id = $1 AND space_id = $2
+  AND status = 'active'
+`
+
+type GetActiveInstallationForKeyRestrictionParams struct {
+	ApplicationID string `json:"application_id"`
+	SpaceID       string `json:"space_id"`
+}
+
+func (q *Queries) GetActiveInstallationForKeyRestriction(ctx context.Context, arg GetActiveInstallationForKeyRestrictionParams) (string, error) {
+	row := q.db.QueryRow(ctx, getActiveInstallationForKeyRestriction, arg.ApplicationID, arg.SpaceID)
+	var scope string
+	err := row.Scan(&scope)
+	return scope, err
+}
+
 const getApplicationByClientID = `-- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
 FROM applications
@@ -420,6 +438,34 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.ClientID,
 		&i.ClientSecretHash,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getApplicationForKeyManagement = `-- name: GetApplicationForKeyManagement :one
+SELECT id, space_id, manifest_permissions, status
+FROM applications WHERE id = $1
+`
+
+type GetApplicationForKeyManagementParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+type GetApplicationForKeyManagementRow struct {
+	ID                  string `json:"id"`
+	SpaceID             string `json:"space_id"`
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	Status              string `json:"status"`
+}
+
+func (q *Queries) GetApplicationForKeyManagement(ctx context.Context, arg GetApplicationForKeyManagementParams) (GetApplicationForKeyManagementRow, error) {
+	row := q.db.QueryRow(ctx, getApplicationForKeyManagement, arg.ApplicationID)
+	var i GetApplicationForKeyManagementRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.ManifestPermissions,
+		&i.Status,
 	)
 	return i, err
 }
@@ -563,6 +609,63 @@ func (q *Queries) ListApplicationInstallationsInSpace(ctx context.Context, arg L
 	return items, nil
 }
 
+const listManagedAPIKeys = `-- name: ListManagedAPIKeys :many
+SELECT id, application_id, name, prefix, scopes, restrict_to, expires_at,
+       last_used_at, revoked_at, created_at, allow_subject_assertion
+FROM api_keys WHERE application_id = $1
+ORDER BY created_at, id
+`
+
+type ListManagedAPIKeysParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+type ListManagedAPIKeysRow struct {
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+}
+
+func (q *Queries) ListManagedAPIKeys(ctx context.Context, arg ListManagedAPIKeysParams) ([]ListManagedAPIKeysRow, error) {
+	rows, err := q.db.Query(ctx, listManagedAPIKeys, arg.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListManagedAPIKeysRow{}
+	for rows.Next() {
+		var i ListManagedAPIKeysRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ApplicationID,
+			&i.Name,
+			&i.Prefix,
+			&i.Scopes,
+			&i.RestrictTo,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.RevokedAt,
+			&i.CreatedAt,
+			&i.AllowSubjectAssertion,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPublishedApplications = `-- name: ListPublishedApplications :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
 FROM applications
@@ -646,6 +749,51 @@ func (q *Queries) LockLegacyAPIKeyHashes(ctx context.Context) ([]LockLegacyAPIKe
 		return nil, err
 	}
 	return items, nil
+}
+
+const revokeManagedAPIKey = `-- name: RevokeManagedAPIKey :one
+UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
+WHERE id = $1 AND application_id = $2
+RETURNING id, application_id, name, prefix, scopes, restrict_to, expires_at,
+          last_used_at, revoked_at, created_at, allow_subject_assertion
+`
+
+type RevokeManagedAPIKeyParams struct {
+	KeyID         string `json:"key_id"`
+	ApplicationID string `json:"application_id"`
+}
+
+type RevokeManagedAPIKeyRow struct {
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+}
+
+func (q *Queries) RevokeManagedAPIKey(ctx context.Context, arg RevokeManagedAPIKeyParams) (RevokeManagedAPIKeyRow, error) {
+	row := q.db.QueryRow(ctx, revokeManagedAPIKey, arg.KeyID, arg.ApplicationID)
+	var i RevokeManagedAPIKeyRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.Name,
+		&i.Prefix,
+		&i.Scopes,
+		&i.RestrictTo,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.AllowSubjectAssertion,
+	)
+	return i, err
 }
 
 const touchAPIKey = `-- name: TouchAPIKey :exec

@@ -465,16 +465,19 @@ func apiKeyHash(key []byte, raw string) []byte {
 	return mac.Sum(nil)
 }
 
-func GenerateSecret(key []byte) (string, string, []byte, error) {
+func GenerateSecret(keyID string, key []byte) (string, string, []byte, error) {
 	if len(key) < 32 {
 		return "", "", nil, errors.New("application API key HMAC key must be at least 32 bytes")
+	}
+	if !strings.HasPrefix(keyID, "key_") || len(keyID) <= len("key_") {
+		return "", "", nil, errors.New("application API key ID is invalid")
 	}
 	b := make([]byte, 32)
 	if _, e := rand.Read(b); e != nil {
 		return "", "", nil, e
 	}
 	raw := base64.RawURLEncoding.EncodeToString(b)
-	prefix := "ply_sk_" + raw[:10]
+	prefix := "ply_sk_" + strings.TrimPrefix(keyID, "key_")
 	return prefix + "." + raw, prefix, apiKeyHash(key, raw), nil
 }
 func (s *Service) CreateKey(ctx context.Context, applicationID, name string, scopes []string, expires *time.Time) (string, error) {
@@ -485,11 +488,12 @@ func (s *Service) CreateKey(ctx context.Context, applicationID, name string, sco
 	if expires == nil || !expires.After(now) || expires.After(now.Add(365*24*time.Hour)) {
 		return "", apierr.New("VALIDATION_FAILED", "API key expiry must be in the future and within one year")
 	}
-	raw, prefix, hash, e := GenerateSecret(s.HMACKeys[0])
+	keyID := string(ids.New[ids.APIKeyID]("key"))
+	raw, prefix, hash, e := GenerateSecret(keyID, s.HMACKeys[0])
 	if e != nil {
 		return "", e
 	}
-	_, e = s.Store.Queries().CreateAPIKey(ctx, db.CreateAPIKeyParams{ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: applicationID, Name: name, Prefix: prefix, SecretHash: hash, Scopes: mustJSON(scopes), ExpiresAt: nullableTime(expires)})
+	_, e = s.Store.Queries().CreateAPIKey(ctx, db.CreateAPIKeyParams{ID: keyID, ApplicationID: applicationID, Name: name, Prefix: prefix, SecretHash: hash, Scopes: mustJSON(scopes), ExpiresAt: nullableTime(expires)})
 	return raw, e
 }
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }

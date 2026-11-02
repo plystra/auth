@@ -144,12 +144,13 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 		if err != nil {
 			return err
 		}
-		rawKey, prefix, keyHash, err := application.GenerateSecret(s.HMACKeys[0])
+		keyID := string(ids.New[ids.APIKeyID]("key"))
+		rawKey, prefix, keyHash, err := application.GenerateSecret(keyID, s.HMACKeys[0])
 		if err != nil {
 			return err
 		}
 		if _, err := q.CreateAPIKey(ctx, db.CreateAPIKeyParams{
-			ID: string(ids.New[ids.APIKeyID]("key")), ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash,
+			ID: keyID, ApplicationID: "app_01h00000000000000000000000", Name: "bootstrap", Prefix: prefix, SecretHash: keyHash,
 			Scopes: []byte(`["auth.authz:check","auth.tokens:introspect"]`), ExpiresAt: pgtype.Timestamptz{Time: time.Now().UTC().Add(365 * 24 * time.Hour), Valid: true},
 		}); err != nil {
 			return err
