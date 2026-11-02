@@ -271,7 +271,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	if !valid {
 		return Key{}, apierr.New("unauthorized", "application API key is invalid")
 	}
-	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) || row.ApplicationStatus != "active" {
+	if row.RevokedAt.Valid || !row.ExpiresAt.Valid || !row.ExpiresAt.Time.After(time.Now()) || row.ApplicationStatus != "active" {
 		return Key{}, apierr.New("unauthorized", "application API key is revoked or expired")
 	}
 	var allowedIPCIDRs []string

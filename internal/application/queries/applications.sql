@@ -18,6 +18,7 @@ SELECT EXISTS (
 -- name: LockLegacyAPIKeyHashes :many
 SELECT id, secret_hash FROM api_keys
 WHERE hash_scheme = 'sha256_legacy'
+  AND expires_at IS NOT NULL
 ORDER BY id LIMIT 500
 FOR UPDATE;
 
@@ -25,7 +26,7 @@ FOR UPDATE;
 UPDATE api_keys
 SET secret_hash = sqlc.arg(secret_hash), hash_scheme = 'hmac_sha256'
 WHERE id = sqlc.arg(id) AND secret_hash = sqlc.arg(previous_hash)
-  AND hash_scheme = sqlc.arg(previous_scheme);
+  AND hash_scheme = sqlc.arg(previous_scheme) AND expires_at IS NOT NULL;
 
 -- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)

@@ -1514,3 +1514,10 @@ CREATE INDEX api_key_grace_secrets_expiry_idx ON api_key_grace_secrets(valid_unt
 ALTER TABLE api_keys
     ADD COLUMN allowed_ip_cidrs jsonb NOT NULL DEFAULT '[]'::jsonb
         CHECK (jsonb_typeof(allowed_ip_cidrs) = 'array');
+
+
+-- Reject new keys without an expiry while allowing old rows with no expiry to
+-- be revoked. NOT VALID avoids rewriting historical rows during deployment;
+-- authentication rejects any remaining row whose expiry is NULL.
+ALTER TABLE api_keys ADD CONSTRAINT api_keys_expiry_required
+    CHECK (expires_at IS NOT NULL OR revoked_at IS NOT NULL) NOT VALID;

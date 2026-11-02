@@ -75,6 +75,9 @@ func TestAPIKeyHMACStorageExpiryAndRotation(t *testing.T) {
 	if _, err := rotating.AuthenticateKey(ctx, raw); err == nil {
 		t.Fatal("expired API key authenticated")
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET expires_at = NULL WHERE prefix = $1`, parts[0]); err == nil {
+		t.Fatal("database accepted an active API key without expiry")
+	}
 }
 
 func TestLegacyAPIKeyHashesUpgradeBeforeAuthentication(t *testing.T) {

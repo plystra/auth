@@ -730,6 +730,7 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 const lockLegacyAPIKeyHashes = `-- name: LockLegacyAPIKeyHashes :many
 SELECT id, secret_hash FROM api_keys
 WHERE hash_scheme = 'sha256_legacy'
+  AND expires_at IS NOT NULL
 ORDER BY id LIMIT 500
 FOR UPDATE
 `
@@ -938,7 +939,7 @@ const updateAPIKeyHash = `-- name: UpdateAPIKeyHash :execrows
 UPDATE api_keys
 SET secret_hash = $1, hash_scheme = 'hmac_sha256'
 WHERE id = $2 AND secret_hash = $3
-  AND hash_scheme = $4
+  AND hash_scheme = $4 AND expires_at IS NOT NULL
 `
 
 type UpdateAPIKeyHashParams struct {
