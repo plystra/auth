@@ -460,7 +460,8 @@ func nullableText(value string) pgtype.Text {
 
 // UpgradeLegacyKeyHashes wraps existing SHA-256 digests before serving traffic.
 // The old digest is sufficient to perform this one-way migration without
-// recovering or reissuing the secret.
+// recovering or reissuing the secret. Historical keys without expiry are
+// revoked during conversion because they cannot be valid credentials.
 func (s *Service) UpgradeLegacyKeyHashes(ctx context.Context) error {
 	if s == nil || s.Store == nil || len(s.HMACKeys) == 0 || len(s.HMACKeys[0]) < 32 {
 		return errors.New("application API key HMAC key of at least 32 bytes is required")

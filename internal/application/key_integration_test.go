@@ -117,6 +117,38 @@ func TestLegacyAPIKeyHashesUpgradeBeforeAuthentication(t *testing.T) {
 	}
 }
 
+func TestLegacyAPIKeyWithoutExpiryIsConvertedAndRemainsRevoked(t *testing.T) {
+	ctx := context.Background()
+	st := newKeyStore(t)
+	key := []byte(strings.Repeat("k", 32))
+	svc := &Service{Store: st, HMACKeys: [][]byte{key}}
+	expires := time.Now().Add(time.Hour)
+	raw, err := svc.CreateKey(ctx, "app_key_test", "legacy-no-expiry", nil, &expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts := strings.SplitN(raw, ".", 2)
+	legacyDigest := sha256.Sum256([]byte(parts[1]))
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET revoked_at = now(), expires_at = NULL, secret_hash = $1, hash_scheme = 'sha256_legacy' WHERE prefix = $2`, legacyDigest[:], parts[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.UpgradeLegacyKeyHashes(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var stored []byte
+	var scheme string
+	var revoked bool
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash, hash_scheme, revoked_at IS NOT NULL FROM api_keys WHERE prefix = $1`, parts[0]).Scan(&stored, &scheme, &revoked); err != nil {
+		t.Fatal(err)
+	}
+	if scheme != "hmac_sha256" || !revoked || bytes.Equal(stored, legacyDigest[:]) {
+		t.Fatal("legacy key without expiry retained an unkeyed digest or became active")
+	}
+	if _, err := svc.AuthenticateKey(ctx, raw); err == nil {
+		t.Fatal("legacy key without expiry authenticated")
+	}
+}
+
 func newKeyStore(t *testing.T) *store.Store {
 	t.Helper()
 	ctx := context.Background()
