@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -52,7 +53,7 @@ func (s *Service) CreateBusiness(ctx context.Context, applicationKeyID, agentMem
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return Request{}, apierr.New("UNAVAILABLE", "approvals are unavailable")
 	}
-	if agentMemberID == "" || action == "" || strings.TrimSpace(resource.Type) == "" || strings.TrimSpace(resource.ID) == "" || resource.SpaceID == "" || len(digest) != sha256.Size || len(reason) > 2000 {
+	if agentMemberID == "" || action == "" || strings.TrimSpace(resource.Type) == "" || strings.TrimSpace(resource.ID) == "" || resource.SpaceID == "" || len(digest) != sha256.Size || utf8.RuneCountInString(reason) > 2000 {
 		return Request{}, apierr.New("VALIDATION_FAILED", "approval subject, action, resource, digest or reason is invalid")
 	}
 	var created db.ApprovalRequest

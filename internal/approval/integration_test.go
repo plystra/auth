@@ -327,3 +327,18 @@ func TestBusinessApprovalConsumptionRollsBackOnAuditFailure(t *testing.T) {
 		t.Fatalf("audit failure left status %q: %v", status, err)
 	}
 }
+
+func TestBusinessApprovalReasonLimitCountsUnicodeCharacters(t *testing.T) {
+	f := newApprovalFixture(t)
+	digest := sha256.Sum256([]byte("unicode reason"))
+	_, err := f.service.CreateBusiness(context.Background(), "key_approval_test", f.agentID,
+		"auth.bindings:manage", f.resource("inv_unicode"), digest[:], strings.Repeat("理", 2000))
+	if err != nil {
+		t.Fatalf("2000 character reason rejected: %v", err)
+	}
+	_, err = f.service.CreateBusiness(context.Background(), "key_approval_test", f.agentID,
+		"auth.bindings:manage", f.resource("inv_unicode_2"), digest[:], strings.Repeat("理", 2001))
+	if approvalCode(err) != "VALIDATION_FAILED" {
+		t.Fatalf("2001 character reason error = %v", err)
+	}
+}
