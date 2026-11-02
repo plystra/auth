@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
@@ -221,6 +223,7 @@ type Key struct {
 	SpaceID               string
 	Scopes                []string
 	RestrictTo            []KeyRestriction
+	AllowedIPCIDRs        []string
 	AllowSubjectAssertion bool
 }
 
@@ -252,11 +255,47 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 			}
 		}
 	}
+	if !valid && row.HashScheme == "hmac_sha256" {
+		for _, key := range s.HMACKeys {
+			valid, e = s.Store.Queries().ValidGraceAPIKeySecret(ctx, db.ValidGraceAPIKeySecretParams{
+				KeyID: row.ID, SecretHash: apiKeyHash(key, parts[1]),
+			})
+			if e != nil {
+				return Key{}, e
+			}
+			if valid {
+				break
+			}
+		}
+	}
 	if !valid {
 		return Key{}, apierr.New("unauthorized", "application API key is invalid")
 	}
 	if row.RevokedAt.Valid || (row.ExpiresAt.Valid && row.ExpiresAt.Time.Before(time.Now())) || row.ApplicationStatus != "active" {
 		return Key{}, apierr.New("unauthorized", "application API key is revoked or expired")
+	}
+	var allowedIPCIDRs []string
+	if err := json.Unmarshal(row.AllowedIpCidrs, &allowedIPCIDRs); err != nil {
+		return Key{}, apierr.New("UNAVAILABLE", "API key source IP policy is invalid")
+	}
+	if len(allowedIPCIDRs) > 0 {
+		client, ok := netip.AddrFromSlice(requestinfo.Get(ctx).IP)
+		if !ok {
+			return Key{}, apierr.New("unauthorized", "application API key is invalid")
+		}
+		allowed := false
+		for _, value := range allowedIPCIDRs {
+			network, err := netip.ParsePrefix(value)
+			if err != nil {
+				return Key{}, apierr.New("UNAVAILABLE", "API key source IP policy is invalid")
+			}
+			if network.Contains(client) || network.Contains(client.Unmap()) {
+				allowed = true
+			}
+		}
+		if !allowed {
+			return Key{}, apierr.New("unauthorized", "application API key is invalid")
+		}
 	}
 	if e = s.Store.InTx(ctx, func(q *db.Queries) error {
 		return q.TouchAPIKey(ctx, db.TouchAPIKeyParams{ID: row.ID})
@@ -276,7 +315,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 			return Key{}, apierr.New("UNAVAILABLE", "API key installation scope is invalid")
 		}
 	}
-	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, RestrictTo: restrictions, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
+	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, RestrictTo: restrictions, AllowedIPCIDRs: allowedIPCIDRs, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
 }
 
 // ResolveKeyInstallation finds the application member whose current authority

@@ -94,6 +94,13 @@ type ApiKey struct {
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 	RestrictTo            []byte             `json:"restrict_to"`
 	HashScheme            string             `json:"hash_scheme"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
+}
+
+type ApiKeyGraceSecret struct {
+	KeyID      string             `json:"key_id"`
+	SecretHash []byte             `json:"secret_hash"`
+	ValidUntil pgtype.Timestamptz `json:"valid_until"`
 }
 
 type Application struct {

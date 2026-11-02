@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"slices"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type ManagedKey struct {
 	Prefix                string           `json:"prefix"`
 	Grants                []string         `json:"grants"`
 	RestrictTo            []KeyRestriction `json:"restrict_to"`
+	AllowedIPCIDRs        []string         `json:"allowed_ip_cidrs"`
 	ExpiresAt             time.Time        `json:"expires_at"`
 	LastUsedAt            *time.Time       `json:"last_used_at,omitempty"`
 	RevokedAt             *time.Time       `json:"revoked_at,omitempty"`
@@ -39,6 +41,7 @@ type CreateManagedKeyInput struct {
 	Name                  string
 	Grants                []string
 	RestrictTo            []KeyRestriction
+	AllowedIPCIDRs        []string
 	ExpiresAt             time.Time
 	AllowSubjectAssertion bool
 }
@@ -72,6 +75,24 @@ func (s *Service) CreateManagedKey(ctx context.Context, actorMemberID, applicati
 	if len(in.Grants) == 0 || len(in.Grants) > 100 || len(in.RestrictTo) > 50 {
 		return ManagedKey{}, "", apierr.New("VALIDATION_FAILED", "API key grants or installation limits are invalid")
 	}
+	if len(in.AllowedIPCIDRs) > 50 {
+		return ManagedKey{}, "", apierr.New("VALIDATION_FAILED", "API key has too many source IP ranges")
+	}
+	allowedIPCIDRs := make([]string, 0, len(in.AllowedIPCIDRs))
+	seenIPCIDRs := map[string]bool{}
+	for _, value := range in.AllowedIPCIDRs {
+		network, err := netip.ParsePrefix(value)
+		if err != nil || !network.IsValid() {
+			return ManagedKey{}, "", apierr.New("VALIDATION_FAILED", "API key source IP range must be a CIDR prefix")
+		}
+		canonical := network.Masked().String()
+		if seenIPCIDRs[canonical] {
+			return ManagedKey{}, "", apierr.New("VALIDATION_FAILED", "API key source IP ranges contain a duplicate")
+		}
+		seenIPCIDRs[canonical] = true
+		allowedIPCIDRs = append(allowedIPCIDRs, canonical)
+	}
+	slices.Sort(allowedIPCIDRs)
 	grants := slices.Clone(in.Grants)
 	if in.RestrictTo == nil {
 		in.RestrictTo = []KeyRestriction{}
@@ -147,9 +168,13 @@ func (s *Service) CreateManagedKey(ctx context.Context, actorMemberID, applicati
 		if err != nil {
 			return err
 		}
+		allowedIPCIDRsJSON, err := json.Marshal(allowedIPCIDRs)
+		if err != nil {
+			return err
+		}
 		row, err := q.CreateAPIKey(ctx, db.CreateAPIKeyParams{
 			ID: keyID, ApplicationID: applicationID, Name: in.Name, Prefix: prefix,
-			SecretHash: hash, Scopes: grantsJSON, RestrictTo: restrictJSON,
+			SecretHash: hash, Scopes: grantsJSON, RestrictTo: restrictJSON, AllowedIpCidrs: allowedIPCIDRsJSON,
 			ExpiresAt: pgtype.Timestamptz{Time: in.ExpiresAt, Valid: true}, AllowSubjectAssertion: in.AllowSubjectAssertion,
 		})
 		if err != nil {
@@ -159,7 +184,7 @@ func (s *Service) CreateManagedKey(ctx context.Context, actorMemberID, applicati
 			return err
 		}
 		out = managedKey(row.ID, row.ApplicationID, row.Name, row.Prefix, row.ExpiresAt,
-			row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, in.RestrictTo)
+			row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, in.RestrictTo, allowedIPCIDRs)
 		return nil
 	})
 	if err != nil {
@@ -185,14 +210,18 @@ func (s *Service) ListManagedKeys(ctx context.Context, actorMemberID, applicatio
 		for _, row := range rows {
 			var grants []string
 			var restrictions []KeyRestriction
+			var allowedIPCIDRs []string
 			if err := json.Unmarshal(row.Scopes, &grants); err != nil {
 				return err
 			}
 			if err := json.Unmarshal(row.RestrictTo, &restrictions); err != nil {
 				return err
 			}
+			if err := json.Unmarshal(row.AllowedIpCidrs, &allowedIPCIDRs); err != nil {
+				return err
+			}
 			out = append(out, managedKey(row.ID, row.ApplicationID, row.Name, row.Prefix, row.ExpiresAt,
-				row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, restrictions))
+				row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, restrictions, allowedIPCIDRs))
 		}
 		return nil
 	})
@@ -220,17 +249,97 @@ func (s *Service) RevokeManagedKey(ctx context.Context, actorMemberID, applicati
 		}
 		var grants []string
 		var restrictions []KeyRestriction
+		var allowedIPCIDRs []string
 		if err := json.Unmarshal(row.Scopes, &grants); err != nil {
 			return err
 		}
 		if err := json.Unmarshal(row.RestrictTo, &restrictions); err != nil {
 			return err
 		}
+		if err := json.Unmarshal(row.AllowedIpCidrs, &allowedIPCIDRs); err != nil {
+			return err
+		}
 		out = managedKey(row.ID, row.ApplicationID, row.Name, row.Prefix, row.ExpiresAt,
-			row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, restrictions)
+			row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, restrictions, allowedIPCIDRs)
 		return nil
 	})
 	return out, err
+}
+
+func (s *Service) RotateManagedKey(ctx context.Context, actorMemberID, applicationID, keyID string) (ManagedKey, secret.String, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil || len(s.HMACKeys) == 0 {
+		return ManagedKey{}, "", apierr.New("UNAVAILABLE", "application key management is unavailable")
+	}
+	raw, _, hash, err := GenerateSecret(keyID, s.HMACKeys[0])
+	if err != nil {
+		return ManagedKey{}, "", err
+	}
+	var out ManagedKey
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		application, err := s.managedApplicationTx(ctx, q, actorMemberID, applicationID)
+		if err != nil {
+			return err
+		}
+		if application.Status != "active" {
+			return apierr.New("CONFLICT", "application is not active")
+		}
+		previous, err := q.LockManagedAPIKeyForRotation(ctx, db.LockManagedAPIKeyForRotationParams{
+			ApplicationID: applicationID, KeyID: keyID,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "API key was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if previous.RevokedAt.Valid || !previous.ExpiresAt.Valid || !previous.ExpiresAt.Time.After(time.Now()) {
+			return apierr.New("CONFLICT", "API key is revoked or expired")
+		}
+		if previous.HashScheme != "hmac_sha256" {
+			return apierr.New("UNAVAILABLE", "API key hash upgrade is required before rotation")
+		}
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+		}
+		if err := q.PreserveAPIKeySecretForGrace(ctx, db.PreserveAPIKeySecretForGraceParams{
+			KeyID: keyID, SecretHash: previous.SecretHash,
+		}); err != nil {
+			return err
+		}
+		row, err := q.ReplaceManagedAPIKeySecret(ctx, db.ReplaceManagedAPIKeySecretParams{
+			ApplicationID: applicationID, KeyID: keyID, SecretHash: hash,
+		})
+		if err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "application.key.rotate", keyID, "success"); err != nil {
+			return err
+		}
+		var grants []string
+		var restrictions []KeyRestriction
+		var allowedIPCIDRs []string
+		if err := json.Unmarshal(row.Scopes, &grants); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(row.RestrictTo, &restrictions); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(row.AllowedIpCidrs, &allowedIPCIDRs); err != nil {
+			return err
+		}
+		out = managedKey(row.ID, row.ApplicationID, row.Name, row.Prefix, row.ExpiresAt,
+			row.LastUsedAt, row.RevokedAt, row.CreatedAt, row.AllowSubjectAssertion, grants, restrictions, allowedIPCIDRs)
+		return nil
+	})
+	if err != nil {
+		return ManagedKey{}, "", err
+	}
+	return out, secret.New(raw), nil
 }
 
 func (s *Service) managedApplicationTx(ctx context.Context, q *db.Queries, actorMemberID, applicationID string) (db.GetApplicationForKeyManagementRow, error) {
@@ -254,9 +363,9 @@ func (s *Service) managedApplicationTx(ctx context.Context, q *db.Queries, actor
 }
 
 func managedKey(id, applicationID, name, prefix string, expiresAt, lastUsedAt, revokedAt, createdAt pgtype.Timestamptz,
-	allowSubjectAssertion bool, grants []string, restrictions []KeyRestriction) ManagedKey {
+	allowSubjectAssertion bool, grants []string, restrictions []KeyRestriction, allowedIPCIDRs []string) ManagedKey {
 	out := ManagedKey{ID: id, ApplicationID: applicationID, Name: name, Prefix: prefix, Grants: grants,
-		RestrictTo: restrictions, ExpiresAt: expiresAt.Time, CreatedAt: createdAt.Time,
+		RestrictTo: restrictions, AllowedIPCIDRs: allowedIPCIDRs, ExpiresAt: expiresAt.Time, CreatedAt: createdAt.Time,
 		AllowSubjectAssertion: allowSubjectAssertion}
 	if lastUsedAt.Valid {
 		out.LastUsedAt = &lastUsedAt.Time

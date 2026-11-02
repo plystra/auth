@@ -68,9 +68,9 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 }
 
 const createAPIKey = `-- name: CreateAPIKey :one
-INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, allow_subject_assertion)
-VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), COALESCE($7, '[]'::jsonb), $8, $9)
-RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
+INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, allow_subject_assertion)
+VALUES ($1, $2, $3, $4, $5, COALESCE($6, '[]'::jsonb), COALESCE($7, '[]'::jsonb), COALESCE($8, '[]'::jsonb), $9, $10)
+RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 `
 
 type CreateAPIKeyParams struct {
@@ -81,6 +81,7 @@ type CreateAPIKeyParams struct {
 	SecretHash            []byte             `json:"secret_hash"`
 	Scopes                interface{}        `json:"scopes"`
 	RestrictTo            interface{}        `json:"restrict_to"`
+	AllowedIpCidrs        interface{}        `json:"allowed_ip_cidrs"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
@@ -93,6 +94,7 @@ type CreateAPIKeyRow struct {
 	SecretHash            []byte             `json:"secret_hash"`
 	Scopes                []byte             `json:"scopes"`
 	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
@@ -109,6 +111,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		arg.SecretHash,
 		arg.Scopes,
 		arg.RestrictTo,
+		arg.AllowedIpCidrs,
 		arg.ExpiresAt,
 		arg.AllowSubjectAssertion,
 	)
@@ -121,6 +124,7 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 		&i.SecretHash,
 		&i.Scopes,
 		&i.RestrictTo,
+		&i.AllowedIpCidrs,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
@@ -286,7 +290,7 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 }
 
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to,
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to, k.allowed_ip_cidrs,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
        a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
@@ -306,6 +310,7 @@ type GetAPIKeyByPrefixRow struct {
 	HashScheme            string             `json:"hash_scheme"`
 	Scopes                []byte             `json:"scopes"`
 	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
@@ -329,6 +334,7 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.HashScheme,
 		&i.Scopes,
 		&i.RestrictTo,
+		&i.AllowedIpCidrs,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
@@ -610,7 +616,7 @@ func (q *Queries) ListApplicationInstallationsInSpace(ctx context.Context, arg L
 }
 
 const listManagedAPIKeys = `-- name: ListManagedAPIKeys :many
-SELECT id, application_id, name, prefix, scopes, restrict_to, expires_at,
+SELECT id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
        last_used_at, revoked_at, created_at, allow_subject_assertion
 FROM api_keys WHERE application_id = $1
 ORDER BY created_at, id
@@ -627,6 +633,7 @@ type ListManagedAPIKeysRow struct {
 	Prefix                string             `json:"prefix"`
 	Scopes                []byte             `json:"scopes"`
 	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
@@ -650,6 +657,7 @@ func (q *Queries) ListManagedAPIKeys(ctx context.Context, arg ListManagedAPIKeys
 			&i.Prefix,
 			&i.Scopes,
 			&i.RestrictTo,
+			&i.AllowedIpCidrs,
 			&i.ExpiresAt,
 			&i.LastUsedAt,
 			&i.RevokedAt,
@@ -751,10 +759,125 @@ func (q *Queries) LockLegacyAPIKeyHashes(ctx context.Context) ([]LockLegacyAPIKe
 	return items, nil
 }
 
+const lockManagedAPIKeyForRotation = `-- name: LockManagedAPIKeyForRotation :one
+SELECT id, application_id, name, prefix, secret_hash, hash_scheme, scopes, restrict_to,
+       allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
+FROM api_keys
+WHERE id = $1 AND application_id = $2
+FOR UPDATE
+`
+
+type LockManagedAPIKeyForRotationParams struct {
+	KeyID         string `json:"key_id"`
+	ApplicationID string `json:"application_id"`
+}
+
+type LockManagedAPIKeyForRotationRow struct {
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	SecretHash            []byte             `json:"secret_hash"`
+	HashScheme            string             `json:"hash_scheme"`
+	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+}
+
+func (q *Queries) LockManagedAPIKeyForRotation(ctx context.Context, arg LockManagedAPIKeyForRotationParams) (LockManagedAPIKeyForRotationRow, error) {
+	row := q.db.QueryRow(ctx, lockManagedAPIKeyForRotation, arg.KeyID, arg.ApplicationID)
+	var i LockManagedAPIKeyForRotationRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.Name,
+		&i.Prefix,
+		&i.SecretHash,
+		&i.HashScheme,
+		&i.Scopes,
+		&i.RestrictTo,
+		&i.AllowedIpCidrs,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.AllowSubjectAssertion,
+	)
+	return i, err
+}
+
+const preserveAPIKeySecretForGrace = `-- name: PreserveAPIKeySecretForGrace :exec
+INSERT INTO api_key_grace_secrets (key_id, secret_hash, valid_until)
+VALUES ($1, $2, now() + interval '24 hours')
+`
+
+type PreserveAPIKeySecretForGraceParams struct {
+	KeyID      string `json:"key_id"`
+	SecretHash []byte `json:"secret_hash"`
+}
+
+func (q *Queries) PreserveAPIKeySecretForGrace(ctx context.Context, arg PreserveAPIKeySecretForGraceParams) error {
+	_, err := q.db.Exec(ctx, preserveAPIKeySecretForGrace, arg.KeyID, arg.SecretHash)
+	return err
+}
+
+const replaceManagedAPIKeySecret = `-- name: ReplaceManagedAPIKeySecret :one
+UPDATE api_keys SET secret_hash = $1, hash_scheme = 'hmac_sha256'
+WHERE id = $2 AND application_id = $3
+RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
+          last_used_at, revoked_at, created_at, allow_subject_assertion
+`
+
+type ReplaceManagedAPIKeySecretParams struct {
+	SecretHash    []byte `json:"secret_hash"`
+	KeyID         string `json:"key_id"`
+	ApplicationID string `json:"application_id"`
+}
+
+type ReplaceManagedAPIKeySecretRow struct {
+	ID                    string             `json:"id"`
+	ApplicationID         string             `json:"application_id"`
+	Name                  string             `json:"name"`
+	Prefix                string             `json:"prefix"`
+	Scopes                []byte             `json:"scopes"`
+	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
+}
+
+func (q *Queries) ReplaceManagedAPIKeySecret(ctx context.Context, arg ReplaceManagedAPIKeySecretParams) (ReplaceManagedAPIKeySecretRow, error) {
+	row := q.db.QueryRow(ctx, replaceManagedAPIKeySecret, arg.SecretHash, arg.KeyID, arg.ApplicationID)
+	var i ReplaceManagedAPIKeySecretRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.Name,
+		&i.Prefix,
+		&i.Scopes,
+		&i.RestrictTo,
+		&i.AllowedIpCidrs,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+		&i.CreatedAt,
+		&i.AllowSubjectAssertion,
+	)
+	return i, err
+}
+
 const revokeManagedAPIKey = `-- name: RevokeManagedAPIKey :one
 UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
 WHERE id = $1 AND application_id = $2
-RETURNING id, application_id, name, prefix, scopes, restrict_to, expires_at,
+RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
           last_used_at, revoked_at, created_at, allow_subject_assertion
 `
 
@@ -770,6 +893,7 @@ type RevokeManagedAPIKeyRow struct {
 	Prefix                string             `json:"prefix"`
 	Scopes                []byte             `json:"scopes"`
 	RestrictTo            []byte             `json:"restrict_to"`
+	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
 	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
@@ -787,6 +911,7 @@ func (q *Queries) RevokeManagedAPIKey(ctx context.Context, arg RevokeManagedAPIK
 		&i.Prefix,
 		&i.Scopes,
 		&i.RestrictTo,
+		&i.AllowedIpCidrs,
 		&i.ExpiresAt,
 		&i.LastUsedAt,
 		&i.RevokedAt,
@@ -834,4 +959,24 @@ func (q *Queries) UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashPara
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const validGraceAPIKeySecret = `-- name: ValidGraceAPIKeySecret :one
+SELECT EXISTS (
+    SELECT 1 FROM api_key_grace_secrets
+    WHERE key_id = $1 AND secret_hash = $2
+      AND valid_until > now()
+)
+`
+
+type ValidGraceAPIKeySecretParams struct {
+	KeyID      string `json:"key_id"`
+	SecretHash []byte `json:"secret_hash"`
+}
+
+func (q *Queries) ValidGraceAPIKeySecret(ctx context.Context, arg ValidGraceAPIKeySecretParams) (bool, error) {
+	row := q.db.QueryRow(ctx, validGraceAPIKeySecret, arg.KeyID, arg.SecretHash)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }

@@ -76,6 +76,39 @@ func TestServerKeyUsesCurrentInstallationMemberAuthority(t *testing.T) {
 	}
 }
 
+func TestServerKeySourceIPAllowlistUsesDirectPeerNotForwardedHeaders(t *testing.T) {
+	ctx := context.Background()
+	st, authz, member, spaceID, key, sessions := newServerFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allowed_ip_cidrs = '["192.0.2.0/24"]'::jsonb WHERE application_id = 'app_server_test'`); err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("IP restricted key test", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	check := func(remoteAddr, forwardedFor string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"self:read","resource":{"type":"member","id":%q,"space_id":%q}}`, member.ID, member.ID, spaceID)
+		req := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", strings.NewReader(body))
+		req.RemoteAddr = remoteAddr
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("X-Forwarded-For", forwardedFor)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	if allowed := check("192.0.2.17:1234", "198.51.100.8"); allowed.Code != http.StatusOK {
+		t.Fatalf("allowed direct peer = %d %s", allowed.Code, allowed.Body.String())
+	}
+	for _, remote := range []string{"198.51.100.8:1234", ""} {
+		denied := check(remote, "192.0.2.17")
+		if denied.Code != http.StatusUnauthorized || !strings.Contains(denied.Body.String(), `"code":"unauthorized"`) {
+			t.Fatalf("disallowed direct peer %q = %d %s", remote, denied.Code, denied.Body.String())
+		}
+	}
+}
+
 func TestIntrospectionStopsWhenInstallationLosesPermission(t *testing.T) {
 	ctx := context.Background()
 	st, authz, member, spaceID, key, sessions := newServerFixture(t)

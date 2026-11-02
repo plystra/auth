@@ -3,6 +3,7 @@ package principal
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/security"
 )
 
@@ -179,6 +181,76 @@ func TestManagedAPIKeyRejectsOutOfManifestAndAuditFailure(t *testing.T) {
 	}
 }
 
+func TestManagedAPIKeySourceIPRangesAreValidatedAndPersisted(t *testing.T) {
+	ctx := context.Background()
+	st, _, apps, actorID, _, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	input := application.CreateManagedKeyInput{
+		Name: "source-restricted", Grants: []string{"auth.authz:check"}, ExpiresAt: time.Now().UTC().Add(time.Hour).Truncate(time.Second),
+	}
+	for _, ranges := range [][]string{{"192.0.2.0"}, {"192.0.2.0/24", "192.0.2.7/24"}} {
+		input.AllowedIPCIDRs = ranges
+		if _, _, err := apps.CreateManagedKey(ctx, actorID, appID, input); err == nil {
+			t.Fatalf("invalid or duplicate source IP ranges accepted: %v", ranges)
+		}
+	}
+	input.AllowedIPCIDRs = []string{"192.0.2.7/24"}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "applications.keys.create", map[string]any{
+		"application_id": appID, "name": input.Name, "grants": input.Grants,
+		"restrict_to": []application.KeyRestriction(nil), "expires_at": input.ExpiresAt,
+		"allow_subject_assertion": false, "allowed_ip_cidrs": input.AllowedIPCIDRs,
+	})
+	body, err := json.Marshal(map[string]any{
+		"name": input.Name, "grants": input.Grants, "expires_at": input.ExpiresAt,
+		"allowed_ip_cidrs": input.AllowedIPCIDRs,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := requestApplicationKey(t, handler, http.MethodPost, "/v1/applications/"+appID+"/api-keys", tokens.AccessToken, body)
+	if response.Code != http.StatusOK {
+		t.Fatalf("API key creation with source IP policy = %d %s", response.Code, response.Body.String())
+	}
+	var creation struct {
+		Data struct {
+			Key    application.ManagedKey `json:"key"`
+			Secret string                 `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &creation); err != nil {
+		t.Fatal(err)
+	}
+	created, raw := creation.Data.Key, creation.Data.Secret
+	if len(created.AllowedIPCIDRs) != 1 || created.AllowedIPCIDRs[0] != "192.0.2.0/24" {
+		t.Fatalf("source IP policy was not normalized: %+v", created.AllowedIPCIDRs)
+	}
+	listed, err := apps.ListManagedKeys(ctx, actorID, appID)
+	if err != nil || len(listed) != 1 || len(listed[0].AllowedIPCIDRs) != 1 || listed[0].AllowedIPCIDRs[0] != "192.0.2.0/24" {
+		t.Fatalf("source IP policy was not persisted: %+v, %v", listed, err)
+	}
+	allowed := requestinfo.With(ctx, requestinfo.Info{IP: net.ParseIP("192.0.2.8")})
+	if _, err := apps.AuthenticateKey(allowed, raw); err != nil {
+		t.Fatalf("allowed source IP was rejected: %v", err)
+	}
+	denied := requestinfo.With(ctx, requestinfo.Info{IP: net.ParseIP("198.51.100.8")})
+	if _, err := apps.AuthenticateKey(denied, raw); err == nil {
+		t.Fatal("outside source IP range authenticated")
+	}
+	rotated, next, err := apps.RotateManagedKey(ctx, actorID, appID, created.ID)
+	if err != nil || len(rotated.AllowedIPCIDRs) != 1 || rotated.AllowedIPCIDRs[0] != "192.0.2.0/24" {
+		t.Fatalf("rotation changed source IP policy: %+v, %v", rotated, err)
+	}
+	if _, err := apps.AuthenticateKey(allowed, next.Value()); err != nil {
+		t.Fatalf("rotated key rejected an allowed source IP: %v", err)
+	}
+	if _, err := apps.AuthenticateKey(denied, next.Value()); err == nil {
+		t.Fatal("rotated key bypassed source IP policy")
+	}
+}
+
 func TestAgentCanManageAPIKeysOnlyWithinOwnerEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st, _, _, ownerID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
@@ -213,6 +285,125 @@ func TestAgentCanManageAPIKeysOnlyWithinOwnerEnvelope(t *testing.T) {
 	denied := requestApplicationKey(t, handler, http.MethodPost, path, access.AccessToken, body)
 	if denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "OWNER_ENVELOPE_EXCLUDED") {
 		t.Fatalf("Agent created API key after owner lost authority: %d %s", denied.Code, denied.Body.String())
+	}
+}
+
+func TestManagedAPIKeyRotationKeepsIndependentGraceWindowsAndRollsBackAuditFailure(t *testing.T) {
+	ctx := context.Background()
+	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	created, original, err := apps.CreateManagedKey(ctx, actorID, appID, application.CreateManagedKeyInput{
+		Name: "rotating", Grants: []string{"auth.authz:check"}, ExpiresAt: time.Now().Add(72 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/applications/" + appID + "/api-keys/" + created.ID + "/rotate"
+	rotate := func() *httptest.ResponseRecorder {
+		t.Helper()
+		return requestApplicationKey(t, handler, http.MethodPost, path, tokens.AccessToken, nil)
+	}
+	if missing := rotate(); missing.Code != http.StatusForbidden || !strings.Contains(missing.Body.String(), "STEP_UP_REQUIRED") {
+		t.Fatalf("rotation without step-up = %d %s", missing.Code, missing.Body.String())
+	}
+	proof := map[string]any{"application_id": appID, "key_id": created.ID}
+	seedStepUpProof(t, st, tokens.SessionID, "applications.keys.rotate", proof)
+	first := rotate()
+	if first.Code != http.StatusOK {
+		t.Fatalf("first rotation = %d %s", first.Code, first.Body.String())
+	}
+	var firstResult struct {
+		Data struct {
+			Key    application.ManagedKey `json:"key"`
+			Secret string                 `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &firstResult); err != nil {
+		t.Fatal(err)
+	}
+	if firstResult.Data.Key.ID != created.ID || firstResult.Data.Secret == original.Value() ||
+		!strings.HasPrefix(firstResult.Data.Secret, created.Prefix+".") ||
+		strings.Contains(first.Body.String(), original.Value()) {
+		t.Fatalf("rotation returned unsafe key metadata: %s", first.Body.String())
+	}
+	for _, raw := range []string{original.Value(), firstResult.Data.Secret} {
+		if _, err := apps.AuthenticateKey(ctx, raw); err != nil {
+			t.Fatalf("key rejected during grace: %v", err)
+		}
+	}
+	var firstHash []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT secret_hash FROM api_keys WHERE id = $1`, created.ID).Scan(&firstHash); err != nil {
+		t.Fatal(err)
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "applications.keys.rotate", proof)
+	second := rotate()
+	if second.Code != http.StatusOK {
+		t.Fatalf("second rotation = %d %s", second.Code, second.Body.String())
+	}
+	var secondResult struct {
+		Data struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondResult); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{original.Value(), firstResult.Data.Secret, secondResult.Data.Secret} {
+		if _, err := apps.AuthenticateKey(ctx, raw); err != nil {
+			t.Fatalf("sequential rotation invalidated a live secret: %v", err)
+		}
+	}
+	var graceCount int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM api_key_grace_secrets WHERE key_id = $1 AND valid_until BETWEEN now() + interval '23 hours' AND now() + interval '25 hours'`, created.ID).Scan(&graceCount); err != nil || graceCount != 2 {
+		t.Fatalf("grace windows=%d error=%v", graceCount, err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_key_grace_secrets SET valid_until = now() - interval '1 second' WHERE key_id = $1`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_key_grace_secrets SET valid_until = now() + interval '1 hour' WHERE key_id = $1 AND secret_hash = $2`, created.ID, firstHash); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.AuthenticateKey(ctx, original.Value()); err == nil {
+		t.Fatal("expired grace secret authenticated")
+	}
+	if _, err := apps.AuthenticateKey(ctx, firstResult.Data.Secret); err != nil {
+		t.Fatalf("independent grace secret was rejected: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_api_key_rotate_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action = 'application.key.rotate' THEN RAISE EXCEPTION 'audit rejected'; END IF; RETURN NEW; END;
+		$$;
+		CREATE TRIGGER reject_api_key_rotate_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_api_key_rotate_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "applications.keys.rotate", proof)
+	if failed := rotate(); failed.Code < 500 {
+		t.Fatalf("rotation survived audit failure = %d %s", failed.Code, failed.Body.String())
+	}
+	if _, err := apps.AuthenticateKey(ctx, secondResult.Data.Secret); err != nil {
+		t.Fatalf("failed rotation changed current secret: %v", err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM api_key_grace_secrets WHERE key_id = $1`, created.ID).Scan(&graceCount); err != nil || graceCount != 2 {
+		t.Fatalf("failed rotation changed grace count=%d error=%v", graceCount, err)
+	}
+	if _, err := st.Pool.Exec(ctx, `DROP TRIGGER reject_api_key_rotate_audit ON audit_logs`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.RevokeManagedKey(ctx, actorID, appID, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{firstResult.Data.Secret, secondResult.Data.Secret} {
+		if _, err := apps.AuthenticateKey(ctx, raw); err == nil {
+			t.Fatal("revoked key or grace secret authenticated")
+		}
 	}
 }
 

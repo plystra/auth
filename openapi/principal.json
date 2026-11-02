@@ -797,6 +797,16 @@
           "allow_subject_assertion": {
             "type": "boolean"
           },
+          "allowed_ip_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "expires_at": {
             "format": "date-time",
             "type": "string"
@@ -1612,6 +1622,15 @@
           "allow_subject_assertion": {
             "type": "boolean"
           },
+          "allowed_ip_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "application_id": {
             "type": "string"
           },
@@ -1666,6 +1685,7 @@
           "prefix",
           "grants",
           "restrict_to",
+          "allowed_ip_cidrs",
           "expires_at",
           "created_at",
           "allow_subject_assertion"
@@ -2705,6 +2725,59 @@
           }
         },
         "summary": "applications.keys.revoke"
+      }
+    },
+    "/v1/applications/{app_id}/api-keys/{key_id}/rotate": {
+      "post": {
+        "operationId": "applications.keys.rotate",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "key_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputApplicationKeyCreationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "applications.keys.rotate"
       }
     },
     "/v1/approvals": {

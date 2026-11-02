@@ -47,12 +47,19 @@ type createApplicationKeyInput struct {
 		Name                  string                       `json:"name" minLength:"1" maxLength:"120"`
 		Grants                []string                     `json:"grants" minItems:"1" maxItems:"100"`
 		RestrictTo            []application.KeyRestriction `json:"restrict_to,omitempty" maxItems:"50"`
+		AllowedIPCIDRs        []string                     `json:"allowed_ip_cidrs,omitempty" maxItems:"50"`
 		ExpiresAt             time.Time                    `json:"expires_at"`
 		AllowSubjectAssertion bool                         `json:"allow_subject_assertion,omitempty"`
 	}
 }
 
 type revokeApplicationKeyInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+	KeyID         string `path:"key_id"`
+}
+
+type rotateApplicationKeyInput struct {
 	Authorization string `header:"Authorization"`
 	ApplicationID string `path:"app_id"`
 	KeyID         string `path:"key_id"`
@@ -70,6 +77,7 @@ func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("installations.create", "POST", "/v1/spaces/{id}/installations", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.installApplication)
 	route.Register(api, route.NewSpec("applications.keys.list", "GET", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplicationKeys)
 	route.Register(api, route.NewSpec("applications.keys.create", "POST", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.createApplicationKey)
+	route.Register(api, route.NewSpec("applications.keys.rotate", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/rotate", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateApplicationKey)
 	route.Register(api, route.NewSpec("applications.keys.revoke", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/revoke", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.revokeApplicationKey)
 }
 
@@ -115,14 +123,37 @@ func (a *API) createApplicationKey(ctx context.Context, in *createApplicationKey
 		"restrict_to": in.Body.RestrictTo, "expires_at": in.Body.ExpiresAt,
 		"allow_subject_assertion": in.Body.AllowSubjectAssertion,
 	}
+	if len(in.Body.AllowedIPCIDRs) > 0 {
+		request["allowed_ip_cidrs"] = in.Body.AllowedIPCIDRs
+	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.keys.create", request)
 	if err != nil {
 		return nil, err
 	}
 	key, raw, err := a.Applications.CreateManagedKey(ctx, actorID, in.ApplicationID, application.CreateManagedKeyInput{
-		Name: in.Body.Name, Grants: in.Body.Grants, RestrictTo: in.Body.RestrictTo,
+		Name: in.Body.Name, Grants: in.Body.Grants, RestrictTo: in.Body.RestrictTo, AllowedIPCIDRs: in.Body.AllowedIPCIDRs,
 		ExpiresAt: in.Body.ExpiresAt, AllowSubjectAssertion: in.Body.AllowSubjectAssertion,
 	})
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[applicationKeyCreation]{}
+	out.Body.Data = applicationKeyCreation{Key: key, Secret: raw}
+	return out, nil
+}
+
+func (a *API) rotateApplicationKey(ctx context.Context, in *rotateApplicationKeyInput) (*authorizationDataOutput[applicationKeyCreation], error) {
+	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.keys.rotate", map[string]any{
+		"application_id": in.ApplicationID, "key_id": in.KeyID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	key, raw, err := a.Applications.RotateManagedKey(ctx, actorID, in.ApplicationID, in.KeyID)
 	if err != nil {
 		return nil, err
 	}

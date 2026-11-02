@@ -1,5 +1,5 @@
 -- name: GetAPIKeyByPrefix :one
-SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to,
+SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to, k.allowed_ip_cidrs,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
        a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
@@ -7,6 +7,13 @@ WHERE k.prefix = sqlc.arg(prefix) LIMIT 1;
 
 -- name: TouchAPIKey :exec
 UPDATE api_keys SET last_used_at = now() WHERE id = sqlc.arg(id);
+
+-- name: ValidGraceAPIKeySecret :one
+SELECT EXISTS (
+    SELECT 1 FROM api_key_grace_secrets
+    WHERE key_id = sqlc.arg(key_id) AND secret_hash = sqlc.arg(secret_hash)
+      AND valid_until > now()
+);
 
 -- name: LockLegacyAPIKeyHashes :many
 SELECT id, secret_hash FROM api_keys
@@ -125,16 +132,16 @@ RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
           expires_at, consumed_at;
 
 -- name: CreateAPIKey :one
-INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, allow_subject_assertion)
-VALUES (sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(name), sqlc.arg(prefix), sqlc.arg(secret_hash), COALESCE(sqlc.narg(scopes), '[]'::jsonb), COALESCE(sqlc.narg(restrict_to), '[]'::jsonb), sqlc.narg(expires_at), sqlc.arg(allow_subject_assertion))
-RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion;
+INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, allow_subject_assertion)
+VALUES (sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(name), sqlc.arg(prefix), sqlc.arg(secret_hash), COALESCE(sqlc.narg(scopes), '[]'::jsonb), COALESCE(sqlc.narg(restrict_to), '[]'::jsonb), COALESCE(sqlc.narg(allowed_ip_cidrs), '[]'::jsonb), sqlc.narg(expires_at), sqlc.arg(allow_subject_assertion))
+RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion;
 
 -- name: GetApplicationForKeyManagement :one
 SELECT id, space_id, manifest_permissions, status
 FROM applications WHERE id = sqlc.arg(application_id);
 
 -- name: ListManagedAPIKeys :many
-SELECT id, application_id, name, prefix, scopes, restrict_to, expires_at,
+SELECT id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
        last_used_at, revoked_at, created_at, allow_subject_assertion
 FROM api_keys WHERE application_id = sqlc.arg(application_id)
 ORDER BY created_at, id;
@@ -142,7 +149,24 @@ ORDER BY created_at, id;
 -- name: RevokeManagedAPIKey :one
 UPDATE api_keys SET revoked_at = COALESCE(revoked_at, now())
 WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
-RETURNING id, application_id, name, prefix, scopes, restrict_to, expires_at,
+RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
+          last_used_at, revoked_at, created_at, allow_subject_assertion;
+
+-- name: LockManagedAPIKeyForRotation :one
+SELECT id, application_id, name, prefix, secret_hash, hash_scheme, scopes, restrict_to,
+       allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
+FROM api_keys
+WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
+FOR UPDATE;
+
+-- name: PreserveAPIKeySecretForGrace :exec
+INSERT INTO api_key_grace_secrets (key_id, secret_hash, valid_until)
+VALUES (sqlc.arg(key_id), sqlc.arg(secret_hash), now() + interval '24 hours');
+
+-- name: ReplaceManagedAPIKeySecret :one
+UPDATE api_keys SET secret_hash = sqlc.arg(secret_hash), hash_scheme = 'hmac_sha256'
+WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
+RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
           last_used_at, revoked_at, created_at, allow_subject_assertion;
 
 -- name: GetActiveInstallationForKeyRestriction :one
