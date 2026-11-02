@@ -248,11 +248,11 @@ func serve(ctx context.Context) error {
 	agentSvc.StepUp = sessionSvc
 	factorSvc.StepUp = sessionSvc
 	accounts := &account.Service{Store: st, Passwords: security.DefaultPasswordHasher(), Sessions: sessionSvc, Settings: settings, Limiter: limiter, Authorization: authorizationSvc, Mailer: mailSvc}
-	apps := &application.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
+	apps := &application.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
 	accounts.Invitations = invitationSvc
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {

@@ -8,20 +8,172 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/url"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
 
 type Service struct {
-	Store    *store.Store
-	HMACKeys [][]byte
+	Store         *store.Store
+	Authorization *authorization.Service
+	StepUp        stepup.Consumer
+	HMACKeys      [][]byte
+}
+
+type PublishedApplication struct {
+	ID                  string    `json:"id"`
+	SpaceID             string    `json:"space_id"`
+	Name                string    `json:"name"`
+	ClientID            string    `json:"client_id"`
+	RedirectURIs        []string  `json:"redirect_uris"`
+	ManifestPermissions []string  `json:"manifest_permissions"`
+	Visibility          string    `json:"visibility"`
+	Status              string    `json:"status"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+type RegisterInput struct {
+	SpaceID             string
+	Name                string
+	RedirectURIs        []string
+	ManifestPermissions []string
+}
+
+// RegisterPrivate records a publisher-owned application. Registration does not
+// grant the application authority; installations and their positive delta are
+// evaluated separately.
+func (s *Service) RegisterPrivate(ctx context.Context, actorMemberID string, in RegisterInput) (PublishedApplication, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
+		return PublishedApplication{}, apierr.New("UNAVAILABLE", "application registration is unavailable")
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" || utf8.RuneCountInString(in.Name) > 120 {
+		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application name must contain 1 to 120 characters")
+	}
+	if len(in.ManifestPermissions) == 0 || len(in.ManifestPermissions) > 100 {
+		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest must contain 1 to 100 permissions")
+	}
+	if len(in.RedirectURIs) > 20 {
+		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application has too many redirect URIs")
+	}
+	permissions := append([]string(nil), in.ManifestPermissions...)
+	slices.Sort(permissions)
+	for index, key := range permissions {
+		if strings.TrimSpace(key) != key || key == "" || (index > 0 && key == permissions[index-1]) {
+			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest contains an invalid or duplicate permission")
+		}
+	}
+	redirects := append([]string(nil), in.RedirectURIs...)
+	for _, raw := range redirects {
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Host == "" || parsed.Fragment != "" || parsed.User != nil ||
+			(parsed.Scheme != "https" && (parsed.Scheme != "http" || !isLoopbackHost(parsed.Hostname()))) {
+			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "redirect URI must use HTTPS or HTTP on a loopback host")
+		}
+	}
+	manifest, err := json.Marshal(permissions)
+	if err != nil {
+		return PublishedApplication{}, err
+	}
+	redirectJSON, err := json.Marshal(redirects)
+	if err != nil {
+		return PublishedApplication{}, err
+	}
+	id := string(ids.New[ids.ApplicationID]("app"))
+	var out PublishedApplication
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: in.SpaceID,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		}
+		for _, key := range permissions {
+			permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("VALIDATION_FAILED", "application manifest contains an unknown permission")
+			}
+			if err != nil {
+				return err
+			}
+			if permission.Status == "disabled" {
+				return apierr.New("PERMISSION_DISABLED", "application manifest contains a disabled permission")
+			}
+		}
+		if _, required := stepup.RequirementFromContext(ctx); required {
+			if s.StepUp == nil {
+				return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+			}
+			if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+		}
+		row, err := q.CreateApplication(ctx, db.CreateApplicationParams{
+			ID: id, SpaceID: in.SpaceID, Name: in.Name, ClientID: id,
+			RedirectUris: redirectJSON, ManifestPermissions: manifest,
+		})
+		if err != nil {
+			return err
+		}
+		if err := audit.Write(ctx, q, "member", actorMemberID, "application.register", row.ID, "success"); err != nil {
+			return err
+		}
+		out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,
+			RedirectURIs: redirects, ManifestPermissions: permissions, Visibility: row.Visibility,
+			Status: row.Status, CreatedAt: row.CreatedAt.Time}
+		return nil
+	})
+	return out, err
+}
+
+func (s *Service) ListPublished(ctx context.Context, spaceID string) ([]PublishedApplication, error) {
+	if s == nil || s.Store == nil {
+		return nil, apierr.New("UNAVAILABLE", "application listing is unavailable")
+	}
+	rows, err := s.Store.Queries().ListPublishedApplications(ctx, db.ListPublishedApplicationsParams{SpaceID: spaceID})
+	if err != nil {
+		return nil, err
+	}
+	applications := make([]PublishedApplication, 0, len(rows))
+	for _, row := range rows {
+		var redirects, permissions []string
+		if err := json.Unmarshal(row.RedirectUris, &redirects); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(row.ManifestPermissions, &permissions); err != nil {
+			return nil, err
+		}
+		applications = append(applications, PublishedApplication{ID: row.ID, SpaceID: row.SpaceID,
+			Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects,
+			ManifestPermissions: permissions, Visibility: row.Visibility, Status: row.Status,
+			CreatedAt: row.CreatedAt.Time})
+	}
+	return applications, nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 type OAuthClient struct {

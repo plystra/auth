@@ -1401,3 +1401,12 @@ ALTER TABLE approval_requests
     ADD CONSTRAINT approval_requests_governance_details_check
     CHECK ((kind = 'business' AND operation IS NULL AND request_details IS NULL)
         OR (kind = 'governance' AND operation IS NOT NULL AND operation <> '' AND request_details IS NOT NULL));
+
+
+ALTER TABLE applications
+    ADD COLUMN manifest_permissions jsonb NOT NULL DEFAULT '[]'::jsonb
+        CHECK (jsonb_typeof(manifest_permissions) = 'array'),
+    ADD COLUMN visibility text NOT NULL DEFAULT 'private'
+        CHECK (visibility IN ('private', 'public')),
+    ADD COLUMN status text NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'suspended'));

@@ -5,7 +5,15 @@ SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.scopes, k.expi
 UPDATE api_keys SET last_used_at = now() WHERE id = sqlc.arg(id);
 
 -- name: CreateApplication :one
-INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash) VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb), COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash)) RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at;
+INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb), COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash), sqlc.arg(manifest_permissions))
+RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions, visibility, status, created_at;
+
+-- name: ListPublishedApplications :many
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+FROM applications
+WHERE space_id = sqlc.arg(space_id)
+ORDER BY created_at, id;
 
 -- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at

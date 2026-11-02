@@ -11,6 +11,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/factor"
@@ -32,6 +33,7 @@ type API struct {
 	Invitations   *invitation.Service
 	Factors       *factor.Service
 	Approvals     *approval.Service
+	Applications  *application.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`
@@ -255,6 +257,7 @@ func (a *API) Register(api huma.API) {
 	a.registerAgentRoutes(api)
 	a.registerAuthorizationRoutes(api)
 	a.registerApprovalRoutes(api)
+	a.registerApplicationRoutes(api)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
 	r := in.Body

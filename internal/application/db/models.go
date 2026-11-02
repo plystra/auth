@@ -21,14 +21,3 @@ type ApiKey struct {
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
-
-type Application struct {
-	ID               string             `json:"id"`
-	SpaceID          string             `json:"space_id"`
-	Name             string             `json:"name"`
-	RedirectUris     []byte             `json:"redirect_uris"`
-	AllowedScopes    []byte             `json:"allowed_scopes"`
-	ClientID         string             `json:"client_id"`
-	ClientSecretHash []byte             `json:"client_secret_hash"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
-}

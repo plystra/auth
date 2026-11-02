@@ -111,20 +111,37 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Api
 }
 
 const createApplication = `-- name: CreateApplication :one
-INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash) VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb), COALESCE($5, '[]'::jsonb), $6, $7) RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
+INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)
+VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb), COALESCE($5, '[]'::jsonb), $6, $7, $8)
+RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions, visibility, status, created_at
 `
 
 type CreateApplicationParams struct {
-	ID               string      `json:"id"`
-	SpaceID          string      `json:"space_id"`
-	Name             string      `json:"name"`
-	RedirectUris     interface{} `json:"redirect_uris"`
-	AllowedScopes    interface{} `json:"allowed_scopes"`
-	ClientID         string      `json:"client_id"`
-	ClientSecretHash []byte      `json:"client_secret_hash"`
+	ID                  string      `json:"id"`
+	SpaceID             string      `json:"space_id"`
+	Name                string      `json:"name"`
+	RedirectUris        interface{} `json:"redirect_uris"`
+	AllowedScopes       interface{} `json:"allowed_scopes"`
+	ClientID            string      `json:"client_id"`
+	ClientSecretHash    []byte      `json:"client_secret_hash"`
+	ManifestPermissions []byte      `json:"manifest_permissions"`
 }
 
-func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationParams) (Application, error) {
+type CreateApplicationRow struct {
+	ID                  string             `json:"id"`
+	SpaceID             string             `json:"space_id"`
+	Name                string             `json:"name"`
+	RedirectUris        []byte             `json:"redirect_uris"`
+	AllowedScopes       []byte             `json:"allowed_scopes"`
+	ClientID            string             `json:"client_id"`
+	ClientSecretHash    []byte             `json:"client_secret_hash"`
+	ManifestPermissions []byte             `json:"manifest_permissions"`
+	Visibility          string             `json:"visibility"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationParams) (CreateApplicationRow, error) {
 	row := q.db.QueryRow(ctx, createApplication,
 		arg.ID,
 		arg.SpaceID,
@@ -133,8 +150,9 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		arg.AllowedScopes,
 		arg.ClientID,
 		arg.ClientSecretHash,
+		arg.ManifestPermissions,
 	)
-	var i Application
+	var i CreateApplicationRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -143,6 +161,9 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		&i.AllowedScopes,
 		&i.ClientID,
 		&i.ClientSecretHash,
+		&i.ManifestPermissions,
+		&i.Visibility,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
@@ -252,9 +273,20 @@ type GetApplicationByClientIDParams struct {
 	ClientID string `json:"client_id"`
 }
 
-func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicationByClientIDParams) (Application, error) {
+type GetApplicationByClientIDRow struct {
+	ID               string             `json:"id"`
+	SpaceID          string             `json:"space_id"`
+	Name             string             `json:"name"`
+	RedirectUris     []byte             `json:"redirect_uris"`
+	AllowedScopes    []byte             `json:"allowed_scopes"`
+	ClientID         string             `json:"client_id"`
+	ClientSecretHash []byte             `json:"client_secret_hash"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicationByClientIDParams) (GetApplicationByClientIDRow, error) {
 	row := q.db.QueryRow(ctx, getApplicationByClientID, arg.ClientID)
-	var i Application
+	var i GetApplicationByClientIDRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -266,6 +298,59 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const listPublishedApplications = `-- name: ListPublishedApplications :many
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+FROM applications
+WHERE space_id = $1
+ORDER BY created_at, id
+`
+
+type ListPublishedApplicationsParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+type ListPublishedApplicationsRow struct {
+	ID                  string             `json:"id"`
+	SpaceID             string             `json:"space_id"`
+	Name                string             `json:"name"`
+	ClientID            string             `json:"client_id"`
+	RedirectUris        []byte             `json:"redirect_uris"`
+	ManifestPermissions []byte             `json:"manifest_permissions"`
+	Visibility          string             `json:"visibility"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublishedApplicationsParams) ([]ListPublishedApplicationsRow, error) {
+	rows, err := q.db.Query(ctx, listPublishedApplications, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPublishedApplicationsRow{}
+	for rows.Next() {
+		var i ListPublishedApplicationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.ClientID,
+			&i.RedirectUris,
+			&i.ManifestPermissions,
+			&i.Visibility,
+			&i.Status,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const touchAPIKey = `-- name: TouchAPIKey :exec
