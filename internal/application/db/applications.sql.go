@@ -504,6 +504,7 @@ FROM applications a
 JOIN ancestors ON ancestors.id = a.space_id
 WHERE a.id = $1 AND a.visibility = 'private' AND a.status = 'active'
 LIMIT 1
+FOR UPDATE OF a
 `
 
 type GetPrivateApplicationForInstallParams struct {
@@ -530,6 +531,42 @@ func (q *Queries) GetPrivateApplicationForInstall(ctx context.Context, arg GetPr
 		&i.Status,
 	)
 	return i, err
+}
+
+const hasOverlappingApplicationInstallation = `-- name: HasOverlappingApplicationInstallation :one
+WITH RECURSIVE ancestors AS (
+    SELECT id, parent_id FROM spaces WHERE id = $2
+    UNION ALL
+    SELECT parent.id, parent.parent_id FROM spaces parent
+    JOIN ancestors child ON child.parent_id = parent.id
+), descendants AS (
+    SELECT id FROM spaces WHERE id = $2
+    UNION ALL
+    SELECT child.id FROM spaces child
+    JOIN descendants parent ON child.parent_id = parent.id
+)
+SELECT EXISTS (
+    SELECT 1 FROM application_installations i
+    WHERE i.application_id = $1 AND i.status <> 'uninstalled'
+      AND (
+          i.space_id = $2
+          OR (i.scope = 'space_tree' AND i.space_id IN (SELECT id FROM ancestors))
+          OR ($3::text = 'space_tree' AND i.space_id IN (SELECT id FROM descendants))
+      )
+)
+`
+
+type HasOverlappingApplicationInstallationParams struct {
+	ApplicationID string `json:"application_id"`
+	TargetSpaceID string `json:"target_space_id"`
+	NewScope      string `json:"new_scope"`
+}
+
+func (q *Queries) HasOverlappingApplicationInstallation(ctx context.Context, arg HasOverlappingApplicationInstallationParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasOverlappingApplicationInstallation, arg.ApplicationID, arg.TargetSpaceID, arg.NewScope)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const listActiveSpaceAncestorsForKey = `-- name: ListActiveSpaceAncestorsForKey :many

@@ -31,7 +31,7 @@ type installApplicationInput struct {
 	ID            string `path:"id"`
 	Body          struct {
 		ApplicationID string `json:"application_id"`
-		Scope         string `json:"scope,omitempty" enum:"space"`
+		Scope         string `json:"scope,omitempty" enum:"space,space_tree"`
 	}
 }
 
@@ -205,20 +205,24 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application installation is unavailable")
 	}
-	if in.Body.Scope != "" && in.Body.Scope != "space" {
-		return nil, apierr.New("VALIDATION_FAILED", "only space installations are available")
+	scope := in.Body.Scope
+	if scope == "" {
+		scope = "space"
+	}
+	if scope != "space" && scope != "space_tree" {
+		return nil, apierr.New("VALIDATION_FAILED", "installation scope is invalid")
 	}
 	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "installations.create", map[string]any{
-		"space_id": in.ID, "application_id": in.Body.ApplicationID, "scope": "space",
+		"space_id": in.ID, "application_id": in.Body.ApplicationID, "scope": scope,
 	})
 	if err != nil {
 		return nil, err
 	}
-	installed, err := a.Applications.InstallPrivateSpace(ctx, actor.ID, in.Body.ApplicationID, in.ID)
+	installed, err := a.Applications.InstallPrivate(ctx, actor.ID, in.Body.ApplicationID, in.ID, scope)
 	if err != nil {
 		return nil, err
 	}

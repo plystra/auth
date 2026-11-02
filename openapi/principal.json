@@ -1470,7 +1470,8 @@
           },
           "scope": {
             "enum": [
-              "space"
+              "space",
+              "space_tree"
             ],
             "type": "string"
           }

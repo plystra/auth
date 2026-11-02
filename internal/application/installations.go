@@ -34,8 +34,15 @@ type Installation struct {
 // InstallPrivateSpace grants the entire current private manifest to one new
 // application member. The installer must cover the positive authority delta.
 func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applicationID, spaceID string) (Installation, error) {
+	return s.InstallPrivate(ctx, actorMemberID, applicationID, spaceID, "space")
+}
+
+func (s *Service) InstallPrivate(ctx context.Context, actorMemberID, applicationID, spaceID, scope string) (Installation, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return Installation{}, apierr.New("UNAVAILABLE", "application installation is unavailable")
+	}
+	if scope != "space" && scope != "space_tree" {
+		return Installation{}, apierr.New("VALIDATION_FAILED", "installation scope is invalid")
 	}
 	var out Installation
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -56,6 +63,15 @@ func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applic
 		}
 		if err != nil {
 			return err
+		}
+		overlaps, err := q.HasOverlappingApplicationInstallation(ctx, db.HasOverlappingApplicationInstallationParams{
+			ApplicationID: applicationID, TargetSpaceID: spaceID, NewScope: scope,
+		})
+		if err != nil {
+			return err
+		}
+		if overlaps {
+			return apierr.New("CONFLICT", "application installation overlaps an existing installation")
 		}
 		var manifest []string
 		if err := json.Unmarshal(app.ManifestPermissions, &manifest); err != nil {
@@ -113,7 +129,7 @@ func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applic
 			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID,
 			RoleID:          pgtype.Text{String: roleID, Valid: true},
 			GranteeMemberID: pgtype.Text{String: memberID, Valid: true},
-			Scope:           "space", AnchorSpaceID: pgtype.Text{String: spaceID, Valid: true},
+			Scope:           scope, AnchorSpaceID: pgtype.Text{String: spaceID, Valid: true},
 			GrantedBy: actorMemberID,
 		}); err != nil {
 			return err
@@ -123,7 +139,7 @@ func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applic
 		}
 		row, err := q.CreateApplicationInstallation(ctx, db.CreateApplicationInstallationParams{
 			ID: installationID, ApplicationID: applicationID, SpaceID: spaceID,
-			MemberID: memberID, RoleID: roleID, Scope: "space",
+			MemberID: memberID, RoleID: roleID, Scope: scope,
 			ApprovedPermissions: app.ManifestPermissions, InstalledBy: pgtype.Text{String: actorMemberID, Valid: true},
 		})
 		if err != nil {

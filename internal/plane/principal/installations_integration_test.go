@@ -180,6 +180,168 @@ func TestPrivateApplicationInstallationStaysInPublisherTreeAndRollsBackAuditFail
 	}
 }
 
+func TestPrivateSpaceTreeInstallationCoversDescendantsAndRejectsOverlaps(t *testing.T) {
+	ctx := context.Background()
+	st, authz, apps, actorID, rootSpace, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
+	child, childActor, err := authz.CreateSpace(ctx, "usr_principal_actor", "Install tree child", "install-tree-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childSpace, grandchildSpace := child.ID, "spc_install_tree_grandchild"
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET parent_id = $1 WHERE id = $2`, rootSpace, childSpace); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id)
+		VALUES ($1, 'Grandchild', 'install-tree-grandchild', $2)`, grandchildSpace, childSpace); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, childSpace, childActor.ID, childActor.ID, "auth.applications:manage")
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postTree := func() *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+rootSpace+"/installations",
+			strings.NewReader(`{"application_id":"`+appID+`","scope":"space_tree"}`))
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "installations.create", map[string]any{
+		"space_id": rootSpace, "application_id": appID, "scope": "space",
+	})
+	if wrongProof := postTree(); wrongProof.Code != http.StatusForbidden || !strings.Contains(wrongProof.Body.String(), "STEP_UP_REQUIRED") {
+		t.Fatalf("space-only step-up accepted tree installation: %d %s", wrongProof.Code, wrongProof.Body.String())
+	}
+	seedStepUpProof(t, st, tokens.SessionID, "installations.create", map[string]any{
+		"space_id": rootSpace, "application_id": appID, "scope": "space_tree",
+	})
+	created := postTree()
+	if created.Code != http.StatusOK {
+		t.Fatalf("tree installation = %d %s", created.Code, created.Body.String())
+	}
+	var result struct {
+		Data application.Installation `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Data.Scope != "space_tree" || result.Data.SpaceID != rootSpace {
+		t.Fatalf("tree installation = %+v", result.Data)
+	}
+	expires := time.Now().Add(time.Hour)
+	raw, err := apps.CreateKey(ctx, appID, "tree", []string{"auth.authz:check"}, &expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := apps.AuthenticateKey(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{rootSpace, childSpace, grandchildSpace} {
+		memberID, code, err := apps.ResolveKeyInstallation(ctx, key, target)
+		if err != nil || code != "" || memberID != result.Data.MemberID {
+			t.Fatalf("tree installation at %s resolved member=%q code=%q error=%v", target, memberID, code, err)
+		}
+		decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: memberID, Permission: "auth.authz:check", ResourceSpace: target})
+		if err != nil || decision.Effect != engine.Allow {
+			t.Fatalf("tree installation authority at %s = %+v, %v", target, decision, err)
+		}
+	}
+	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, childSpace); err == nil {
+		t.Fatal("child installation overlapped ancestor tree installation")
+	} else {
+		assertPrincipalError(t, err, "CONFLICT")
+	}
+	if _, err := apps.ChangeInstallationStatus(ctx, actorID, rootSpace, result.Data.ID, "uninstall"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, childSpace); err != nil {
+		t.Fatalf("tombstoned ancestor installation still blocked child: %v", err)
+	}
+}
+
+func TestPrivateSpaceTreeInstallationRejectsUncoveredAndExistingChild(t *testing.T) {
+	ctx := context.Background()
+	st, authz, apps, actorID, rootSpace, _, _, appID := installationFixture(t, []string{"auth.authz:check"})
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = false WHERE holder_member_id = $1`, actorID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.InstallPrivate(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+		t.Fatal("tree installation ignored descendant assignment coverage")
+	} else {
+		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM application_installations WHERE application_id = $1`, appID).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("uncovered tree installation committed count=%d error=%v", count, err)
+	}
+	child, childActor, err := authz.CreateSpace(ctx, "usr_principal_actor", "Install child", "install-existing-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET parent_id = $1 WHERE id = $2`, rootSpace, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, child.ID, childActor.ID, childActor.ID, "auth.applications:manage")
+	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = true WHERE holder_member_id = $1`, actorID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := apps.InstallPrivate(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+		t.Fatal("tree installation overlapped existing child installation")
+	} else {
+		assertPrincipalError(t, err, "CONFLICT")
+	}
+	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, rootSpace); err != nil {
+		t.Fatalf("space-only parent installation should coexist with child: %v", err)
+	}
+}
+
+func TestPrivateInstallationOverlapIsSerializedAcrossScopes(t *testing.T) {
+	ctx := context.Background()
+	st, authz, apps, rootActor, rootSpace, _, _, appID := installationFixture(t, []string{"auth.authz:check"})
+	child, childActor, err := authz.CreateSpace(ctx, "usr_principal_actor", "Concurrent child", "concurrent-install-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET parent_id = $1 WHERE id = $2`, rootSpace, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, child.ID, childActor.ID, childActor.ID, "auth.applications:manage")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		_, installErr := apps.InstallPrivate(ctx, rootActor, appID, rootSpace, "space_tree")
+		results <- installErr
+	}()
+	go func() {
+		<-start
+		_, installErr := apps.InstallPrivateSpace(ctx, childActor.ID, appID, child.ID)
+		results <- installErr
+	}()
+	close(start)
+	first, second := <-results, <-results
+	if (first == nil) == (second == nil) {
+		t.Fatalf("concurrent overlapping installations: first=%v second=%v", first, second)
+	}
+	if first != nil {
+		assertPrincipalError(t, first, "CONFLICT")
+	} else {
+		assertPrincipalError(t, second, "CONFLICT")
+	}
+	var count int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM application_installations WHERE application_id = $1 AND status <> 'uninstalled'`, appID).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("concurrent installations left count=%d error=%v", count, err)
+	}
+}
+
 func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *testing.T) {
 	ctx := context.Background()
 	st, authz, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})

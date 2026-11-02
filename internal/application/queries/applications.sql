@@ -51,7 +51,30 @@ SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
 FROM applications a
 JOIN ancestors ON ancestors.id = a.space_id
 WHERE a.id = sqlc.arg(application_id) AND a.visibility = 'private' AND a.status = 'active'
-LIMIT 1;
+LIMIT 1
+FOR UPDATE OF a;
+
+-- name: HasOverlappingApplicationInstallation :one
+WITH RECURSIVE ancestors AS (
+    SELECT id, parent_id FROM spaces WHERE id = sqlc.arg(target_space_id)
+    UNION ALL
+    SELECT parent.id, parent.parent_id FROM spaces parent
+    JOIN ancestors child ON child.parent_id = parent.id
+), descendants AS (
+    SELECT id FROM spaces WHERE id = sqlc.arg(target_space_id)
+    UNION ALL
+    SELECT child.id FROM spaces child
+    JOIN descendants parent ON child.parent_id = parent.id
+)
+SELECT EXISTS (
+    SELECT 1 FROM application_installations i
+    WHERE i.application_id = sqlc.arg(application_id) AND i.status <> 'uninstalled'
+      AND (
+          i.space_id = sqlc.arg(target_space_id)
+          OR (i.scope = 'space_tree' AND i.space_id IN (SELECT id FROM ancestors))
+          OR (sqlc.arg(new_scope)::text = 'space_tree' AND i.space_id IN (SELECT id FROM descendants))
+      )
+);
 
 -- name: CreateApplicationInstallation :one
 INSERT INTO application_installations (
