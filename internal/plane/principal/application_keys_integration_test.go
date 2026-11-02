@@ -69,6 +69,21 @@ func TestManagedAPIKeyCreateListRevokeThroughPrincipalHTTP(t *testing.T) {
 	if reused := post(); reused.Code != http.StatusForbidden || !strings.Contains(reused.Body.String(), "STEP_UP_REQUIRED") {
 		t.Fatalf("reused step-up proof = %d %s", reused.Code, reused.Body.String())
 	}
+	request["name"] = "billing-secondary"
+	seedStepUpProof(t, st, tokens.SessionID, "applications.keys.create", request)
+	second := requestApplicationKey(t, handler, http.MethodPost, path, tokens.AccessToken,
+		[]byte(strings.Replace(string(body), "billing-server", "billing-secondary", 1)))
+	if second.Code != http.StatusOK {
+		t.Fatalf("second API key creation = %d %s", second.Code, second.Body.String())
+	}
+	var secondCreation struct {
+		Data struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(second.Body.Bytes(), &secondCreation); err != nil {
+		t.Fatal(err)
+	}
 	listed := requestApplicationKey(t, handler, http.MethodGet, path, tokens.AccessToken, nil)
 	if listed.Code != http.StatusOK || !strings.Contains(listed.Body.String(), key.ID) || strings.Contains(listed.Body.String(), creation.Data.Secret) || strings.Contains(listed.Body.String(), `"secret"`) {
 		t.Fatalf("API key listing leaked secret or omitted key: %d %s", listed.Code, listed.Body.String())
@@ -115,6 +130,9 @@ func TestManagedAPIKeyCreateListRevokeThroughPrincipalHTTP(t *testing.T) {
 	}
 	if _, err := apps.AuthenticateKey(ctx, creation.Data.Secret); err == nil {
 		t.Fatal("revoked API key still authenticated")
+	}
+	if _, err := apps.AuthenticateKey(ctx, secondCreation.Data.Secret); err != nil {
+		t.Fatalf("revoking one key affected another: %v", err)
 	}
 	var audits int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE resource_id = $1 AND action IN ('application.key.create', 'application.key.revoke')`, key.ID).Scan(&audits); err != nil || audits != 2 {
