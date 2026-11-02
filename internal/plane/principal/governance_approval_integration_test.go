@@ -106,6 +106,13 @@ func TestAgentBindingGovernanceApprovalIsRequestBoundAndSingleUse(t *testing.T) 
 	if approved.Code != http.StatusOK {
 		t.Fatalf("governance approval = %d %s", approved.Code, approved.Body.String())
 	}
+	var approvedExpiresAt time.Time
+	if err := st.Pool.QueryRow(ctx, `SELECT approved_expires_at FROM approval_requests WHERE id = $1`, approvalID).Scan(&approvedExpiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if remaining := time.Until(approvedExpiresAt); remaining < 14*time.Minute || remaining > 16*time.Minute {
+		t.Fatalf("governance approval lifetime = %s", remaining)
+	}
 	businessDecision, _, err := authz.CheckBusiness(ctx, authorization.CheckRequest{
 		MemberID: createdAgent.ID, Permission: "auth.bindings:manage", ResourceSpace: spaceID,
 	}, "governance", target.ID)
@@ -252,5 +259,28 @@ func TestAgentBindingGovernanceApprovalIsRequestBoundAndSingleUse(t *testing.T) 
 	}
 	if err := st.Pool.QueryRow(ctx, `SELECT binding_policy FROM members WHERE id = $1`, target.ID).Scan(&bindingPolicy); err != nil || bindingPolicy != "single" {
 		t.Fatalf("rejected policy change mutated member = %q, %v", bindingPolicy, err)
+	}
+	initialExpiry := request(http.MethodPatch, policyPath, agentTokens.AccessToken, "", rejectedBody)
+	if initialExpiry.Code != http.StatusForbidden {
+		t.Fatalf("initial expiry case = %d %s", initialExpiry.Code, initialExpiry.Body.String())
+	}
+	if err := json.Unmarshal(initialExpiry.Body.Bytes(), &denied); err != nil {
+		t.Fatal(err)
+	}
+	expiringID := denied.Error.Details.ApprovalID
+	seedStepUpProof(t, st, userTokens.SessionID, "approvals.approve", map[string]any{"approval_id": expiringID})
+	approvedExpiry := request(http.MethodPost, "/v1/approvals/"+expiringID+"/approve", userTokens.AccessToken, "", "")
+	if approvedExpiry.Code != http.StatusOK {
+		t.Fatalf("expiry case approval = %d %s", approvedExpiry.Code, approvedExpiry.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE approval_requests SET approved_expires_at = now() - interval '1 second' WHERE id = $1`, expiringID); err != nil {
+		t.Fatal(err)
+	}
+	expiredRetry := request(http.MethodPatch, policyPath, agentTokens.AccessToken, expiringID, rejectedBody)
+	if expiredRetry.Code != http.StatusForbidden || !strings.Contains(expiredRetry.Body.String(), "APPROVAL_REQUIRED") {
+		t.Fatalf("expired governance retry = %d %s", expiredRetry.Code, expiredRetry.Body.String())
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT binding_policy FROM members WHERE id = $1`, target.ID).Scan(&bindingPolicy); err != nil || bindingPolicy != "single" {
+		t.Fatalf("expired approval mutated policy = %q, %v", bindingPolicy, err)
 	}
 }
