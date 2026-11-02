@@ -15,6 +15,39 @@ FROM applications
 WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
+-- name: GetPrivateApplicationForInstall :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = sqlc.arg(target_space_id) AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id FROM spaces parent
+    JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
+FROM applications a
+JOIN ancestors ON ancestors.id = a.space_id
+WHERE a.id = sqlc.arg(application_id) AND a.visibility = 'private' AND a.status = 'active'
+LIMIT 1;
+
+-- name: CreateApplicationInstallation :one
+INSERT INTO application_installations (
+    id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by
+) VALUES (
+    sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(space_id), sqlc.arg(member_id),
+    sqlc.arg(role_id), sqlc.arg(scope), sqlc.arg(approved_permissions), sqlc.arg(installed_by)
+)
+RETURNING id, application_id, space_id, member_id, role_id, scope, anchor_group_id,
+          approved_permissions, status, installed_by, created_at;
+
+-- name: ListApplicationInstallationsInSpace :many
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
+       i.anchor_group_id, i.approved_permissions, i.status, i.installed_by, i.created_at,
+       a.name AS application_name
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+WHERE i.space_id = sqlc.arg(space_id) AND i.status <> 'uninstalled'
+ORDER BY i.created_at, i.id;
+
 -- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
 FROM applications

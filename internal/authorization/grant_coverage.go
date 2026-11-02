@@ -32,7 +32,7 @@ func validateMemberGrantAnchorTx(ctx context.Context, q *db.Queries, memberSpace
 
 func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string) error {
 	if len(change.Permissions) != 0 {
-		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, delta.Result{Permissions: change.Permissions}, actorMemberID, memberID, principalKind, spaceID, map[string]struct{}{}); err != nil {
+		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, delta.Result{Permissions: change.Permissions}, actorMemberID, memberID, principalKind, spaceID, false, map[string]struct{}{}); err != nil {
 			return err
 		}
 	}
@@ -44,7 +44,25 @@ func (s *Service) coverPositiveGrantDeltaTx(ctx context.Context, q *db.Queries, 
 	return nil
 }
 
-func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string, seen map[string]struct{}) error {
+// CoverApplicationInstallationTx evaluates the complete authority gained by a
+// new installation member. Only this path may cover an application recipient;
+// ordinary grants to application members remain blocked by G8.
+func (s *Service) CoverApplicationInstallationTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, spaceID string) error {
+	if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, spaceID); err != nil {
+		return err
+	}
+	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
+	if err != nil {
+		return err
+	}
+	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
+	if err != nil {
+		return err
+	}
+	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, "application", spaceID, true, map[string]struct{}{})
+}
+
+func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Queries, change delta.Result, actorMemberID, memberID, principalKind, spaceID string, applicationInstallation bool, seen map[string]struct{}) error {
 	if len(change.Permissions) == 0 {
 		return nil
 	}
@@ -66,7 +84,7 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 	if len(change.Permissions) == 0 {
 		return nil
 	}
-	if actor.Type == "application" || principalKind == "application" {
+	if actor.Type == "application" || (principalKind == "application" && !applicationInstallation) {
 		return rejectUncoveredDelta(change, "The grant would increase authority without owner-envelope coverage.")
 	}
 	if actor.Type == "agent" {
@@ -93,7 +111,7 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 		if err := s.authorizeTargetTx(ctx, q, owner.ID, "auth.grants:assign", spaceID, memberID); err != nil {
 			return err
 		}
-		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, change, owner.ID, memberID, principalKind, spaceID, seen); err != nil {
+		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, change, owner.ID, memberID, principalKind, spaceID, applicationInstallation, seen); err != nil {
 			return err
 		}
 	}

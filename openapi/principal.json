@@ -496,6 +496,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputInstallationBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Installation"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputInvitationResponseBody": {
         "additionalProperties": false,
         "properties": {
@@ -532,6 +544,24 @@
           "data": {
             "items": {
               "$ref": "#/components/schemas/Binding"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "AuthorizationDataOutputListInstallationBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Installation"
             },
             "type": [
               "array",
@@ -1317,6 +1347,75 @@
         },
         "required": [
           "salt1"
+        ],
+        "type": "object"
+      },
+      "InstallApplicationInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "space"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "application_id"
+        ],
+        "type": "object"
+      },
+      "Installation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "application_name": {
+            "type": "string"
+          },
+          "approved_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "application_id",
+          "application_name",
+          "space_id",
+          "member_id",
+          "scope",
+          "approved_permissions",
+          "status",
+          "created_at"
         ],
         "type": "object"
       },
@@ -4199,6 +4298,104 @@
           }
         },
         "summary": "groups.move"
+      }
+    },
+    "/v1/spaces/{id}/installations": {
+      "get": {
+        "operationId": "installations.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputListInstallationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "installations.list"
+      },
+      "post": {
+        "operationId": "installations.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallApplicationInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputInstallationBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "installations.create"
       }
     },
     "/v1/spaces/{id}/invitations": {

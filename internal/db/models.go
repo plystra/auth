@@ -108,6 +108,20 @@ type Application struct {
 	Status              string             `json:"status"`
 }
 
+type ApplicationInstallation struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	SpaceID             string             `json:"space_id"`
+	MemberID            string             `json:"member_id"`
+	RoleID              string             `json:"role_id"`
+	Scope               string             `json:"scope"`
+	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
+	ApprovedPermissions []byte             `json:"approved_permissions"`
+	Status              string             `json:"status"`
+	InstalledBy         string             `json:"installed_by"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+}
+
 type ApprovalRequest struct {
 	ID                    string             `json:"id"`
 	AgentMemberID         string             `json:"agent_member_id"`

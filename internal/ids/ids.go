@@ -23,6 +23,7 @@ type PermissionID string
 type GrantID string
 type AssignRightID string
 type ApplicationID string
+type InstallationID string
 type APIKeyID string
 type AgentID string
 type AuditID string
@@ -53,6 +54,7 @@ func (id PermissionID) Valid() bool       { return valid(string(id), "prm") }
 func (id GrantID) Valid() bool            { return valid(string(id), "grt") }
 func (id AssignRightID) Valid() bool      { return valid(string(id), "ar") }
 func (id ApplicationID) Valid() bool      { return valid(string(id), "app") }
+func (id InstallationID) Valid() bool     { return valid(string(id), "ins") }
 func (id APIKeyID) Valid() bool           { return valid(string(id), "key") }
 func (id AgentID) Valid() bool            { return valid(string(id), "agt") }
 func (id AuditID) Valid() bool            { return valid(string(id), "aud") }

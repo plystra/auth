@@ -169,6 +169,56 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 	return i, err
 }
 
+const createApplicationInstallation = `-- name: CreateApplicationInstallation :one
+INSERT INTO application_installations (
+    id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by
+) VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7, $8
+)
+RETURNING id, application_id, space_id, member_id, role_id, scope, anchor_group_id,
+          approved_permissions, status, installed_by, created_at
+`
+
+type CreateApplicationInstallationParams struct {
+	ID                  string `json:"id"`
+	ApplicationID       string `json:"application_id"`
+	SpaceID             string `json:"space_id"`
+	MemberID            string `json:"member_id"`
+	RoleID              string `json:"role_id"`
+	Scope               string `json:"scope"`
+	ApprovedPermissions []byte `json:"approved_permissions"`
+	InstalledBy         string `json:"installed_by"`
+}
+
+func (q *Queries) CreateApplicationInstallation(ctx context.Context, arg CreateApplicationInstallationParams) (ApplicationInstallation, error) {
+	row := q.db.QueryRow(ctx, createApplicationInstallation,
+		arg.ID,
+		arg.ApplicationID,
+		arg.SpaceID,
+		arg.MemberID,
+		arg.RoleID,
+		arg.Scope,
+		arg.ApprovedPermissions,
+		arg.InstalledBy,
+	)
+	var i ApplicationInstallation
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.SpaceID,
+		&i.MemberID,
+		&i.RoleID,
+		&i.Scope,
+		&i.AnchorGroupID,
+		&i.ApprovedPermissions,
+		&i.Status,
+		&i.InstalledBy,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :exec
 INSERT INTO authorization_codes (
     id, application_id, user_id, member_id, redirect_uri, code_hash,
@@ -298,6 +348,109 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const getPrivateApplicationForInstall = `-- name: GetPrivateApplicationForInstall :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id FROM spaces parent
+    JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
+FROM applications a
+JOIN ancestors ON ancestors.id = a.space_id
+WHERE a.id = $1 AND a.visibility = 'private' AND a.status = 'active'
+LIMIT 1
+`
+
+type GetPrivateApplicationForInstallParams struct {
+	ApplicationID string `json:"application_id"`
+	TargetSpaceID string `json:"target_space_id"`
+}
+
+type GetPrivateApplicationForInstallRow struct {
+	ID                  string `json:"id"`
+	SpaceID             string `json:"space_id"`
+	Name                string `json:"name"`
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	Status              string `json:"status"`
+}
+
+func (q *Queries) GetPrivateApplicationForInstall(ctx context.Context, arg GetPrivateApplicationForInstallParams) (GetPrivateApplicationForInstallRow, error) {
+	row := q.db.QueryRow(ctx, getPrivateApplicationForInstall, arg.ApplicationID, arg.TargetSpaceID)
+	var i GetPrivateApplicationForInstallRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ManifestPermissions,
+		&i.Status,
+	)
+	return i, err
+}
+
+const listApplicationInstallationsInSpace = `-- name: ListApplicationInstallationsInSpace :many
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
+       i.anchor_group_id, i.approved_permissions, i.status, i.installed_by, i.created_at,
+       a.name AS application_name
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+WHERE i.space_id = $1 AND i.status <> 'uninstalled'
+ORDER BY i.created_at, i.id
+`
+
+type ListApplicationInstallationsInSpaceParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+type ListApplicationInstallationsInSpaceRow struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	SpaceID             string             `json:"space_id"`
+	MemberID            string             `json:"member_id"`
+	RoleID              string             `json:"role_id"`
+	Scope               string             `json:"scope"`
+	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
+	ApprovedPermissions []byte             `json:"approved_permissions"`
+	Status              string             `json:"status"`
+	InstalledBy         string             `json:"installed_by"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ApplicationName     string             `json:"application_name"`
+}
+
+func (q *Queries) ListApplicationInstallationsInSpace(ctx context.Context, arg ListApplicationInstallationsInSpaceParams) ([]ListApplicationInstallationsInSpaceRow, error) {
+	rows, err := q.db.Query(ctx, listApplicationInstallationsInSpace, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListApplicationInstallationsInSpaceRow{}
+	for rows.Next() {
+		var i ListApplicationInstallationsInSpaceRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ApplicationID,
+			&i.SpaceID,
+			&i.MemberID,
+			&i.RoleID,
+			&i.Scope,
+			&i.AnchorGroupID,
+			&i.ApprovedPermissions,
+			&i.Status,
+			&i.InstalledBy,
+			&i.CreatedAt,
+			&i.ApplicationName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPublishedApplications = `-- name: ListPublishedApplications :many
