@@ -39,7 +39,7 @@ VALUES (
     $5, $6, $7, $8,
     $9, $10, $11, $12
 )
-RETURNING id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at
+RETURNING id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details
 `
 
 type CreateApprovalRequestParams struct {
@@ -92,6 +92,80 @@ func (q *Queries) CreateApprovalRequest(ctx context.Context, arg CreateApprovalR
 		&i.ApprovedExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
+	)
+	return i, err
+}
+
+const createGovernanceApprovalRequest = `-- name: CreateGovernanceApprovalRequest :one
+INSERT INTO approval_requests (
+    id, kind, agent_member_id, approver_member_id, permission_key,
+    resource_type, resource_id, resource_space_id, resource_group_id,
+    resource_owner_member_id, operation, request_details, request_digest, reason, expires_at
+)
+VALUES (
+    $1, 'governance', $2, $3, $4,
+    'governance', $5, $6, $7,
+    $8, $9, $10, $11, '', $12
+)
+RETURNING id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details
+`
+
+type CreateGovernanceApprovalRequestParams struct {
+	ID                    string             `json:"id"`
+	AgentMemberID         string             `json:"agent_member_id"`
+	ApproverMemberID      string             `json:"approver_member_id"`
+	PermissionKey         string             `json:"permission_key"`
+	ResourceID            string             `json:"resource_id"`
+	ResourceSpaceID       string             `json:"resource_space_id"`
+	ResourceGroupID       pgtype.Text        `json:"resource_group_id"`
+	ResourceOwnerMemberID pgtype.Text        `json:"resource_owner_member_id"`
+	Operation             pgtype.Text        `json:"operation"`
+	RequestDetails        []byte             `json:"request_details"`
+	RequestDigest         []byte             `json:"request_digest"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateGovernanceApprovalRequest(ctx context.Context, arg CreateGovernanceApprovalRequestParams) (ApprovalRequest, error) {
+	row := q.db.QueryRow(ctx, createGovernanceApprovalRequest,
+		arg.ID,
+		arg.AgentMemberID,
+		arg.ApproverMemberID,
+		arg.PermissionKey,
+		arg.ResourceID,
+		arg.ResourceSpaceID,
+		arg.ResourceGroupID,
+		arg.ResourceOwnerMemberID,
+		arg.Operation,
+		arg.RequestDetails,
+		arg.RequestDigest,
+		arg.ExpiresAt,
+	)
+	var i ApprovalRequest
+	err := row.Scan(
+		&i.ID,
+		&i.AgentMemberID,
+		&i.ApproverMemberID,
+		&i.PermissionKey,
+		&i.ResourceType,
+		&i.ResourceID,
+		&i.ResourceSpaceID,
+		&i.ResourceGroupID,
+		&i.ResourceOwnerMemberID,
+		&i.RequestDigest,
+		&i.Reason,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.DecidedByUserID,
+		&i.DecidedAt,
+		&i.ApprovedExpiresAt,
+		&i.ConsumedAt,
+		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
 	)
 	return i, err
 }
@@ -101,7 +175,7 @@ UPDATE approval_requests
 SET status = $1, decided_by_user_id = $2, decided_at = now(),
     approved_expires_at = CASE WHEN $1 = 'approved' THEN now() + interval '15 minutes' ELSE NULL END
 WHERE id = $3 AND status = 'pending' AND expires_at > now()
-RETURNING id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at
+RETURNING id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details
 `
 
 type DecideApprovalRequestParams struct {
@@ -132,13 +206,17 @@ func (q *Queries) DecideApprovalRequest(ctx context.Context, arg DecideApprovalR
 		&i.ApprovedExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
 	)
 	return i, err
 }
 
 const findApprovedApprovalRequest = `-- name: FindApprovedApprovalRequest :one
-SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at FROM approval_requests
+SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details FROM approval_requests
 WHERE agent_member_id = $1
+  AND kind = 'business'
   AND permission_key = $2
   AND resource_type = $3
   AND resource_id = $4
@@ -189,13 +267,17 @@ func (q *Queries) FindApprovedApprovalRequest(ctx context.Context, arg FindAppro
 		&i.ApprovedExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
 	)
 	return i, err
 }
 
 const findPendingOrRejectedApprovalRequest = `-- name: FindPendingOrRejectedApprovalRequest :one
-SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at FROM approval_requests
+SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details FROM approval_requests
 WHERE agent_member_id = $1
+  AND kind = 'business'
   AND permission_key = $2
   AND resource_type = $3
   AND resource_id = $4
@@ -246,12 +328,15 @@ func (q *Queries) FindPendingOrRejectedApprovalRequest(ctx context.Context, arg 
 		&i.ApprovedExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
 	)
 	return i, err
 }
 
 const listPendingApprovalRequestsForUser = `-- name: ListPendingApprovalRequestsForUser :many
-SELECT a.id, a.agent_member_id, a.approver_member_id, a.permission_key, a.resource_type, a.resource_id, a.resource_space_id, a.resource_group_id, a.resource_owner_member_id, a.request_digest, a.reason, a.status, a.expires_at, a.decided_by_user_id, a.decided_at, a.approved_expires_at, a.consumed_at, a.created_at FROM approval_requests a
+SELECT a.id, a.agent_member_id, a.approver_member_id, a.permission_key, a.resource_type, a.resource_id, a.resource_space_id, a.resource_group_id, a.resource_owner_member_id, a.request_digest, a.reason, a.status, a.expires_at, a.decided_by_user_id, a.decided_at, a.approved_expires_at, a.consumed_at, a.created_at, a.kind, a.operation, a.request_details FROM approval_requests a
 JOIN user_members um ON um.member_id = a.approver_member_id
 WHERE um.user_id = $1
   AND um.status = 'active' AND um.revoked_at IS NULL
@@ -292,6 +377,9 @@ func (q *Queries) ListPendingApprovalRequestsForUser(ctx context.Context, arg Li
 			&i.ApprovedExpiresAt,
 			&i.ConsumedAt,
 			&i.CreatedAt,
+			&i.Kind,
+			&i.Operation,
+			&i.RequestDetails,
 		); err != nil {
 			return nil, err
 		}
@@ -304,7 +392,7 @@ func (q *Queries) ListPendingApprovalRequestsForUser(ctx context.Context, arg Li
 }
 
 const lockApprovalRequest = `-- name: LockApprovalRequest :one
-SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at FROM approval_requests WHERE id = $1 FOR UPDATE
+SELECT id, agent_member_id, approver_member_id, permission_key, resource_type, resource_id, resource_space_id, resource_group_id, resource_owner_member_id, request_digest, reason, status, expires_at, decided_by_user_id, decided_at, approved_expires_at, consumed_at, created_at, kind, operation, request_details FROM approval_requests WHERE id = $1 FOR UPDATE
 `
 
 type LockApprovalRequestParams struct {
@@ -333,6 +421,9 @@ func (q *Queries) LockApprovalRequest(ctx context.Context, arg LockApprovalReque
 		&i.ApprovedExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.Kind,
+		&i.Operation,
+		&i.RequestDetails,
 	)
 	return i, err
 }

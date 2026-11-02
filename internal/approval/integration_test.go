@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -340,5 +341,27 @@ func TestBusinessApprovalReasonLimitCountsUnicodeCharacters(t *testing.T) {
 		"auth.bindings:manage", f.resource("inv_unicode_2"), digest[:], strings.Repeat("理", 2001))
 	if approvalCode(err) != "VALIDATION_FAILED" {
 		t.Fatalf("2001 character reason error = %v", err)
+	}
+}
+
+func TestGovernanceApprovalRequiresMatchingDetailsAndDigest(t *testing.T) {
+	f := newApprovalFixture(t)
+	details := json.RawMessage(fmt.Sprintf(`{"operation":"members.update","space_id":%q,"member_id":%q,"binding_policy":"shared"}`, f.spaceID, f.ownerID))
+	wrong := sha256.Sum256([]byte("different request"))
+	in := GovernanceInput{
+		AgentMemberID: f.agentID, Permission: "auth.bindings:manage", Operation: "members.update",
+		SpaceID: f.spaceID, TargetMemberID: f.ownerID,
+		RequestDigest: wrong[:], RequestDetails: details,
+	}
+	if _, err := f.service.CreateGovernance(context.Background(), in); approvalCode(err) != "VALIDATION_FAILED" {
+		t.Fatalf("mismatched digest error = %v", err)
+	}
+	in.Operation = "members.bindings.create"
+	if _, err := f.service.CreateGovernance(context.Background(), in); approvalCode(err) != "VALIDATION_FAILED" {
+		t.Fatalf("mismatched operation error = %v", err)
+	}
+	var count int
+	if err := f.store.Pool.QueryRow(context.Background(), `SELECT count(*) FROM approval_requests`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid governance approvals persisted = %d, %v", count, err)
 	}
 }

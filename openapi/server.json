@@ -333,9 +333,16 @@
           "id": {
             "type": "string"
           },
+          "kind": {
+            "type": "string"
+          },
+          "operation": {
+            "type": "string"
+          },
           "reason": {
             "type": "string"
           },
+          "request_details": {},
           "request_digest": {
             "type": "string"
           },
@@ -348,6 +355,7 @@
         },
         "required": [
           "id",
+          "kind",
           "agent_member_id",
           "action",
           "resource",

@@ -2,17 +2,20 @@ package principal
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/stepup"
 )
 
 type createSpaceInput struct {
@@ -111,6 +114,7 @@ type memberPathInput struct {
 
 type bindUserInput struct {
 	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	MemberID      string `path:"mid"`
 	Body          struct {
@@ -120,6 +124,7 @@ type bindUserInput struct {
 
 type unbindUserInput struct {
 	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	MemberID      string `path:"mid"`
 	UserID        string `path:"user_id"`
@@ -127,6 +132,7 @@ type unbindUserInput struct {
 
 type memberPatchInput struct {
 	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	MemberID      string `path:"mid"`
 	Body          struct {
@@ -323,7 +329,11 @@ func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authori
 }
 
 func (a *API) updateMember(ctx context.Context, in *memberPatchInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
+	if in.Body.BindingPolicy != "single" && in.Body.BindingPolicy != "shared" {
+		return nil, apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
+	}
+	request := map[string]any{"operation": "members.update", "space_id": in.ID, "member_id": in.MemberID, "binding_policy": in.Body.BindingPolicy}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, in.MemberID, "auth.bindings:manage", "members.update", request)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +383,11 @@ func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authoriza
 }
 
 func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
+	if in.Body.UserID == "" {
+		return nil, apierr.New("VALIDATION_FAILED", "user_id is required")
+	}
+	request := map[string]any{"operation": "members.bindings.create", "space_id": in.ID, "member_id": in.MemberID, "user_id": in.Body.UserID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, in.MemberID, "auth.bindings:manage", "members.bindings.create", request)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +402,8 @@ func (a *API) bindUser(ctx context.Context, in *bindUserInput) (*authorizationDa
 }
 
 func (a *API) unbindUser(ctx context.Context, in *unbindUserInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", in.MemberID)
+	request := map[string]any{"operation": "members.bindings.revoke", "space_id": in.ID, "member_id": in.MemberID, "user_id": in.UserID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, in.MemberID, "auth.bindings:manage", "members.bindings.revoke", request)
 	if err != nil {
 		return nil, err
 	}
@@ -623,6 +638,57 @@ func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (
 
 func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
 	return a.actorForSpaceTarget(ctx, authorizationHeader, spaceID, permission, "")
+}
+
+func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader, approvalID, spaceID, targetMemberID, permission, operation string, request any) (authorization.Member, context.Context, error) {
+	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	member, err := a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	resourceGroup, err := a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
+		MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup,
+	})
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	if decision.Effect == engine.Allow {
+		return member, ctx, nil
+	}
+	denied := &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+	if decision.Code != "APPROVAL_REQUIRED" || claims.Type != "agent" || a.Approvals == nil {
+		return authorization.Member{}, ctx, denied
+	}
+	digest, err := stepup.DigestValue(request)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	if approvalID != "" {
+		return member, authorization.WithGovernanceApproval(ctx, approvalID, operation, targetMemberID, digest), nil
+	}
+	details, err := json.Marshal(request)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	created, err := a.Approvals.CreateGovernance(ctx, approval.GovernanceInput{
+		AgentMemberID: member.ID, Permission: permission, Operation: operation,
+		SpaceID: spaceID, TargetMemberID: targetMemberID, ResourceGroup: resourceGroup,
+		RequestDigest: digest, RequestDetails: details,
+	})
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	return authorization.Member{}, ctx, &apierr.Error{
+		Code: "APPROVAL_REQUIRED", Message: "Human approval is required before this operation can run.",
+		Details: map[string]string{"permission": permission, "approval_id": created.ID},
+	}
 }
 
 func (a *API) actorForSpaceSelf(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {

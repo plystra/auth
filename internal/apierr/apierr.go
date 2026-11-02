@@ -40,9 +40,14 @@ func Status(code string) int {
 		return http.StatusBadRequest
 	case "invalid_client", "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":
 		return http.StatusUnauthorized
-	case "forbidden", "permission_denied", "browser_origin_rejected", "cors_origin_rejected", "step_up_required", "human_principal_required", "user_account_required", "mfa_required", "approval_required", "approval_pending", "approval_rejected", "owner_inactive", "actor_user_inactive", "binding_revoked":
-		return http.StatusForbidden
-	case "email_verification_required":
+	case "forbidden", "permission_denied", "browser_origin_rejected", "cors_origin_rejected",
+		"step_up_required", "human_principal_required", "user_account_required", "mfa_required",
+		"approval_required", "approval_pending", "approval_rejected", "email_verification_required",
+		"owner_inactive", "owner_envelope_excluded", "actor_user_inactive", "actor_member_inactive",
+		"binding_revoked", "permission_disabled", "space_inactive", "resource_group_inactive",
+		"envelope_excluded", "no_matching_permission", "principal_kind_not_allowed",
+		"scope_out_of_bounds", "token_scope_excluded", "authority_delta_not_covered",
+		"assign_right_required", "grant_exceeds_owner":
 		return http.StatusForbidden
 	case "not_found":
 		return http.StatusNotFound

@@ -11,6 +11,19 @@ VALUES (
 )
 RETURNING *;
 
+-- name: CreateGovernanceApprovalRequest :one
+INSERT INTO approval_requests (
+    id, kind, agent_member_id, approver_member_id, permission_key,
+    resource_type, resource_id, resource_space_id, resource_group_id,
+    resource_owner_member_id, operation, request_details, request_digest, reason, expires_at
+)
+VALUES (
+    sqlc.arg(id), 'governance', sqlc.arg(agent_member_id), sqlc.arg(approver_member_id), sqlc.arg(permission_key),
+    'governance', sqlc.arg(resource_id), sqlc.arg(resource_space_id), sqlc.narg(resource_group_id),
+    sqlc.narg(resource_owner_member_id), sqlc.arg(operation), sqlc.arg(request_details), sqlc.arg(request_digest), '', sqlc.arg(expires_at)
+)
+RETURNING *;
+
 -- name: ListPendingApprovalRequestsForUser :many
 SELECT a.* FROM approval_requests a
 JOIN user_members um ON um.member_id = a.approver_member_id
@@ -33,6 +46,7 @@ RETURNING *;
 -- name: FindApprovedApprovalRequest :one
 SELECT * FROM approval_requests
 WHERE agent_member_id = sqlc.arg(agent_member_id)
+  AND kind = 'business'
   AND permission_key = sqlc.arg(permission_key)
   AND resource_type = sqlc.arg(resource_type)
   AND resource_id = sqlc.arg(resource_id)
@@ -49,6 +63,7 @@ WHERE id = sqlc.arg(id) AND status = 'approved' AND approved_expires_at > now();
 -- name: FindPendingOrRejectedApprovalRequest :one
 SELECT * FROM approval_requests
 WHERE agent_member_id = sqlc.arg(agent_member_id)
+  AND kind = 'business'
   AND permission_key = sqlc.arg(permission_key)
   AND resource_type = sqlc.arg(resource_type)
   AND resource_id = sqlc.arg(resource_id)

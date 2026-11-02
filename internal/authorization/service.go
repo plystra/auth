@@ -1691,7 +1691,7 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 	if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID, extraSpaceIDs...); err != nil {
 		return err
 	}
-	decision, err := s.CheckTx(ctx, q, CheckRequest{
+	decision, err := s.checkGovernanceTx(ctx, q, CheckRequest{
 		MemberID: actorMemberID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID,
 	})
 	if err != nil {

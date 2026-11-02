@@ -27,4 +27,7 @@ type ApprovalRequest struct {
 	ApprovedExpiresAt     pgtype.Timestamptz `json:"approved_expires_at"`
 	ConsumedAt            pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	Kind                  string             `json:"kind"`
+	Operation             pgtype.Text        `json:"operation"`
+	RequestDetails        []byte             `json:"request_details"`
 }

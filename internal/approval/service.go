@@ -1,9 +1,11 @@
 package approval
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -38,15 +40,86 @@ type Resource struct {
 }
 
 type Request struct {
-	ID            string    `json:"id"`
-	AgentMemberID string    `json:"agent_member_id"`
-	Action        string    `json:"action"`
-	Resource      Resource  `json:"resource"`
-	RequestDigest string    `json:"request_digest"`
-	Reason        string    `json:"reason,omitempty"`
-	Status        string    `json:"status"`
-	ExpiresAt     time.Time `json:"expires_at"`
-	CreatedAt     time.Time `json:"created_at"`
+	ID             string          `json:"id"`
+	Kind           string          `json:"kind"`
+	AgentMemberID  string          `json:"agent_member_id"`
+	Action         string          `json:"action"`
+	Resource       Resource        `json:"resource"`
+	Operation      string          `json:"operation,omitempty"`
+	RequestDetails json.RawMessage `json:"request_details,omitempty"`
+	RequestDigest  string          `json:"request_digest"`
+	Reason         string          `json:"reason,omitempty"`
+	Status         string          `json:"status"`
+	ExpiresAt      time.Time       `json:"expires_at"`
+	CreatedAt      time.Time       `json:"created_at"`
+}
+
+type GovernanceInput struct {
+	AgentMemberID  string
+	Permission     string
+	Operation      string
+	SpaceID        string
+	TargetMemberID string
+	ResourceGroup  string
+	RequestDigest  []byte
+	RequestDetails json.RawMessage
+}
+
+func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Request, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
+		return Request{}, apierr.New("UNAVAILABLE", "approvals are unavailable")
+	}
+	if in.AgentMemberID == "" || in.Permission == "" || in.Operation == "" || in.SpaceID == "" ||
+		in.TargetMemberID == "" || len(in.RequestDigest) != sha256.Size || !json.Valid(in.RequestDetails) {
+		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval request is invalid")
+	}
+	var details struct {
+		Operation string `json:"operation"`
+		SpaceID   string `json:"space_id"`
+		MemberID  string `json:"member_id"`
+	}
+	if err := json.Unmarshal(in.RequestDetails, &details); err != nil || details.Operation != in.Operation ||
+		details.SpaceID != in.SpaceID || details.MemberID != in.TargetMemberID {
+		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval details do not match the target")
+	}
+	canonicalDigest, err := stepup.Digest(in.RequestDetails)
+	if err != nil || !bytes.Equal(canonicalDigest, in.RequestDigest) {
+		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval digest does not match its details")
+	}
+	var created db.ApprovalRequest
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+			MemberID: in.AgentMemberID, Permission: in.Permission,
+			ResourceSpace: in.SpaceID, ResourceGroup: in.ResourceGroup,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Deny || decision.Code != "APPROVAL_REQUIRED" {
+			return apierr.New("VALIDATION_FAILED", "the Agent action is not awaiting human approval")
+		}
+		approverMemberID, err := s.Authorization.TopHumanOwnerTx(ctx, q, in.AgentMemberID)
+		if err != nil {
+			return err
+		}
+		created, err = q.CreateGovernanceApprovalRequest(ctx, db.CreateGovernanceApprovalRequestParams{
+			ID: string(ids.New[ids.ApprovalID]("apr")), AgentMemberID: in.AgentMemberID,
+			ApproverMemberID: approverMemberID, PermissionKey: in.Permission,
+			ResourceID: in.TargetMemberID, ResourceSpaceID: in.SpaceID,
+			ResourceGroupID: nullableText(in.ResourceGroup), Operation: nullableText(in.Operation),
+			RequestDetails: append([]byte(nil), in.RequestDetails...),
+			RequestDigest:  append([]byte(nil), in.RequestDigest...),
+			ExpiresAt:      pgtype.Timestamptz{Time: time.Now().UTC().Add(pendingLifetime), Valid: true},
+		})
+		if err != nil {
+			return err
+		}
+		return audit.Write(ctx, q, "member", in.AgentMemberID, "approval.create", created.ID, "success")
+	})
+	if err != nil {
+		return Request{}, err
+	}
+	return publicRequest(created), nil
 }
 
 func (s *Service) CreateBusiness(ctx context.Context, applicationKeyID, agentMemberID, action string, resource Resource, digest []byte, reason string) (Request, error) {
@@ -180,9 +253,10 @@ func nullableText(value string) pgtype.Text {
 
 func publicRequest(row db.ApprovalRequest) Request {
 	return Request{
-		ID: row.ID, AgentMemberID: row.AgentMemberID, Action: row.PermissionKey,
+		ID: row.ID, Kind: row.Kind, AgentMemberID: row.AgentMemberID, Action: row.PermissionKey,
 		Resource: Resource{Type: row.ResourceType, ID: row.ResourceID, SpaceID: row.ResourceSpaceID,
 			GroupID: row.ResourceGroupID.String, OwnerMemberID: row.ResourceOwnerMemberID.String},
+		Operation: row.Operation.String, RequestDetails: json.RawMessage(row.RequestDetails),
 		RequestDigest: hex.EncodeToString(row.RequestDigest), Reason: row.Reason,
 		Status: row.Status, ExpiresAt: row.ExpiresAt.Time, CreatedAt: row.CreatedAt.Time,
 	}
