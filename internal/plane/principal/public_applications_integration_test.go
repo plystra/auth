@@ -123,6 +123,18 @@ func TestPublicApplicationNeedsApprovalBeforeCrossSpaceInstallation(t *testing.T
 	if created.Code != http.StatusOK || !strings.Contains(created.Body.String(), `"approved_permissions":["auth.authz:check"]`) {
 		t.Fatalf("approved cross-customer installation = %d %s", created.Code, created.Body.String())
 	}
+	treeSpace, treeActor, err := authz.CreateSpace(ctx, "usr_principal_actor", "Tree customer", "tree-customer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, treeSpace.ID, treeActor.ID, treeActor.ID, "auth.applications:manage")
+	if _, err := apps.Install(ctx, treeActor.ID, registered.ID, treeSpace.ID, "space_tree"); err != nil {
+		t.Fatalf("approved public tree installation: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id)
+		VALUES ('spc_public_tree_child', 'Tree child', 'public-tree-child', $1)`, treeSpace.ID); err != nil {
+		t.Fatal(err)
+	}
 	key, raw, err := apps.CreateManagedKey(ctx, publisher.ID, registered.ID, application.CreateManagedKeyInput{
 		Name: "server", Grants: []string{"auth.authz:check"}, ExpiresAt: time.Now().Add(time.Hour),
 	})
@@ -139,5 +151,8 @@ func TestPublicApplicationNeedsApprovalBeforeCrossSpaceInstallation(t *testing.T
 	memberID, deny, err := apps.ResolveKeyInstallation(ctx, authenticated, customerSpace.ID)
 	if err != nil || deny != "" || !strings.HasPrefix(memberID, "mem_") {
 		t.Fatalf("customer key installation = member %q deny %q err %v", memberID, deny, err)
+	}
+	if treeMember, treeDeny, err := apps.ResolveKeyInstallation(ctx, authenticated, "spc_public_tree_child"); err != nil || treeDeny != "" || !strings.HasPrefix(treeMember, "mem_") {
+		t.Fatalf("tree child key installation = member %q deny %q err %v", treeMember, treeDeny, err)
 	}
 }
