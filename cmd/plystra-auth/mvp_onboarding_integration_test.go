@@ -16,10 +16,13 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/factor"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/operator"
 	"github.com/plystra/auth/internal/plane/ops"
 	"github.com/plystra/auth/internal/plane/principal"
+	"github.com/plystra/auth/internal/plane/server"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
@@ -105,29 +108,29 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		handler.ServeHTTP(response, req)
 		return response
 	}
-	lastTOTPStep := int64(0)
-	nextTOTP := func() string {
+	lastTOTPSteps := map[string]int64{}
+	nextTOTP := func(totpSecret string) string {
 		t.Helper()
 		for {
 			current := time.Now().UTC().Unix() / 30
 			step := current
-			if step <= lastTOTPStep {
-				step = lastTOTPStep + 1
+			if step <= lastTOTPSteps[totpSecret] {
+				step = lastTOTPSteps[totpSecret] + 1
 			}
 			if step > current+1 {
 				time.Sleep(time.Until(time.Unix((step-1)*30, 0)))
 				continue
 			}
-			code, err := totp.GenerateCode(secretValue, time.Unix(step*30, 0))
+			code, err := totp.GenerateCode(totpSecret, time.Unix(step*30, 0))
 			if err != nil {
 				t.Fatal(err)
 			}
-			lastTOTPStep = step
+			lastTOTPSteps[totpSecret] = step
 			return code
 		}
 	}
 	loginBody, err := json.Marshal(map[string]string{
-		"email": "operator@example.test", "password": "a-long-bootstrap-password", "mfa_code": nextTOTP(),
+		"email": "operator@example.test", "password": "a-long-bootstrap-password", "mfa_code": nextTOTP(secretValue),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -149,14 +152,14 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		body, key, approval string
 	}{
 		{`{"key":"invoice:read"}`, "invoice:read", "none"},
-		{`{"key":"invoice:approve","risk":"critical","principal_kinds":["human","agent"]}`, "invoice:approve", "required"},
+		{`{"key":"invoice:approve","risk":"critical","principal_kinds":["human","agent","application"]}`, "invoice:approve", "required"},
 	} {
 		var catalogRequest map[string]any
 		if err := json.Unmarshal([]byte(item.body), &catalogRequest); err != nil {
 			t.Fatal(err)
 		}
 		stepBody, err := json.Marshal(map[string]any{
-			"mfa_code": nextTOTP(), "operation": "ops.permissions.create", "request": catalogRequest,
+			"mfa_code": nextTOTP(secretValue), "operation": "ops.permissions.create", "request": catalogRequest,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -203,10 +206,20 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	sessions.Factors = factors
 	authz.StepUp = sessions
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{key}}
+	validator := credential.Validator{
+		Principal: credential.PrincipalParser{Sessions: sessions},
+		Server:    credential.ServerParser{Applications: apps},
+	}
+	validateCredential := func(ctx context.Context, plane, raw string) error {
+		if raw == "" {
+			return nil
+		}
+		return validator.Validate(ctx, plane, raw)
+	}
 	principalMux := http.NewServeMux()
 	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps}).Register(
 		humago.New(principalMux, route.HumaConfig("MVP onboarding principal", "1.0.0")))
-	principalHandler := route.Middleware(route.Principal, principalMux)
+	principalHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, nil, st, validateCredential, nil, nil)
 	principalRequest := func(path, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
@@ -222,9 +235,9 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if denied := principalRequest("/v1/auth/sign-up", "", publisherSignUp); denied.Code != http.StatusForbidden {
 		t.Fatalf("registration before policy change = %d %s", denied.Code, denied.Body.String())
 	}
-	policy := map[string]any{"registration_mode": "open", "require_email_verification": false}
+	policy := map[string]any{"registration_mode": "open", "require_email_verification": false, "access_token_ttl": 5 * time.Minute}
 	stepBody, err := json.Marshal(map[string]any{
-		"mfa_code": nextTOTP(), "operation": "ops.settings.update", "request": policy,
+		"mfa_code": nextTOTP(secretValue), "operation": "ops.settings.update", "request": policy,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -340,12 +353,8 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		"redirect_uris":        []string{"https://saas.example.test/callback"},
 		"manifest_permissions": []string{"auth.authz:check", "invoice:read", "invoice:approve"},
 	}
-	appCode, err := totp.GenerateCode(factorResult.Data.Secret, time.Now().UTC())
-	if err != nil {
-		t.Fatal(err)
-	}
 	appStepBody, err := json.Marshal(map[string]any{
-		"mfa_code": appCode, "operation": "applications.register", "request": appRequest,
+		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.register", "request": appRequest,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -364,5 +373,213 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	registered := principalRequest("/v1/spaces/"+publisher.spaceID+"/applications", publisher.token, string(appBody))
 	if registered.Code != http.StatusOK || !strings.Contains(registered.Body.String(), `"review_status":"pending"`) || !strings.Contains(registered.Body.String(), `"manifest_permissions":[]`) {
 		t.Fatalf("pending public application = %d %s", registered.Code, registered.Body.String())
+	}
+	var appResult struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(registered.Body.Bytes(), &appResult); err != nil || appResult.Data.ID == "" {
+		t.Fatal("public registration omitted application ID")
+	}
+	customerGrantBody, err := json.Marshal(map[string]any{
+		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"auth.applications:manage"},
+		"scope": "space", "anchor_space_id": customer.spaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	customerGrant := principalRequest("/v1/spaces/"+customer.spaceID+"/grants", customer.token, string(customerGrantBody))
+	if customerGrant.Code != http.StatusOK {
+		t.Fatalf("customer application management grant = %d %s", customerGrant.Code, customerGrant.Body.String())
+	}
+	customerFirstStep := principalRequest("/v1/auth/step-up", customer.token,
+		`{"password":"a-long-customer-password","operation":"me.factors.create","request":{"kind":"totp","name":"customer"}}`)
+	if customerFirstStep.Code != http.StatusOK {
+		t.Fatalf("customer first factor step-up = %d %s", customerFirstStep.Code, customerFirstStep.Body.String())
+	}
+	customerFactor := principalRequest("/v1/me/factors", customer.token, `{"kind":"totp","name":"customer"}`)
+	if customerFactor.Code != http.StatusOK {
+		t.Fatalf("customer factor enrollment = %d %s", customerFactor.Code, customerFactor.Body.String())
+	}
+	var customerFactorResult struct {
+		Data struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(customerFactor.Body.Bytes(), &customerFactorResult); err != nil || customerFactorResult.Data.Secret == "" {
+		t.Fatal("customer factor enrollment omitted its one-time secret")
+	}
+	installRequest := map[string]any{"space_id": customer.spaceID, "application_id": appResult.Data.ID, "scope": "space"}
+	installStepBody, err := json.Marshal(map[string]any{
+		"mfa_code": nextTOTP(customerFactorResult.Data.Secret), "operation": "installations.create", "request": installRequest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepped := principalRequest("/v1/auth/step-up", customer.token, string(installStepBody)); stepped.Code != http.StatusOK {
+		t.Fatalf("customer installation step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
+	installBody, err := json.Marshal(map[string]string{"application_id": appResult.Data.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	installPath := "/v1/spaces/" + customer.spaceID + "/installations"
+	if denied := principalRequest(installPath, customer.token, string(installBody)); denied.Code != http.StatusNotFound {
+		t.Fatalf("unapproved public application installation = %d %s", denied.Code, denied.Body.String())
+	}
+	manifest := []string{"auth.authz:check", "invoice:read", "invoice:approve"}
+	reviewRequest := map[string]any{"application_id": appResult.Data.ID, "manifest_permissions": manifest}
+	reviewStepBody, err := json.Marshal(map[string]any{
+		"mfa_code": nextTOTP(secretValue), "operation": "ops.applications.approve", "request": reviewRequest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepped := request(http.MethodPost, "/ops/v1/auth/step-up", loginResult.Data.AccessToken, string(reviewStepBody)); stepped.Code != http.StatusOK {
+		t.Fatalf("public application review step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
+	reviewBody, err := json.Marshal(map[string]any{"manifest_permissions": manifest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	approved := request(http.MethodPost, "/ops/v1/applications/"+appResult.Data.ID+"/approve", loginResult.Data.AccessToken, string(reviewBody))
+	if approved.Code != http.StatusOK || !strings.Contains(approved.Body.String(), `"review_status":"approved"`) {
+		t.Fatalf("public application approval = %d %s", approved.Code, approved.Body.String())
+	}
+	installed := principalRequest(installPath, customer.token, string(installBody))
+	if installed.Code != http.StatusOK || !strings.Contains(installed.Body.String(), `"invoice:read"`) || !strings.Contains(installed.Body.String(), `"invoice:approve"`) {
+		t.Fatalf("approved public application installation = %d %s", installed.Code, installed.Body.String())
+	}
+	resourceGrantBody, err := json.Marshal(map[string]any{
+		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"invoice:read"},
+		"scope": "space", "anchor_space_id": customer.spaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resourceGrant := principalRequest("/v1/spaces/"+customer.spaceID+"/grants", customer.token, string(resourceGrantBody))
+	if resourceGrant.Code != http.StatusOK {
+		t.Fatalf("customer resource grant = %d %s", resourceGrant.Code, resourceGrant.Body.String())
+	}
+	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	restrictTo := []application.KeyRestriction{{SpaceID: customer.spaceID}}
+	keyRequest := map[string]any{
+		"application_id": appResult.Data.ID, "name": "saas-server", "grants": []string{"auth.authz:check"},
+		"restrict_to": restrictTo, "expires_at": expiresAt, "allow_subject_assertion": true,
+	}
+	keyStepBody, err := json.Marshal(map[string]any{
+		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.keys.create", "request": keyRequest,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepped := principalRequest("/v1/auth/step-up", publisher.token, string(keyStepBody)); stepped.Code != http.StatusOK {
+		t.Fatalf("application key step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
+	keyBody, err := json.Marshal(map[string]any{
+		"name": "saas-server", "grants": []string{"auth.authz:check"}, "restrict_to": restrictTo,
+		"expires_at": expiresAt, "allow_subject_assertion": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPath := "/v1/applications/" + appResult.Data.ID + "/api-keys"
+	createdKey := principalRequest(keyPath, publisher.token, string(keyBody))
+	if createdKey.Code != http.StatusOK {
+		t.Fatalf("application server key = %d %s", createdKey.Code, createdKey.Body.String())
+	}
+	var keyResult struct {
+		Data struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createdKey.Body.Bytes(), &keyResult); err != nil || !strings.HasPrefix(keyResult.Data.Secret, "ply_sk_") {
+		t.Fatal("application key creation omitted its one-time secret")
+	}
+	overreach := map[string]any{
+		"name": "overreach", "grants": []string{"auth.tokens:introspect"}, "expires_at": expiresAt,
+	}
+	overreachStep, err := json.Marshal(map[string]any{
+		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.keys.create", "request": map[string]any{
+			"application_id": appResult.Data.ID, "name": "overreach", "grants": []string{"auth.tokens:introspect"}, "expires_at": expiresAt,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepped := principalRequest("/v1/auth/step-up", publisher.token, string(overreachStep)); stepped.Code != http.StatusOK {
+		t.Fatalf("out-of-manifest key step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
+	overreachBody, err := json.Marshal(overreach)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied := principalRequest(keyPath, publisher.token, string(overreachBody)); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "GRANT_EXCEEDS_OWNER") {
+		t.Fatalf("key grant outside application manifest = %d %s", denied.Code, denied.Body.String())
+	}
+	unrestricted := map[string]any{"name": "unrestricted", "grants": []string{"auth.authz:check"}, "expires_at": expiresAt, "allow_subject_assertion": true}
+	unrestrictedStep, err := json.Marshal(map[string]any{
+		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.keys.create", "request": map[string]any{
+			"application_id": appResult.Data.ID, "name": "unrestricted", "grants": []string{"auth.authz:check"},
+			"restrict_to": nil, "expires_at": expiresAt, "allow_subject_assertion": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stepped := principalRequest("/v1/auth/step-up", publisher.token, string(unrestrictedStep)); stepped.Code != http.StatusOK {
+		t.Fatalf("unrestricted key step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
+	unrestrictedBody, err := json.Marshal(unrestricted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrestrictedKey := principalRequest(keyPath, publisher.token, string(unrestrictedBody))
+	if unrestrictedKey.Code != http.StatusOK {
+		t.Fatalf("unrestricted application key = %d %s", unrestrictedKey.Code, unrestrictedKey.Body.String())
+	}
+	var unrestrictedResult struct {
+		Data struct {
+			Secret string `json:"secret"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(unrestrictedKey.Body.Bytes(), &unrestrictedResult); err != nil || !strings.HasPrefix(unrestrictedResult.Data.Secret, "ply_sk_") {
+		t.Fatal("unrestricted key creation omitted its one-time secret")
+	}
+	serverMux := http.NewServeMux()
+	(&server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authz, Sessions: sessions}).Register(
+		humago.New(serverMux, route.HumaConfig("MVP onboarding server", "1.0.0")))
+	serverHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Server, serverMux, nil, st, validateCredential, nil, nil)
+	check := func(keySecret, subjectMemberID, spaceID, action string) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{
+			"subject": map[string]string{"member_id": subjectMemberID}, "action": action,
+			"resource": map[string]string{"type": "invoice", "id": "inv_123", "space_id": spaceID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+keySecret)
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		serverHandler.ServeHTTP(response, req)
+		return response
+	}
+	if allowed := check(keyResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:read"); allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("installed SaaS authorization = %d %s", allowed.Code, allowed.Body.String())
+	}
+	if denied := check(keyResult.Data.Secret, publisher.memberID, publisher.spaceID, "invoice:read"); denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), `"deny_code":"KEY_SCOPE_EXCLUDED"`) {
+		t.Fatalf("key scope outside customer = %d %s", denied.Code, denied.Body.String())
+	}
+	if denied := check(unrestrictedResult.Data.Secret, publisher.memberID, publisher.spaceID, "invoice:read"); denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), `"deny_code":"APPLICATION_NOT_INSTALLED"`) {
+		t.Fatalf("uninstalled publisher Space = %d %s", denied.Code, denied.Body.String())
+	}
+	if denied := check(keyResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:approve"); denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), `"deny_code":"NO_MATCHING_PERMISSION"`) {
+		t.Fatalf("customer permission outside grant = %d %s", denied.Code, denied.Body.String())
+	}
+	if denied := principalRequest("/v1/spaces", keyResult.Data.Secret, `{"name":"Wrong plane","slug":"wrong-plane"}`); denied.Code != http.StatusUnauthorized || !strings.Contains(denied.Body.String(), "CREDENTIAL_PLANE_MISMATCH") {
+		t.Fatalf("server key on principal plane = %d %s", denied.Code, denied.Body.String())
 	}
 }
