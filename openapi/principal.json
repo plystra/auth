@@ -1991,6 +1991,15 @@
           "name": {
             "type": "string"
           },
+          "pending_manifest_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "redirect_uris": {
             "items": {
               "type": "string"
@@ -1999,6 +2008,9 @@
               "array",
               "null"
             ]
+          },
+          "review_status": {
+            "type": "string"
           },
           "space_id": {
             "type": "string"
@@ -2018,6 +2030,7 @@
           "redirect_uris",
           "manifest_permissions",
           "visibility",
+          "review_status",
           "status",
           "created_at"
         ],
@@ -2078,6 +2091,13 @@
               "array",
               "null"
             ]
+          },
+          "visibility": {
+            "enum": [
+              "private",
+              "public"
+            ],
+            "type": "string"
           }
         },
         "required": [

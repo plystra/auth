@@ -37,15 +37,17 @@ type Service struct {
 }
 
 type PublishedApplication struct {
-	ID                  string    `json:"id"`
-	SpaceID             string    `json:"space_id"`
-	Name                string    `json:"name"`
-	ClientID            string    `json:"client_id"`
-	RedirectURIs        []string  `json:"redirect_uris"`
-	ManifestPermissions []string  `json:"manifest_permissions"`
-	Visibility          string    `json:"visibility"`
-	Status              string    `json:"status"`
-	CreatedAt           time.Time `json:"created_at"`
+	ID                         string    `json:"id"`
+	SpaceID                    string    `json:"space_id"`
+	Name                       string    `json:"name"`
+	ClientID                   string    `json:"client_id"`
+	RedirectURIs               []string  `json:"redirect_uris"`
+	ManifestPermissions        []string  `json:"manifest_permissions"`
+	PendingManifestPermissions []string  `json:"pending_manifest_permissions,omitempty"`
+	Visibility                 string    `json:"visibility"`
+	ReviewStatus               string    `json:"review_status"`
+	Status                     string    `json:"status"`
+	CreatedAt                  time.Time `json:"created_at"`
 }
 
 type RegisterInput struct {
@@ -53,16 +55,23 @@ type RegisterInput struct {
 	Name                string
 	RedirectURIs        []string
 	ManifestPermissions []string
+	Visibility          string
 }
 
-// RegisterPrivate records a publisher-owned application. Registration does not
+// Register records a publisher-owned application. Registration does not
 // grant the application authority; installations and their positive delta are
 // evaluated separately.
-func (s *Service) RegisterPrivate(ctx context.Context, actorMemberID string, in RegisterInput) (PublishedApplication, error) {
+func (s *Service) Register(ctx context.Context, actorMemberID string, in RegisterInput) (PublishedApplication, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return PublishedApplication{}, apierr.New("UNAVAILABLE", "application registration is unavailable")
 	}
 	in.Name = strings.TrimSpace(in.Name)
+	if in.Visibility == "" {
+		in.Visibility = "private"
+	}
+	if in.Visibility != "private" && in.Visibility != "public" {
+		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application visibility is invalid")
+	}
 	if in.Name == "" || utf8.RuneCountInString(in.Name) > 120 {
 		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application name must contain 1 to 120 characters")
 	}
@@ -96,6 +105,14 @@ func (s *Service) RegisterPrivate(ctx context.Context, actorMemberID string, in 
 		return PublishedApplication{}, err
 	}
 	id := string(ids.New[ids.ApplicationID]("app"))
+	effectiveManifest := manifest
+	var pendingManifest []byte
+	reviewStatus := "not_required"
+	if in.Visibility == "public" {
+		effectiveManifest = []byte("[]")
+		pendingManifest = manifest
+		reviewStatus = "pending"
+	}
 	var out PublishedApplication
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
 		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
@@ -129,7 +146,9 @@ func (s *Service) RegisterPrivate(ctx context.Context, actorMemberID string, in 
 		}
 		row, err := q.CreateApplication(ctx, db.CreateApplicationParams{
 			ID: id, SpaceID: in.SpaceID, Name: in.Name, ClientID: id,
-			RedirectUris: redirectJSON, ManifestPermissions: manifest,
+			RedirectUris: redirectJSON, AllowedScopes: effectiveManifest,
+			ManifestPermissions: effectiveManifest, PendingManifestPermissions: pendingManifest,
+			Visibility: in.Visibility, ReviewStatus: reviewStatus,
 		})
 		if err != nil {
 			return err
@@ -138,8 +157,14 @@ func (s *Service) RegisterPrivate(ctx context.Context, actorMemberID string, in 
 			return err
 		}
 		out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,
-			RedirectURIs: redirects, ManifestPermissions: permissions, Visibility: row.Visibility,
+			RedirectURIs: redirects, Visibility: row.Visibility, ReviewStatus: row.ReviewStatus,
 			Status: row.Status, CreatedAt: row.CreatedAt.Time}
+		if in.Visibility == "public" {
+			out.ManifestPermissions = []string{}
+			out.PendingManifestPermissions = permissions
+		} else {
+			out.ManifestPermissions = permissions
+		}
 		return nil
 	})
 	return out, err
@@ -162,9 +187,16 @@ func (s *Service) ListPublished(ctx context.Context, spaceID string) ([]Publishe
 		if err := json.Unmarshal(row.ManifestPermissions, &permissions); err != nil {
 			return nil, err
 		}
+		var pending []string
+		if len(row.PendingManifestPermissions) > 0 {
+			if err := json.Unmarshal(row.PendingManifestPermissions, &pending); err != nil {
+				return nil, err
+			}
+		}
 		applications = append(applications, PublishedApplication{ID: row.ID, SpaceID: row.SpaceID,
 			Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects,
-			ManifestPermissions: permissions, Visibility: row.Visibility, Status: row.Status,
+			ManifestPermissions: permissions, PendingManifestPermissions: pending,
+			Visibility: row.Visibility, ReviewStatus: row.ReviewStatus, Status: row.Status,
 			CreatedAt: row.CreatedAt.Time})
 	}
 	return applications, nil
@@ -271,7 +303,8 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	if !valid {
 		return Key{}, apierr.New("unauthorized", "application API key is invalid")
 	}
-	if row.RevokedAt.Valid || !row.ExpiresAt.Valid || !row.ExpiresAt.Time.After(time.Now()) || row.ApplicationStatus != "active" {
+	if row.RevokedAt.Valid || !row.ExpiresAt.Valid || !row.ExpiresAt.Time.After(time.Now()) || row.ApplicationStatus != "active" ||
+		(row.ApplicationVisibility == "public" && row.ApplicationReviewStatus != "approved") {
 		return Key{}, apierr.New("unauthorized", "application API key is revoked or expired")
 	}
 	var allowedIPCIDRs []string
@@ -363,6 +396,9 @@ func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient
 	}
 	if err != nil {
 		return OAuthClient{}, err
+	}
+	if row.Status != "active" || (row.Visibility == "public" && row.ReviewStatus != "approved") {
+		return OAuthClient{}, apierr.New("invalid_request", "client_id is not registered")
 	}
 	var redirectURIs, allowedScopes []string
 	if err := json.Unmarshal(row.RedirectUris, &redirectURIs); err != nil {

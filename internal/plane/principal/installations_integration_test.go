@@ -26,7 +26,7 @@ func installationFixture(t *testing.T, manifest []string) (*store.Store, *author
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
 	seedTestInlineGrant(t, st, spaceID, actor.ID, actor.ID, "auth.applications:manage")
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{[]byte(strings.Repeat("k", 32))}}
-	registered, err := apps.RegisterPrivate(ctx, actor.ID, application.RegisterInput{
+	registered, err := apps.Register(ctx, actor.ID, application.RegisterInput{
 		SpaceID: spaceID, Name: "Billing", ManifestPermissions: manifest,
 	})
 	if err != nil {
@@ -120,7 +120,7 @@ func TestPrivateApplicationInstallationRejectsUncoveredDeltaAndIneligiblePermiss
 	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, actorID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID); err == nil {
+	if _, err := apps.InstallSpace(ctx, actorID, appID, spaceID); err == nil {
 		t.Fatal("uncovered application installation was allowed")
 	} else {
 		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
@@ -130,7 +130,7 @@ func TestPrivateApplicationInstallationRejectsUncoveredDeltaAndIneligiblePermiss
 		t.Fatalf("uncovered installation committed: count=%d error=%v", count, err)
 	}
 	st2, _, apps2, actor2, space2, _, _, ineligibleApp := installationFixture(t, []string{"auth.applications:manage"})
-	if _, err := apps2.InstallPrivateSpace(ctx, actor2, ineligibleApp, space2); err == nil {
+	if _, err := apps2.InstallSpace(ctx, actor2, ineligibleApp, space2); err == nil {
 		t.Fatal("application received a human and Agent-only permission")
 	} else {
 		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
@@ -148,7 +148,7 @@ func TestPrivateApplicationInstallationStaysInPublisherTreeAndRollsBackAuditFail
 		t.Fatal(err)
 	}
 	seedTestInlineGrant(t, st, otherSpace.ID, otherActor.ID, otherActor.ID, "auth.applications:manage")
-	if _, err := apps.InstallPrivateSpace(ctx, otherActor.ID, appID, otherSpace.ID); err == nil {
+	if _, err := apps.InstallSpace(ctx, otherActor.ID, appID, otherSpace.ID); err == nil {
 		t.Fatal("private application was installed outside its publisher tree")
 	} else {
 		assertPrincipalError(t, err, "NOT_FOUND")
@@ -162,7 +162,7 @@ func TestPrivateApplicationInstallationStaysInPublisherTreeAndRollsBackAuditFail
 	`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, publisherSpace); err == nil {
+	if _, err := apps.InstallSpace(ctx, actorID, appID, publisherSpace); err == nil {
 		t.Fatal("installation committed despite audit failure")
 	}
 	var installations, members, roles int
@@ -251,7 +251,7 @@ func TestPrivateSpaceTreeInstallationCoversDescendantsAndRejectsOverlaps(t *test
 			t.Fatalf("tree installation authority at %s = %+v, %v", target, decision, err)
 		}
 	}
-	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, childSpace); err == nil {
+	if _, err := apps.InstallSpace(ctx, childActor.ID, appID, childSpace); err == nil {
 		t.Fatal("child installation overlapped ancestor tree installation")
 	} else {
 		assertPrincipalError(t, err, "CONFLICT")
@@ -259,7 +259,7 @@ func TestPrivateSpaceTreeInstallationCoversDescendantsAndRejectsOverlaps(t *test
 	if _, err := apps.ChangeInstallationStatus(ctx, actorID, rootSpace, result.Data.ID, "uninstall"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, childSpace); err != nil {
+	if _, err := apps.InstallSpace(ctx, childActor.ID, appID, childSpace); err != nil {
 		t.Fatalf("tombstoned ancestor installation still blocked child: %v", err)
 	}
 }
@@ -270,7 +270,7 @@ func TestPrivateSpaceTreeInstallationRejectsUncoveredAndExistingChild(t *testing
 	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = false WHERE holder_member_id = $1`, actorID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.InstallPrivate(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
 		t.Fatal("tree installation ignored descendant assignment coverage")
 	} else {
 		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
@@ -287,18 +287,18 @@ func TestPrivateSpaceTreeInstallationRejectsUncoveredAndExistingChild(t *testing
 		t.Fatal(err)
 	}
 	seedTestInlineGrant(t, st, child.ID, childActor.ID, childActor.ID, "auth.applications:manage")
-	if _, err := apps.InstallPrivateSpace(ctx, childActor.ID, appID, child.ID); err != nil {
+	if _, err := apps.InstallSpace(ctx, childActor.ID, appID, child.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = true WHERE holder_member_id = $1`, actorID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.InstallPrivate(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
 		t.Fatal("tree installation overlapped existing child installation")
 	} else {
 		assertPrincipalError(t, err, "CONFLICT")
 	}
-	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, rootSpace); err != nil {
+	if _, err := apps.InstallSpace(ctx, actorID, appID, rootSpace); err != nil {
 		t.Fatalf("space-only parent installation should coexist with child: %v", err)
 	}
 }
@@ -318,12 +318,12 @@ func TestPrivateInstallationOverlapIsSerializedAcrossScopes(t *testing.T) {
 	results := make(chan error, 2)
 	go func() {
 		<-start
-		_, installErr := apps.InstallPrivate(ctx, rootActor, appID, rootSpace, "space_tree")
+		_, installErr := apps.Install(ctx, rootActor, appID, rootSpace, "space_tree")
 		results <- installErr
 	}()
 	go func() {
 		<-start
-		_, installErr := apps.InstallPrivateSpace(ctx, childActor.ID, appID, child.ID)
+		_, installErr := apps.InstallSpace(ctx, childActor.ID, appID, child.ID)
 		results <- installErr
 	}()
 	close(start)
@@ -345,7 +345,7 @@ func TestPrivateInstallationOverlapIsSerializedAcrossScopes(t *testing.T) {
 func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *testing.T) {
 	ctx := context.Background()
 	st, authz, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	installed, err := apps.InstallSpace(ctx, actorID, appID, spaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *test
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE resource_id = $1 AND action LIKE 'application.installation.%'`, installed.ID).Scan(&audits); err != nil || audits != 3 {
 		t.Fatalf("lifecycle audit rows=%d error=%v, want 3", audits, err)
 	}
-	reinstalled, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	reinstalled, err := apps.InstallSpace(ctx, actorID, appID, spaceID)
 	if err != nil || reinstalled.ID == installed.ID || reinstalled.MemberID == installed.MemberID {
 		t.Fatalf("fresh installation after uninstall = %+v, %v", reinstalled, err)
 	}
@@ -456,7 +456,7 @@ func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *test
 func TestInstallationLifecycleAuditFailureRollsBackState(t *testing.T) {
 	ctx := context.Background()
 	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	installed, err := apps.InstallSpace(ctx, actorID, appID, spaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestInstallationLifecycleAuditFailureRollsBackState(t *testing.T) {
 func TestInstallationResumeWithEmptyDeltaDoesNotRequireAssignmentRight(t *testing.T) {
 	ctx := context.Background()
 	st, authz, apps, actorID, spaceID, _, _, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	installed, err := apps.InstallSpace(ctx, actorID, appID, spaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -540,7 +540,7 @@ func TestInstallationResumeWithEmptyDeltaDoesNotRequireAssignmentRight(t *testin
 func TestAgentInstallationLifecycleUsesOwnerEnvelope(t *testing.T) {
 	ctx := context.Background()
 	st, _, apps, ownerID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.InstallPrivateSpace(ctx, ownerID, appID, spaceID)
+	installed, err := apps.InstallSpace(ctx, ownerID, appID, spaceID)
 	if err != nil {
 		t.Fatal(err)
 	}

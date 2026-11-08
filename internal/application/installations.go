@@ -31,13 +31,13 @@ type Installation struct {
 	CreatedAt           time.Time `json:"created_at"`
 }
 
-// InstallPrivateSpace grants the entire current private manifest to one new
+// InstallSpace grants the entire current manifest to one new
 // application member. The installer must cover the positive authority delta.
-func (s *Service) InstallPrivateSpace(ctx context.Context, actorMemberID, applicationID, spaceID string) (Installation, error) {
-	return s.InstallPrivate(ctx, actorMemberID, applicationID, spaceID, "space")
+func (s *Service) InstallSpace(ctx context.Context, actorMemberID, applicationID, spaceID string) (Installation, error) {
+	return s.Install(ctx, actorMemberID, applicationID, spaceID, "space")
 }
 
-func (s *Service) InstallPrivate(ctx context.Context, actorMemberID, applicationID, spaceID, scope string) (Installation, error) {
+func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spaceID, scope string) (Installation, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return Installation{}, apierr.New("UNAVAILABLE", "application installation is unavailable")
 	}
@@ -55,11 +55,11 @@ func (s *Service) InstallPrivate(ctx context.Context, actorMemberID, application
 		if decision.Effect != engine.Allow {
 			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 		}
-		app, err := q.GetPrivateApplicationForInstall(ctx, db.GetPrivateApplicationForInstallParams{
+		app, err := q.GetApplicationForInstall(ctx, db.GetApplicationForInstallParams{
 			ApplicationID: applicationID, TargetSpaceID: spaceID,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "private application was not found in this Space tree")
+			return apierr.New("NOT_FOUND", "installable application was not found")
 		}
 		if err != nil {
 			return err

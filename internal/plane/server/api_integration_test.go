@@ -445,7 +445,7 @@ func newServerFixture(t *testing.T) (*store.Store, *authorization.Service, autho
 		t.Fatal(err)
 	}
 	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
-	if _, err := apps.InstallPrivateSpace(ctx, member.ID, "app_server_test", space.ID); err != nil {
+	if _, err := apps.InstallSpace(ctx, member.ID, "app_server_test", space.ID); err != nil {
 		t.Fatal(err)
 	}
 	expiresAt := time.Now().Add(time.Hour)

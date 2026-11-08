@@ -29,7 +29,7 @@ func manifestChildInstallation(t *testing.T, st *store.Store, authz *authorizati
 		t.Fatal(err)
 	}
 	seedTestInlineGrant(t, st, child.ID, actor.ID, actor.ID, "auth.applications:manage")
-	installed, err := apps.InstallPrivateSpace(ctx, actor.ID, appID, child.ID)
+	installed, err := apps.InstallSpace(ctx, actor.ID, appID, child.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 	ctx := context.Background()
 	const checkPermission, introspectPermission = "auth.authz:check", "auth.tokens:introspect"
 	st, authz, apps, actorID, rootSpace, sessions, handler, appID := installationFixture(t, []string{checkPermission, introspectPermission})
-	rootInstallation, err := apps.InstallPrivateSpace(ctx, actorID, appID, rootSpace)
+	rootInstallation, err := apps.InstallSpace(ctx, actorID, appID, rootSpace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +153,7 @@ func TestManifestExpansionRequiresEachInstallationApprovalAndCoverage(t *testing
 	ctx := context.Background()
 	const checkPermission, introspectPermission = "auth.authz:check", "auth.tokens:introspect"
 	st, authz, apps, actorID, rootSpace, sessions, handler, appID := installationFixture(t, []string{checkPermission})
-	rootInstallation, err := apps.InstallPrivateSpace(ctx, actorID, appID, rootSpace)
+	rootInstallation, err := apps.InstallSpace(ctx, actorID, appID, rootSpace)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +218,7 @@ func TestManifestUpdateAndApprovalAuditFailuresRollBack(t *testing.T) {
 	ctx := context.Background()
 	const checkPermission, introspectPermission = "auth.authz:check", "auth.tokens:introspect"
 	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{checkPermission, introspectPermission})
-	installed, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID)
+	installed, err := apps.InstallSpace(ctx, actorID, appID, spaceID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestManifestShrinkSerializesConcurrentKeyCreation(t *testing.T) {
 func TestSpaceTreeManifestApprovalRequiresSubtreeAssignmentRight(t *testing.T) {
 	ctx := context.Background()
 	st, authz, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.InstallPrivate(ctx, actorID, appID, spaceID, "space_tree")
+	installed, err := apps.Install(ctx, actorID, appID, spaceID, "space_tree")
 	if err != nil {
 		t.Fatal(err)
 	}

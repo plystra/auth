@@ -1521,3 +1521,17 @@ ALTER TABLE api_keys
 -- authentication rejects any remaining row whose expiry is NULL.
 ALTER TABLE api_keys ADD CONSTRAINT api_keys_expiry_required
     CHECK (expires_at IS NOT NULL OR revoked_at IS NOT NULL) NOT VALID;
+
+
+-- The published manifest is the effective maximum. A public application starts
+-- with no effective permissions until an operator approves its pending request.
+ALTER TABLE applications
+    ADD COLUMN review_status text NOT NULL DEFAULT 'not_required'
+        CHECK (review_status IN ('not_required', 'pending', 'approved', 'rejected')),
+    ADD COLUMN pending_manifest_permissions jsonb
+        CHECK (pending_manifest_permissions IS NULL OR jsonb_typeof(pending_manifest_permissions) = 'array'),
+    ADD CONSTRAINT applications_review_visibility_check CHECK (
+        (visibility = 'private' AND review_status = 'not_required' AND pending_manifest_permissions IS NULL)
+        OR
+        (visibility = 'public' AND review_status <> 'not_required')
+    );

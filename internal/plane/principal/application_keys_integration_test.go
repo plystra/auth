@@ -19,7 +19,7 @@ import (
 func TestManagedAPIKeyCreateListRevokeThroughPrincipalHTTP(t *testing.T) {
 	ctx := context.Background()
 	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID); err != nil {
+	if _, err := apps.InstallSpace(ctx, actorID, appID, spaceID); err != nil {
 		t.Fatal(err)
 	}
 	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actorID, nil, "test", 1)
@@ -291,7 +291,7 @@ func TestAgentCanManageAPIKeysOnlyWithinOwnerEnvelope(t *testing.T) {
 func TestManagedAPIKeyRotationKeepsIndependentGraceWindowsAndRollsBackAuditFailure(t *testing.T) {
 	ctx := context.Background()
 	st, _, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	if _, err := apps.InstallPrivateSpace(ctx, actorID, appID, spaceID); err != nil {
+	if _, err := apps.InstallSpace(ctx, actorID, appID, spaceID); err != nil {
 		t.Fatal(err)
 	}
 	created, original, err := apps.CreateManagedKey(ctx, actorID, appID, application.CreateManagedKeyInput{

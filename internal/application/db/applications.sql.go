@@ -135,34 +135,43 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 }
 
 const createApplication = `-- name: CreateApplication :one
-INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)
-VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb), COALESCE($5, '[]'::jsonb), $6, $7, $8)
-RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions, visibility, status, created_at
+INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions)
+VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb),
+        COALESCE($5, '[]'::jsonb), $6, $7,
+        $8, $9, $10, $11)
+RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+          manifest_permissions, visibility, review_status, pending_manifest_permissions, status, created_at
 `
 
 type CreateApplicationParams struct {
-	ID                  string      `json:"id"`
-	SpaceID             string      `json:"space_id"`
-	Name                string      `json:"name"`
-	RedirectUris        interface{} `json:"redirect_uris"`
-	AllowedScopes       interface{} `json:"allowed_scopes"`
-	ClientID            string      `json:"client_id"`
-	ClientSecretHash    []byte      `json:"client_secret_hash"`
-	ManifestPermissions []byte      `json:"manifest_permissions"`
+	ID                         string      `json:"id"`
+	SpaceID                    string      `json:"space_id"`
+	Name                       string      `json:"name"`
+	RedirectUris               interface{} `json:"redirect_uris"`
+	AllowedScopes              interface{} `json:"allowed_scopes"`
+	ClientID                   string      `json:"client_id"`
+	ClientSecretHash           []byte      `json:"client_secret_hash"`
+	ManifestPermissions        []byte      `json:"manifest_permissions"`
+	Visibility                 string      `json:"visibility"`
+	ReviewStatus               string      `json:"review_status"`
+	PendingManifestPermissions []byte      `json:"pending_manifest_permissions"`
 }
 
 type CreateApplicationRow struct {
-	ID                  string             `json:"id"`
-	SpaceID             string             `json:"space_id"`
-	Name                string             `json:"name"`
-	RedirectUris        []byte             `json:"redirect_uris"`
-	AllowedScopes       []byte             `json:"allowed_scopes"`
-	ClientID            string             `json:"client_id"`
-	ClientSecretHash    []byte             `json:"client_secret_hash"`
-	ManifestPermissions []byte             `json:"manifest_permissions"`
-	Visibility          string             `json:"visibility"`
-	Status              string             `json:"status"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ID                         string             `json:"id"`
+	SpaceID                    string             `json:"space_id"`
+	Name                       string             `json:"name"`
+	RedirectUris               []byte             `json:"redirect_uris"`
+	AllowedScopes              []byte             `json:"allowed_scopes"`
+	ClientID                   string             `json:"client_id"`
+	ClientSecretHash           []byte             `json:"client_secret_hash"`
+	ManifestPermissions        []byte             `json:"manifest_permissions"`
+	Visibility                 string             `json:"visibility"`
+	ReviewStatus               string             `json:"review_status"`
+	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	Status                     string             `json:"status"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationParams) (CreateApplicationRow, error) {
@@ -175,6 +184,9 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		arg.ClientID,
 		arg.ClientSecretHash,
 		arg.ManifestPermissions,
+		arg.Visibility,
+		arg.ReviewStatus,
+		arg.PendingManifestPermissions,
 	)
 	var i CreateApplicationRow
 	err := row.Scan(
@@ -187,6 +199,8 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		&i.ClientSecretHash,
 		&i.ManifestPermissions,
 		&i.Visibility,
+		&i.ReviewStatus,
+		&i.PendingManifestPermissions,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -292,7 +306,8 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
 SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to, k.allowed_ip_cidrs,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
-       a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
+       a.space_id, a.name AS application_name, a.client_id, a.status AS application_status,
+       a.visibility AS application_visibility, a.review_status AS application_review_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
 WHERE k.prefix = $1 LIMIT 1
 `
@@ -302,24 +317,26 @@ type GetAPIKeyByPrefixParams struct {
 }
 
 type GetAPIKeyByPrefixRow struct {
-	ID                    string             `json:"id"`
-	ApplicationID         string             `json:"application_id"`
-	Name                  string             `json:"name"`
-	Prefix                string             `json:"prefix"`
-	SecretHash            []byte             `json:"secret_hash"`
-	HashScheme            string             `json:"hash_scheme"`
-	Scopes                []byte             `json:"scopes"`
-	RestrictTo            []byte             `json:"restrict_to"`
-	AllowedIpCidrs        []byte             `json:"allowed_ip_cidrs"`
-	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
-	LastUsedAt            pgtype.Timestamptz `json:"last_used_at"`
-	RevokedAt             pgtype.Timestamptz `json:"revoked_at"`
-	CreatedAt             pgtype.Timestamptz `json:"created_at"`
-	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
-	SpaceID               string             `json:"space_id"`
-	ApplicationName       string             `json:"application_name"`
-	ClientID              string             `json:"client_id"`
-	ApplicationStatus     string             `json:"application_status"`
+	ID                      string             `json:"id"`
+	ApplicationID           string             `json:"application_id"`
+	Name                    string             `json:"name"`
+	Prefix                  string             `json:"prefix"`
+	SecretHash              []byte             `json:"secret_hash"`
+	HashScheme              string             `json:"hash_scheme"`
+	Scopes                  []byte             `json:"scopes"`
+	RestrictTo              []byte             `json:"restrict_to"`
+	AllowedIpCidrs          []byte             `json:"allowed_ip_cidrs"`
+	ExpiresAt               pgtype.Timestamptz `json:"expires_at"`
+	LastUsedAt              pgtype.Timestamptz `json:"last_used_at"`
+	RevokedAt               pgtype.Timestamptz `json:"revoked_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	AllowSubjectAssertion   bool               `json:"allow_subject_assertion"`
+	SpaceID                 string             `json:"space_id"`
+	ApplicationName         string             `json:"application_name"`
+	ClientID                string             `json:"client_id"`
+	ApplicationStatus       string             `json:"application_status"`
+	ApplicationVisibility   string             `json:"application_visibility"`
+	ApplicationReviewStatus string             `json:"application_review_status"`
 }
 
 func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixParams) (GetAPIKeyByPrefixRow, error) {
@@ -344,6 +361,8 @@ func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, arg GetAPIKeyByPrefixPa
 		&i.ApplicationName,
 		&i.ClientID,
 		&i.ApplicationStatus,
+		&i.ApplicationVisibility,
+		&i.ApplicationReviewStatus,
 	)
 	return i, err
 }
@@ -411,7 +430,8 @@ func (q *Queries) GetActiveInstallationForKeyRestriction(ctx context.Context, ar
 }
 
 const getApplicationByClientID = `-- name: GetApplicationByClientID :one
-SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+       visibility, review_status, status, created_at
 FROM applications
 WHERE client_id = $1
 LIMIT 1
@@ -429,6 +449,9 @@ type GetApplicationByClientIDRow struct {
 	AllowedScopes    []byte             `json:"allowed_scopes"`
 	ClientID         string             `json:"client_id"`
 	ClientSecretHash []byte             `json:"client_secret_hash"`
+	Visibility       string             `json:"visibility"`
+	ReviewStatus     string             `json:"review_status"`
+	Status           string             `json:"status"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
 
@@ -443,13 +466,60 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.AllowedScopes,
 		&i.ClientID,
 		&i.ClientSecretHash,
+		&i.Visibility,
+		&i.ReviewStatus,
+		&i.Status,
 		&i.CreatedAt,
 	)
 	return i, err
 }
 
+const getApplicationForInstall = `-- name: GetApplicationForInstall :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id FROM spaces parent
+    JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
+FROM applications a
+WHERE a.id = $1 AND a.status = 'active'
+  AND ((a.visibility = 'private' AND a.space_id IN (SELECT id FROM ancestors))
+       OR (a.visibility = 'public' AND a.review_status = 'approved'
+           AND EXISTS (SELECT 1 FROM ancestors)))
+LIMIT 1
+FOR UPDATE OF a
+`
+
+type GetApplicationForInstallParams struct {
+	ApplicationID string `json:"application_id"`
+	TargetSpaceID string `json:"target_space_id"`
+}
+
+type GetApplicationForInstallRow struct {
+	ID                  string `json:"id"`
+	SpaceID             string `json:"space_id"`
+	Name                string `json:"name"`
+	ManifestPermissions []byte `json:"manifest_permissions"`
+	Status              string `json:"status"`
+}
+
+func (q *Queries) GetApplicationForInstall(ctx context.Context, arg GetApplicationForInstallParams) (GetApplicationForInstallRow, error) {
+	row := q.db.QueryRow(ctx, getApplicationForInstall, arg.ApplicationID, arg.TargetSpaceID)
+	var i GetApplicationForInstallRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.ManifestPermissions,
+		&i.Status,
+	)
+	return i, err
+}
+
 const getApplicationForKeyManagement = `-- name: GetApplicationForKeyManagement :one
-SELECT id, space_id, manifest_permissions, status
+SELECT id, space_id, manifest_permissions, status, visibility, review_status
 FROM applications WHERE id = $1
 `
 
@@ -462,6 +532,8 @@ type GetApplicationForKeyManagementRow struct {
 	SpaceID             string `json:"space_id"`
 	ManifestPermissions []byte `json:"manifest_permissions"`
 	Status              string `json:"status"`
+	Visibility          string `json:"visibility"`
+	ReviewStatus        string `json:"review_status"`
 }
 
 func (q *Queries) GetApplicationForKeyManagement(ctx context.Context, arg GetApplicationForKeyManagementParams) (GetApplicationForKeyManagementRow, error) {
@@ -472,6 +544,8 @@ func (q *Queries) GetApplicationForKeyManagement(ctx context.Context, arg GetApp
 		&i.SpaceID,
 		&i.ManifestPermissions,
 		&i.Status,
+		&i.Visibility,
+		&i.ReviewStatus,
 	)
 	return i, err
 }
@@ -510,48 +584,6 @@ func (q *Queries) GetInstallationTargetSpace(ctx context.Context, arg GetInstall
 	var space_id string
 	err := row.Scan(&space_id)
 	return space_id, err
-}
-
-const getPrivateApplicationForInstall = `-- name: GetPrivateApplicationForInstall :one
-WITH RECURSIVE ancestors AS (
-    SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
-    UNION ALL
-    SELECT parent.id, parent.parent_id FROM spaces parent
-    JOIN ancestors child ON child.parent_id = parent.id
-    WHERE parent.status = 'active'
-)
-SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
-FROM applications a
-JOIN ancestors ON ancestors.id = a.space_id
-WHERE a.id = $1 AND a.visibility = 'private' AND a.status = 'active'
-LIMIT 1
-FOR UPDATE OF a
-`
-
-type GetPrivateApplicationForInstallParams struct {
-	ApplicationID string `json:"application_id"`
-	TargetSpaceID string `json:"target_space_id"`
-}
-
-type GetPrivateApplicationForInstallRow struct {
-	ID                  string `json:"id"`
-	SpaceID             string `json:"space_id"`
-	Name                string `json:"name"`
-	ManifestPermissions []byte `json:"manifest_permissions"`
-	Status              string `json:"status"`
-}
-
-func (q *Queries) GetPrivateApplicationForInstall(ctx context.Context, arg GetPrivateApplicationForInstallParams) (GetPrivateApplicationForInstallRow, error) {
-	row := q.db.QueryRow(ctx, getPrivateApplicationForInstall, arg.ApplicationID, arg.TargetSpaceID)
-	var i GetPrivateApplicationForInstallRow
-	err := row.Scan(
-		&i.ID,
-		&i.SpaceID,
-		&i.Name,
-		&i.ManifestPermissions,
-		&i.Status,
-	)
-	return i, err
 }
 
 const hasOverlappingApplicationInstallation = `-- name: HasOverlappingApplicationInstallation :one
@@ -777,7 +809,8 @@ func (q *Queries) ListManagedAPIKeys(ctx context.Context, arg ListManagedAPIKeys
 }
 
 const listPublishedApplications = `-- name: ListPublishedApplications :many
-SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
+       review_status, pending_manifest_permissions, status, created_at
 FROM applications
 WHERE space_id = $1
 ORDER BY created_at, id
@@ -788,15 +821,17 @@ type ListPublishedApplicationsParams struct {
 }
 
 type ListPublishedApplicationsRow struct {
-	ID                  string             `json:"id"`
-	SpaceID             string             `json:"space_id"`
-	Name                string             `json:"name"`
-	ClientID            string             `json:"client_id"`
-	RedirectUris        []byte             `json:"redirect_uris"`
-	ManifestPermissions []byte             `json:"manifest_permissions"`
-	Visibility          string             `json:"visibility"`
-	Status              string             `json:"status"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ID                         string             `json:"id"`
+	SpaceID                    string             `json:"space_id"`
+	Name                       string             `json:"name"`
+	ClientID                   string             `json:"client_id"`
+	RedirectUris               []byte             `json:"redirect_uris"`
+	ManifestPermissions        []byte             `json:"manifest_permissions"`
+	Visibility                 string             `json:"visibility"`
+	ReviewStatus               string             `json:"review_status"`
+	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	Status                     string             `json:"status"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublishedApplicationsParams) ([]ListPublishedApplicationsRow, error) {
@@ -816,6 +851,8 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 			&i.RedirectUris,
 			&i.ManifestPermissions,
 			&i.Visibility,
+			&i.ReviewStatus,
+			&i.PendingManifestPermissions,
 			&i.Status,
 			&i.CreatedAt,
 		); err != nil {
@@ -830,7 +867,8 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 }
 
 const lockApplicationForUpdate = `-- name: LockApplicationForUpdate :one
-SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
+       review_status, pending_manifest_permissions, status, created_at
 FROM applications WHERE id = $1
 FOR UPDATE
 `
@@ -840,15 +878,17 @@ type LockApplicationForUpdateParams struct {
 }
 
 type LockApplicationForUpdateRow struct {
-	ID                  string             `json:"id"`
-	SpaceID             string             `json:"space_id"`
-	Name                string             `json:"name"`
-	ClientID            string             `json:"client_id"`
-	RedirectUris        []byte             `json:"redirect_uris"`
-	ManifestPermissions []byte             `json:"manifest_permissions"`
-	Visibility          string             `json:"visibility"`
-	Status              string             `json:"status"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ID                         string             `json:"id"`
+	SpaceID                    string             `json:"space_id"`
+	Name                       string             `json:"name"`
+	ClientID                   string             `json:"client_id"`
+	RedirectUris               []byte             `json:"redirect_uris"`
+	ManifestPermissions        []byte             `json:"manifest_permissions"`
+	Visibility                 string             `json:"visibility"`
+	ReviewStatus               string             `json:"review_status"`
+	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	Status                     string             `json:"status"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicationForUpdateParams) (LockApplicationForUpdateRow, error) {
@@ -862,6 +902,8 @@ func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicat
 		&i.RedirectUris,
 		&i.ManifestPermissions,
 		&i.Visibility,
+		&i.ReviewStatus,
+		&i.PendingManifestPermissions,
 		&i.Status,
 		&i.CreatedAt,
 	)

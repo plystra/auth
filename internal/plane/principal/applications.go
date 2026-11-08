@@ -23,6 +23,7 @@ type registerApplicationInput struct {
 		Name                string   `json:"name" minLength:"1" maxLength:"120"`
 		RedirectURIs        []string `json:"redirect_uris,omitempty" maxItems:"20"`
 		ManifestPermissions []string `json:"manifest_permissions" minItems:"1" maxItems:"100"`
+		Visibility          string   `json:"visibility,omitempty" enum:"private,public"`
 	}
 }
 
@@ -234,7 +235,7 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	if err != nil {
 		return nil, err
 	}
-	installed, err := a.Applications.InstallPrivate(ctx, actor.ID, in.Body.ApplicationID, in.ID, scope)
+	installed, err := a.Applications.Install(ctx, actor.ID, in.Body.ApplicationID, in.ID, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -333,16 +334,20 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	if err != nil {
 		return nil, err
 	}
-	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.register", map[string]any{
+	stepUpRequest := map[string]any{
 		"space_id": in.ID, "name": in.Body.Name,
 		"redirect_uris": in.Body.RedirectURIs, "manifest_permissions": in.Body.ManifestPermissions,
-	})
+	}
+	if in.Body.Visibility != "" {
+		stepUpRequest["visibility"] = in.Body.Visibility
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.register", stepUpRequest)
 	if err != nil {
 		return nil, err
 	}
-	registered, err := a.Applications.RegisterPrivate(ctx, actor.ID, application.RegisterInput{
+	registered, err := a.Applications.Register(ctx, actor.ID, application.RegisterInput{
 		SpaceID: in.ID, Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs,
-		ManifestPermissions: in.Body.ManifestPermissions,
+		ManifestPermissions: in.Body.ManifestPermissions, Visibility: in.Body.Visibility,
 	})
 	if err != nil {
 		return nil, err

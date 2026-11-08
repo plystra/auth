@@ -49,13 +49,14 @@ type Session struct {
 // Capability names are intentionally explicit. Unknown names are rejected so a
 // typo cannot silently create an operator permission that no route enforces.
 var knownCapabilities = map[string]struct{}{
-	"ops:session":            {},
-	"ops:settings:read":      {},
-	"ops:settings:write":     {},
-	"ops:operators:read":     {},
-	"ops:operators:manage":   {},
-	"ops:permissions:manage": {},
-	"ops:users:manage":       {},
+	"ops:session":             {},
+	"ops:settings:read":       {},
+	"ops:settings:write":      {},
+	"ops:operators:read":      {},
+	"ops:operators:manage":    {},
+	"ops:permissions:manage":  {},
+	"ops:applications:manage": {},
+	"ops:users:manage":        {},
 }
 
 type Operator struct {

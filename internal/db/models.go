@@ -104,17 +104,19 @@ type ApiKeyGraceSecret struct {
 }
 
 type Application struct {
-	ID                  string             `json:"id"`
-	SpaceID             string             `json:"space_id"`
-	Name                string             `json:"name"`
-	RedirectUris        []byte             `json:"redirect_uris"`
-	AllowedScopes       []byte             `json:"allowed_scopes"`
-	ClientID            string             `json:"client_id"`
-	ClientSecretHash    []byte             `json:"client_secret_hash"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
-	ManifestPermissions []byte             `json:"manifest_permissions"`
-	Visibility          string             `json:"visibility"`
-	Status              string             `json:"status"`
+	ID                         string             `json:"id"`
+	SpaceID                    string             `json:"space_id"`
+	Name                       string             `json:"name"`
+	RedirectUris               []byte             `json:"redirect_uris"`
+	AllowedScopes              []byte             `json:"allowed_scopes"`
+	ClientID                   string             `json:"client_id"`
+	ClientSecretHash           []byte             `json:"client_secret_hash"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	ManifestPermissions        []byte             `json:"manifest_permissions"`
+	Visibility                 string             `json:"visibility"`
+	Status                     string             `json:"status"`
+	ReviewStatus               string             `json:"review_status"`
+	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 }
 
 type ApplicationInstallation struct {

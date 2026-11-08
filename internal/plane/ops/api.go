@@ -45,7 +45,7 @@ type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
 		Code      secret.String   `json:"mfa_code" minLength:"6" maxLength:"6"`
-		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.permissions.create,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
+		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.permissions.create,ops.applications.approve,ops.applications.reject,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
 }
@@ -77,6 +77,23 @@ type PermissionOutput struct {
 type PermissionsOutput struct {
 	Body struct {
 		Data []operator.Permission `json:"data"`
+	}
+}
+type PublicApplicationsOutput struct {
+	Body struct {
+		Data []operator.PublicApplicationReview `json:"data"`
+	}
+}
+type PublicApplicationOutput struct {
+	Body struct {
+		Data operator.PublicApplicationReview `json:"data"`
+	}
+}
+type PublicApplicationApprovalInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+	Body          struct {
+		ManifestPermissions []string `json:"manifest_permissions" minItems:"1" maxItems:"100"`
 	}
 }
 type OperatorsInput struct {
@@ -128,6 +145,9 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("ops.settings.update", "PATCH", "/ops/v1/settings", route.Ops, "ops:settings:write", []route.Subject{route.Human}, route.WithStepUp()), a.update)
 	route.Register(api, route.NewSpec("ops.permissions.list", "GET", "/ops/v1/permissions", route.Ops, "ops:permissions:manage", []route.Subject{route.Human}), a.listPermissions)
 	route.Register(api, route.NewSpec("ops.permissions.create", "POST", "/ops/v1/permissions", route.Ops, "ops:permissions:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createPermission)
+	route.Register(api, route.NewSpec("ops.applications.list", "GET", "/ops/v1/applications", route.Ops, "ops:applications:manage", []route.Subject{route.Human}), a.listPublicApplications)
+	route.Register(api, route.NewSpec("ops.applications.approve", "POST", "/ops/v1/applications/{id}/approve", route.Ops, "ops:applications:manage", []route.Subject{route.Human}, route.WithStepUp()), a.approvePublicApplication)
+	route.Register(api, route.NewSpec("ops.applications.reject", "POST", "/ops/v1/applications/{id}/reject", route.Ops, "ops:applications:manage", []route.Subject{route.Human}, route.WithStepUp()), a.rejectPublicApplication)
 	route.Register(api, route.NewSpec("ops.operators.list", "GET", "/ops/v1/operators", route.Ops, "ops:operators:read", []route.Subject{route.Human}), a.listOperators)
 	route.Register(api, route.NewSpec("ops.operators.create", "POST", "/ops/v1/operators", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createOperator)
 	route.Register(api, route.NewSpec("ops.operators.update", "PATCH", "/ops/v1/operators/{id}", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.updateOperator)
@@ -165,6 +185,50 @@ func (a *API) createPermission(ctx context.Context, in *PermissionCreateInput) (
 	out := &PermissionOutput{}
 	out.Body.Data = created
 	return out, nil
+}
+func (a *API) listPublicApplications(ctx context.Context, in *AuthInput) (*PublicApplicationsOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	items, err := a.Operators.ListPublicApplications(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	out := &PublicApplicationsOutput{}
+	out.Body.Data = items
+	return out, nil
+}
+func (a *API) approvePublicApplication(ctx context.Context, in *PublicApplicationApprovalInput) (*PublicApplicationOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(map[string]any{"application_id": in.ID, "manifest_permissions": in.Body.ManifestPermissions})
+	if err != nil {
+		return nil, err
+	}
+	item, err := a.Operators.ApprovePublicApplication(ctx, token, in.ID, in.Body.ManifestPermissions, digest)
+	if err != nil {
+		return nil, err
+	}
+	out := &PublicApplicationOutput{}
+	out.Body.Data = item
+	return out, nil
+}
+func (a *API) rejectPublicApplication(ctx context.Context, in *UserActionInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(map[string]any{"application_id": in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Operators.RejectPublicApplication(ctx, token, in.ID, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)

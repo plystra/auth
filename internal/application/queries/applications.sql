@@ -1,7 +1,8 @@
 -- name: GetAPIKeyByPrefix :one
 SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to, k.allowed_ip_cidrs,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
-       a.space_id, a.name AS application_name, a.client_id, a.status AS application_status
+       a.space_id, a.name AS application_name, a.client_id, a.status AS application_status,
+       a.visibility AS application_visibility, a.review_status AS application_review_status
 FROM api_keys k JOIN applications a ON a.id = k.application_id
 WHERE k.prefix = sqlc.arg(prefix) LIMIT 1;
 
@@ -29,18 +30,24 @@ WHERE id = sqlc.arg(id) AND secret_hash = sqlc.arg(previous_hash)
   AND hash_scheme = sqlc.arg(previous_scheme);
 
 -- name: CreateApplication :one
-INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions)
-VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb), COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash), sqlc.arg(manifest_permissions))
-RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, manifest_permissions, visibility, status, created_at;
+INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb),
+        COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash),
+        sqlc.arg(manifest_permissions), sqlc.arg(visibility), sqlc.arg(review_status), sqlc.narg(pending_manifest_permissions))
+RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+          manifest_permissions, visibility, review_status, pending_manifest_permissions, status, created_at;
 
 -- name: ListPublishedApplications :many
-SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
+       review_status, pending_manifest_permissions, status, created_at
 FROM applications
 WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
 -- name: LockApplicationForUpdate :one
-SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
+       review_status, pending_manifest_permissions, status, created_at
 FROM applications WHERE id = sqlc.arg(application_id)
 FOR UPDATE;
 
@@ -97,7 +104,7 @@ UPDATE application_installations
 SET approved_permissions = sqlc.arg(approved_permissions)
 WHERE id = sqlc.arg(installation_id) AND status <> 'uninstalled';
 
--- name: GetPrivateApplicationForInstall :one
+-- name: GetApplicationForInstall :one
 WITH RECURSIVE ancestors AS (
     SELECT spaces.id, spaces.parent_id FROM spaces WHERE spaces.id = sqlc.arg(target_space_id) AND spaces.status = 'active'
     UNION ALL
@@ -107,8 +114,10 @@ WITH RECURSIVE ancestors AS (
 )
 SELECT a.id, a.space_id, a.name, a.manifest_permissions, a.status
 FROM applications a
-JOIN ancestors ON ancestors.id = a.space_id
-WHERE a.id = sqlc.arg(application_id) AND a.visibility = 'private' AND a.status = 'active'
+WHERE a.id = sqlc.arg(application_id) AND a.status = 'active'
+  AND ((a.visibility = 'private' AND a.space_id IN (SELECT id FROM ancestors))
+       OR (a.visibility = 'public' AND a.review_status = 'approved'
+           AND EXISTS (SELECT 1 FROM ancestors)))
 LIMIT 1
 FOR UPDATE OF a;
 
@@ -210,7 +219,8 @@ WITH RECURSIVE ancestors AS (
 SELECT id FROM ancestors;
 
 -- name: GetApplicationByClientID :one
-SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash, created_at
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+       visibility, review_status, status, created_at
 FROM applications
 WHERE client_id = sqlc.arg(client_id)
 LIMIT 1;
@@ -245,7 +255,7 @@ VALUES (sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(name), sqlc.arg(prefix)
 RETURNING id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion;
 
 -- name: GetApplicationForKeyManagement :one
-SELECT id, space_id, manifest_permissions, status
+SELECT id, space_id, manifest_permissions, status, visibility, review_status
 FROM applications WHERE id = sqlc.arg(application_id);
 
 -- name: ListManagedAPIKeys :many
