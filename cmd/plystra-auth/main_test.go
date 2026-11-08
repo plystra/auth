@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,7 +19,94 @@ import (
 	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/store"
+	"github.com/plystra/auth/internal/testdb"
 )
+
+func TestOperatorBootstrapRequiresExclusiveIdentityFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"bootstrap"},
+		{"bootstrap", "--email", "first@example.test"},
+		{"bootstrap", "--user-id", "usr_existing", "--password-stdin"},
+		{"bootstrap", "--user-id", "usr_existing", "--email", "first@example.test", "--password-stdin"},
+	} {
+		cmd := operatorCommand()
+		cmd.SetArgs(args)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
+		if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "provide either --user-id or --email with --password-stdin") {
+			t.Fatalf("flags %v returned %v", args, err)
+		}
+	}
+}
+
+func TestReadBootstrapPasswordAcceptsOneLineWithoutChangingItsContent(t *testing.T) {
+	for _, input := range []string{"a password with spaces\n", "a password with spaces\r\n", "a password with spaces"} {
+		password, err := readBootstrapPassword(strings.NewReader(input))
+		if err != nil || password != "a password with spaces" {
+			t.Fatalf("password input was not read as one line: %v", err)
+		}
+	}
+	for _, input := range []string{"", "first\nsecond\n", strings.Repeat("x", security.MaxPasswordBytes+1)} {
+		if _, err := readBootstrapPassword(strings.NewReader(input)); err == nil {
+			t.Fatal("invalid password input was accepted")
+		}
+	}
+}
+
+func TestOperatorBootstrapCLIEnrollsFirstOperatorFromMigratedDatabase(t *testing.T) {
+	ctx := context.Background()
+	harness, err := testdb.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = harness.Close(context.Background()) })
+	database, err := harness.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	t.Setenv("PLYSTRA_AUTH_DATABASE_URL", database.AppURL)
+	t.Setenv("PLYSTRA_AUTH_MIGRATION_DATABASE_URL", database.OwnerURL)
+	t.Setenv("PLYSTRA_AUTH_ISSUER", "https://auth.example.test")
+	t.Setenv("PLYSTRA_AUTH_SESSION_HMAC_KEYS", strings.Repeat("h", 32))
+	t.Setenv("PLYSTRA_AUTH_DATA_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("d", 32))))
+	t.Setenv("PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", 32))))
+	initialize := initCommand()
+	var initOutput bytes.Buffer
+	initialize.SetOut(&initOutput)
+	initialize.SetErr(io.Discard)
+	if err := initialize.ExecuteContext(ctx); err != nil {
+		t.Fatalf("deployment init: %v", err)
+	}
+	if !strings.Contains(initOutput.String(), "default application:") {
+		t.Fatal("deployment init did not report the default application")
+	}
+	bootstrap := operatorCommand()
+	bootstrap.SetArgs([]string{"bootstrap", "--email", " First.Operator@Example.Test ", "--password-stdin"})
+	bootstrap.SetIn(strings.NewReader("a-long-bootstrap-password\n"))
+	var output bytes.Buffer
+	bootstrap.SetOut(&output)
+	bootstrap.SetErr(io.Discard)
+	if err := bootstrap.ExecuteContext(ctx); err != nil {
+		t.Fatalf("operator bootstrap CLI: %v", err)
+	}
+	if !strings.Contains(output.String(), "operator created: usr_") || !strings.Contains(output.String(), "operator TOTP secret (shown once):") || !strings.Contains(output.String(), "bootstrap API key (shown once): ply_sk_") || strings.Contains(output.String(), "a-long-bootstrap-password") {
+		t.Fatal("operator bootstrap CLI output omitted credentials or exposed the password")
+	}
+	st, err := store.Open(ctx, database.AppURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	var operators int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM operators o JOIN users u ON u.id = o.user_id WHERE u.email_normalized = 'first.operator@example.test'`).Scan(&operators); err != nil {
+		t.Fatal(err)
+	}
+	if operators != 1 {
+		t.Fatalf("operator bootstrap created %d operators, want one", operators)
+	}
+}
 
 func TestJWKSWellKnownEndpointPublishesSigningKey(t *testing.T) {
 	signer, err := security.GenerateSigner("https://auth.test")

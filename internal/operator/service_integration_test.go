@@ -170,6 +170,110 @@ func TestOperatorBootstrapOnlyRunsWithoutExistingOperators(t *testing.T) {
 	}
 }
 
+func TestOperatorBootstrapNewUserFromClosedRegistration(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{[]byte(strings.Repeat("h", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := svc.BootstrapNewUser(ctx, " First.Operator@Example.Test ", "a-long-bootstrap-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(result.UserID, "usr_") || !strings.HasPrefix(result.APIKey, "ply_sk_") || result.TOTPSecret == "" {
+		t.Fatal("bootstrap did not return the first operator credentials")
+	}
+	var email, hash, status, registration string
+	var verified bool
+	var bindings, operators, factors, audits int
+	if err := st.Pool.QueryRow(ctx, `SELECT email_normalized, password_hash, status, email_verified_at IS NOT NULL FROM users WHERE id = $1`, result.UserID).Scan(&email, &hash, &status, &verified); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT registration_mode FROM instance_settings WHERE id = true`).Scan(&registration); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM user_members WHERE user_id = $1`, result.UserID).Scan(&bindings); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM operators WHERE user_id = $1 AND active`, result.UserID).Scan(&operators); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM factors WHERE user_id = $1 AND kind = 'totp'`, result.UserID).Scan(&factors); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'ops.operator.bootstrap' AND resource_id = $1`, result.UserID).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if email != "first.operator@example.test" || status != "active" || verified || registration != "closed" || bindings != 0 || operators != 1 || factors != 1 || audits != 1 || !security.DefaultPasswordHasher().Verify("a-long-bootstrap-password", hash) {
+		t.Fatal("bootstrap account, operator, factor, audit, or registration policy is invalid")
+	}
+	code, err := totp.GenerateCode(result.TOTPSecret, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.SignIn(ctx, email, "a-long-bootstrap-password", code, nil, "bootstrap test"); err != nil {
+		t.Fatalf("new operator cannot sign in: %v", err)
+	}
+	if _, err := svc.BootstrapNewUser(ctx, "another@example.test", "another-long-password"); err == nil {
+		t.Fatal("second operator bootstrap succeeded")
+	} else {
+		assertOperatorError(t, err, "CONFLICT")
+	}
+}
+
+func TestOperatorBootstrapNewUserValidatesInputAndRollsBackAuditFailure(t *testing.T) {
+	ctx := context.Background()
+	st := newOperatorStore(t)
+	svc, err := New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{[]byte(strings.Repeat("h", 32))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BootstrapNewUser(ctx, "invalid-email", "a-long-bootstrap-password"); err == nil {
+		t.Fatal("invalid email was accepted")
+	} else {
+		assertOperatorError(t, err, "VALIDATION_FAILED")
+	}
+	if _, err := svc.BootstrapNewUser(ctx, "bootstrap@example.test", "short"); err == nil {
+		t.Fatal("password below deployment minimum was accepted")
+	} else {
+		assertOperatorError(t, err, "VALIDATION_FAILED")
+	}
+	if err := insertAccountUserForOperator(ctx, st, "usr_existing_bootstrap", "existing@example.test", "active"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BootstrapNewUser(ctx, "EXISTING@example.test", "a-long-bootstrap-password"); err == nil {
+		t.Fatal("duplicate operator bootstrap email was accepted")
+	} else {
+		assertOperatorError(t, err, "CONFLICT")
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_bootstrap_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action = 'ops.operator.bootstrap' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END;
+		$$;
+		CREATE TRIGGER reject_bootstrap_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_bootstrap_audit();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.BootstrapNewUser(ctx, "bootstrap@example.test", "a-long-bootstrap-password"); err == nil {
+		t.Fatal("bootstrap succeeded without an audit record")
+	}
+	var users, operators, keys int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE email_normalized = 'bootstrap@example.test'`).Scan(&users); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM operators`).Scan(&operators); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM api_keys WHERE name = 'bootstrap'`).Scan(&keys); err != nil {
+		t.Fatal(err)
+	}
+	if users != 0 || operators != 0 || keys != 0 {
+		t.Fatalf("failed bootstrap left users=%d operators=%d keys=%d", users, operators, keys)
+	}
+}
+
 func TestOperatorAndMemberIdentitiesAreMutuallyExclusive(t *testing.T) {
 	ctx := context.Background()
 	st := newOperatorStore(t)

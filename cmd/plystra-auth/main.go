@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -85,7 +86,7 @@ func initCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		fmt.Printf("default space: %s\ndefault application: %s\nbootstrap API key (shown once): %s\n", result.SpaceID, result.ApplicationID, result.APIKey)
+		fmt.Fprintf(cmd.OutOrStdout(), "default space: %s\ndefault application: %s\nbootstrap API key (shown once): %s\n", result.SpaceID, result.ApplicationID, result.APIKey)
 		return nil
 	}}
 }
@@ -116,12 +117,22 @@ func verifyCommand() *cobra.Command {
 	}}
 }
 func operatorCommand() *cobra.Command {
-	var userID string
+	var userID, email string
+	var passwordStdin bool
 	cmd := &cobra.Command{Use: "operator", Short: "manage deployment operators"}
 	bootstrap := &cobra.Command{Use: "bootstrap", Short: "create the first operator through the local CLI", RunE: func(cmd *cobra.Command, args []string) error {
 		userID = strings.TrimSpace(userID)
-		if userID == "" {
-			return errors.New("--user-id is required")
+		email = strings.TrimSpace(email)
+		if (userID == "") == (email == "") || (userID != "" && passwordStdin) || (email != "" && !passwordStdin) {
+			return errors.New("provide either --user-id or --email with --password-stdin")
+		}
+		var password string
+		if passwordStdin {
+			var err error
+			password, err = readBootstrapPassword(cmd.InOrStdin())
+			if err != nil {
+				return err
+			}
 		}
 		c, e := loadConfig()
 		if e != nil {
@@ -141,16 +152,38 @@ func operatorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		result, err := opsSvc.Bootstrap(cmd.Context(), userID)
+		var result operator.BootstrapResult
+		if userID != "" {
+			result, err = opsSvc.Bootstrap(cmd.Context(), userID)
+		} else {
+			result, err = opsSvc.BootstrapNewUser(cmd.Context(), email, password)
+		}
 		if err != nil {
 			return err
 		}
-		fmt.Printf("operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", result.UserID, result.TOTPSecret, result.APIKey)
+		fmt.Fprintf(cmd.OutOrStdout(), "operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", result.UserID, result.TOTPSecret, result.APIKey)
 		return nil
 	}}
 	bootstrap.Flags().StringVar(&userID, "user-id", "", "existing user ID to promote to the first operator")
+	bootstrap.Flags().StringVar(&email, "email", "", "email for a new first operator account")
+	bootstrap.Flags().BoolVar(&passwordStdin, "password-stdin", false, "read the new operator password from standard input")
 	cmd.AddCommand(bootstrap)
 	return cmd
+}
+func readBootstrapPassword(r io.Reader) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, security.MaxPasswordBytes+3))
+	if err != nil {
+		return "", fmt.Errorf("read operator password from standard input: %w", err)
+	}
+	password := string(raw)
+	if strings.HasSuffix(password, "\n") {
+		password = strings.TrimSuffix(password, "\n")
+		password = strings.TrimSuffix(password, "\r")
+	}
+	if len(password) == 0 || len(password) > security.MaxPasswordBytes || strings.ContainsAny(password, "\r\n") {
+		return "", errors.New("standard input must contain exactly one password line of at most 1024 bytes")
+	}
+	return password, nil
 }
 func permissionsCommand() *cobra.Command {
 	return &cobra.Command{Use: "permissions", Short: "permission catalog operations"}

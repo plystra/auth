@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/apierr"
@@ -113,6 +115,37 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 	if userID == "" {
 		return BootstrapResult{}, apierr.New("VALIDATION_FAILED", "user_id is required")
 	}
+	return s.bootstrap(ctx, userID, nil)
+}
+
+type bootstrapUser struct {
+	email        string
+	passwordHash string
+	passwordLen  int
+}
+
+// BootstrapNewUser creates the first operator account on the deployment host.
+// The account is not enrolled in a Space and its email is not marked verified.
+func (s *Service) BootstrapNewUser(ctx context.Context, email, password string) (BootstrapResult, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	parsed, err := mail.ParseAddress(email)
+	if err != nil || parsed.Address != email || len(email) > 254 {
+		return BootstrapResult{}, apierr.New("VALIDATION_FAILED", "a valid email is required")
+	}
+	if len(password) > security.MaxPasswordBytes {
+		return BootstrapResult{}, apierr.New("VALIDATION_FAILED", "password exceeds the maximum length")
+	}
+	if password == "" {
+		return BootstrapResult{}, apierr.New("VALIDATION_FAILED", "password is required")
+	}
+	hash, err := s.Passwords.Hash(password)
+	if err != nil {
+		return BootstrapResult{}, err
+	}
+	return s.bootstrap(ctx, "", &bootstrapUser{email: email, passwordHash: hash, passwordLen: len(password)})
+}
+
+func (s *Service) bootstrap(ctx context.Context, existingUserID string, newUser *bootstrapUser) (BootstrapResult, error) {
 	var result BootstrapResult
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := q.LockOperatorBootstrap(ctx); err != nil {
@@ -125,22 +158,46 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 		if count != 0 {
 			return apierr.New("CONFLICT", "an operator already exists; use the operations plane")
 		}
-		user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "bootstrap user was not found")
-		}
-		if err != nil {
-			return err
-		}
-		if user.DisabledAt.Valid || user.Status != "active" {
-			return apierr.New("CONFLICT", "bootstrap user is not active")
-		}
-		memberBindings, err := q.CountActiveMemberBindingsForUser(ctx, db.CountActiveMemberBindingsForUserParams{UserID: user.ID})
-		if err != nil {
-			return err
-		}
-		if memberBindings != 0 {
-			return apierr.New("CONFLICT", "a member identity cannot become an operator")
+		var userID, userEmail string
+		if newUser != nil {
+			settings, err := q.LockInstanceSettings(ctx)
+			if err != nil {
+				return err
+			}
+			if newUser.passwordLen < int(settings.PasswordMinLength) {
+				return apierr.New("VALIDATION_FAILED", "password does not meet the configured minimum length")
+			}
+			user, err := q.CreateUser(ctx, db.CreateUserParams{
+				ID: string(ids.New[ids.UserID]("usr")), Email: newUser.email,
+				EmailNormalized: newUser.email, PasswordHash: newUser.passwordHash, Status: "active",
+			})
+			var dbErr *pgconn.PgError
+			if errors.As(err, &dbErr) && dbErr.Code == "23505" {
+				return apierr.New("CONFLICT", "an account with this email already exists")
+			}
+			if err != nil {
+				return err
+			}
+			userID, userEmail = user.ID, user.Email
+		} else {
+			user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: existingUserID})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("NOT_FOUND", "bootstrap user was not found")
+			}
+			if err != nil {
+				return err
+			}
+			if user.DisabledAt.Valid || user.Status != "active" {
+				return apierr.New("CONFLICT", "bootstrap user is not active")
+			}
+			memberBindings, err := q.CountActiveMemberBindingsForUser(ctx, db.CountActiveMemberBindingsForUserParams{UserID: user.ID})
+			if err != nil {
+				return err
+			}
+			if memberBindings != 0 {
+				return apierr.New("CONFLICT", "a member identity cannot become an operator")
+			}
+			userID, userEmail = user.ID, user.Email
 		}
 		caps, err := json.Marshal([]string{"*"})
 		if err != nil {
@@ -157,15 +214,15 @@ func (s *Service) Bootstrap(ctx context.Context, userID string) (BootstrapResult
 		}); err != nil {
 			return err
 		}
-		if err := q.CreateOperator(ctx, db.CreateOperatorParams{UserID: user.ID, Capabilities: caps}); err != nil {
+		if err := q.CreateOperator(ctx, db.CreateOperatorParams{UserID: userID, Capabilities: caps}); err != nil {
 			return err
 		}
-		enrollment, err := s.Factors.BeginTOTPTx(ctx, q, user.ID, user.Email)
+		enrollment, err := s.Factors.BeginTOTPTx(ctx, q, userID, userEmail)
 		if err != nil {
 			return err
 		}
-		result = BootstrapResult{UserID: user.ID, TOTPSecret: enrollment.Secret.Value(), APIKey: rawKey}
-		return audit.Write(ctx, q, "operator", user.ID, "ops.operator.bootstrap", user.ID, "success")
+		result = BootstrapResult{UserID: userID, TOTPSecret: enrollment.Secret.Value(), APIKey: rawKey}
+		return audit.Write(ctx, q, "operator", userID, "ops.operator.bootstrap", userID, "success")
 	})
 	return result, err
 }
