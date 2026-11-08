@@ -341,6 +341,22 @@ type MemberRole struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type OauthAuthorizationRequest struct {
+	ID            string             `json:"id"`
+	RequestHash   []byte             `json:"request_hash"`
+	ApplicationID string             `json:"application_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	CodeChallenge string             `json:"code_challenge"`
+	Scope         string             `json:"scope"`
+	State         string             `json:"state"`
+	Nonce         string             `json:"nonce"`
+	Resource      string             `json:"resource"`
+	Status        string             `json:"status"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt    pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
 type Operator struct {
 	UserID       string             `json:"user_id"`
 	Capabilities []byte             `json:"capabilities"`

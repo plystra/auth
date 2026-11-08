@@ -303,6 +303,65 @@ func (q *Queries) CreateAuthorizationCode(ctx context.Context, arg CreateAuthori
 	return err
 }
 
+const createOAuthAuthorizationRequest = `-- name: CreateOAuthAuthorizationRequest :exec
+INSERT INTO oauth_authorization_requests (
+    id, request_hash, application_id, redirect_uri, code_challenge,
+    scope, state, nonce, resource, expires_at
+) VALUES (
+    $1, $2, $3,
+    $4, $5, $6,
+    $7, $8, $9, $10
+)
+`
+
+type CreateOAuthAuthorizationRequestParams struct {
+	ID            string             `json:"id"`
+	RequestHash   []byte             `json:"request_hash"`
+	ApplicationID string             `json:"application_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	CodeChallenge string             `json:"code_challenge"`
+	Scope         string             `json:"scope"`
+	State         string             `json:"state"`
+	Nonce         string             `json:"nonce"`
+	Resource      string             `json:"resource"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) CreateOAuthAuthorizationRequest(ctx context.Context, arg CreateOAuthAuthorizationRequestParams) error {
+	_, err := q.db.Exec(ctx, createOAuthAuthorizationRequest,
+		arg.ID,
+		arg.RequestHash,
+		arg.ApplicationID,
+		arg.RedirectUri,
+		arg.CodeChallenge,
+		arg.Scope,
+		arg.State,
+		arg.Nonce,
+		arg.Resource,
+		arg.ExpiresAt,
+	)
+	return err
+}
+
+const finishOAuthAuthorizationRequest = `-- name: FinishOAuthAuthorizationRequest :execrows
+UPDATE oauth_authorization_requests
+SET status = $1, consumed_at = now()
+WHERE id = $2 AND status = 'pending' AND expires_at > now()
+`
+
+type FinishOAuthAuthorizationRequestParams struct {
+	Status string `json:"status"`
+	ID     string `json:"id"`
+}
+
+func (q *Queries) FinishOAuthAuthorizationRequest(ctx context.Context, arg FinishOAuthAuthorizationRequestParams) (int64, error) {
+	result, err := q.db.Exec(ctx, finishOAuthAuthorizationRequest, arg.Status, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
 SELECT k.id, k.application_id, k.name, k.prefix, k.secret_hash, k.hash_scheme, k.scopes, k.restrict_to, k.allowed_ip_cidrs,
        k.expires_at, k.last_used_at, k.revoked_at, k.created_at, k.allow_subject_assertion,
@@ -1043,6 +1102,47 @@ func (q *Queries) LockManagedAPIKeyForRotation(ctx context.Context, arg LockMana
 		&i.RevokedAt,
 		&i.CreatedAt,
 		&i.AllowSubjectAssertion,
+	)
+	return i, err
+}
+
+const lockOAuthAuthorizationRequest = `-- name: LockOAuthAuthorizationRequest :one
+SELECT id, application_id, redirect_uri, code_challenge, scope, state, nonce, resource, expires_at
+FROM oauth_authorization_requests
+WHERE request_hash = $1
+  AND status = 'pending' AND expires_at > now()
+FOR UPDATE
+`
+
+type LockOAuthAuthorizationRequestParams struct {
+	RequestHash []byte `json:"request_hash"`
+}
+
+type LockOAuthAuthorizationRequestRow struct {
+	ID            string             `json:"id"`
+	ApplicationID string             `json:"application_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	CodeChallenge string             `json:"code_challenge"`
+	Scope         string             `json:"scope"`
+	State         string             `json:"state"`
+	Nonce         string             `json:"nonce"`
+	Resource      string             `json:"resource"`
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) LockOAuthAuthorizationRequest(ctx context.Context, arg LockOAuthAuthorizationRequestParams) (LockOAuthAuthorizationRequestRow, error) {
+	row := q.db.QueryRow(ctx, lockOAuthAuthorizationRequest, arg.RequestHash)
+	var i LockOAuthAuthorizationRequestRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.RedirectUri,
+		&i.CodeChallenge,
+		&i.Scope,
+		&i.State,
+		&i.Nonce,
+		&i.Resource,
+		&i.ExpiresAt,
 	)
 	return i, err
 }

@@ -238,6 +238,28 @@ VALUES (
     sqlc.narg(resource), sqlc.arg(expires_at)
 );
 
+-- name: CreateOAuthAuthorizationRequest :exec
+INSERT INTO oauth_authorization_requests (
+    id, request_hash, application_id, redirect_uri, code_challenge,
+    scope, state, nonce, resource, expires_at
+) VALUES (
+    sqlc.arg(id), sqlc.arg(request_hash), sqlc.arg(application_id),
+    sqlc.arg(redirect_uri), sqlc.arg(code_challenge), sqlc.arg(scope),
+    sqlc.arg(state), sqlc.arg(nonce), sqlc.arg(resource), sqlc.arg(expires_at)
+);
+
+-- name: LockOAuthAuthorizationRequest :one
+SELECT id, application_id, redirect_uri, code_challenge, scope, state, nonce, resource, expires_at
+FROM oauth_authorization_requests
+WHERE request_hash = sqlc.arg(request_hash)
+  AND status = 'pending' AND expires_at > now()
+FOR UPDATE;
+
+-- name: FinishOAuthAuthorizationRequest :execrows
+UPDATE oauth_authorization_requests
+SET status = sqlc.arg(status), consumed_at = now()
+WHERE id = sqlc.arg(id) AND status = 'pending' AND expires_at > now();
+
 -- name: ConsumeAuthorizationCode :one
 UPDATE authorization_codes
 SET consumed_at = now()
