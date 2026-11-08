@@ -888,11 +888,14 @@
       "CreateGrantInputBody": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
           "anchor_space_id": {
             "type": "string"
           },
-          "grantee_member_id": {
-            "type": "string"
+          "grantee": {
+            "$ref": "#/components/schemas/GranteeStruct"
           },
           "permissions": {
             "items": {
@@ -911,8 +914,7 @@
           }
         },
         "required": [
-          "grantee_member_id",
-          "role_id"
+          "grantee"
         ],
         "type": "object"
       },
@@ -1403,6 +1405,18 @@
           "scope",
           "granted_by"
         ],
+        "type": "object"
+      },
+      "GranteeStruct": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "Group": {

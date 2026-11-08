@@ -67,11 +67,15 @@ type createGrantInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
 	Body          struct {
-		GranteeMemberID string   `json:"grantee_member_id"`
-		RoleID          string   `json:"role_id"`
-		Permissions     []string `json:"permissions,omitempty"`
-		Scope           string   `json:"scope,omitempty"`
-		AnchorSpaceID   string   `json:"anchor_space_id,omitempty"`
+		Grantee struct {
+			MemberID string `json:"member_id,omitempty"`
+			GroupID  string `json:"group_id,omitempty"`
+		} `json:"grantee"`
+		RoleID        string   `json:"role_id,omitempty"`
+		Permissions   []string `json:"permissions,omitempty"`
+		Scope         string   `json:"scope,omitempty"`
+		AnchorSpaceID string   `json:"anchor_space_id,omitempty"`
+		AnchorGroupID string   `json:"anchor_group_id,omitempty"`
 	}
 }
 
@@ -488,18 +492,24 @@ func (a *API) updateRole(ctx context.Context, in *updateRoleInput) (*authorizati
 }
 
 func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.GranteeMemberID)
+	if (in.Body.Grantee.MemberID == "") == (in.Body.Grantee.GroupID == "") {
+		return nil, apierr.New("VALIDATION_FAILED", "grantee must identify exactly one member or group")
+	}
+	if (in.Body.RoleID == "") == (len(in.Body.Permissions) == 0) {
+		return nil, apierr.New("VALIDATION_FAILED", "provide exactly one of role_id or permissions")
+	}
+	if in.Body.Grantee.GroupID != "" || in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
+		return nil, apierr.New("UNAVAILABLE", "group grants are not yet available")
+	}
+	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.Grantee.MemberID)
 	if err != nil {
 		return nil, err
 	}
 	var grant authorization.Grant
 	if len(in.Body.Permissions) > 0 {
-		grant, err = a.Authorization.CreateInlineGrant(ctx, actor.ID, in.ID, in.Body.GranteeMemberID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+		grant, err = a.Authorization.CreateInlineGrant(ctx, actor.ID, in.ID, in.Body.Grantee.MemberID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
 	} else {
-		if strings.TrimSpace(in.Body.RoleID) == "" {
-			return nil, apierr.New("VALIDATION_FAILED", "role_id or permissions is required")
-		}
-		grant, err = a.Authorization.CreateGrant(ctx, actor.ID, in.ID, in.Body.GranteeMemberID, in.Body.RoleID, in.Body.Scope, in.Body.AnchorSpaceID)
+		grant, err = a.Authorization.CreateGrant(ctx, actor.ID, in.ID, in.Body.Grantee.MemberID, in.Body.RoleID, in.Body.Scope, in.Body.AnchorSpaceID)
 	}
 	if err != nil {
 		return nil, err

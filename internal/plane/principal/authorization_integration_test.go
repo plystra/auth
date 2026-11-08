@@ -692,13 +692,13 @@ func TestManagementAuthorizationUsesTargetGroupFactsAndMatchesCheck(t *testing.T
 		t.Fatal(err)
 	}
 	insideGrant := &createGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
-	insideGrant.Body.GranteeMemberID = member.ID
+	insideGrant.Body.Grantee.MemberID = member.ID
 	insideGrant.Body.Permissions = []string{"auth.members:read"}
 	if _, err := api.createGrant(ctx, insideGrant); err != nil {
 		t.Fatalf("group-scoped grant manager could not make an empty-delta change in its group: %v", err)
 	}
 	outsideGrant := &createGrantInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
-	outsideGrant.Body.GranteeMemberID = outside.ID
+	outsideGrant.Body.Grantee.MemberID = outside.ID
 	outsideGrant.Body.Permissions = []string{"auth.members:read"}
 	if _, err := api.createGrant(ctx, outsideGrant); err == nil {
 		t.Fatal("group-scoped grant manager changed a member outside the group")
