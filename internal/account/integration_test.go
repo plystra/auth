@@ -665,7 +665,8 @@ func TestTOTPSignInRequiresSecondStepAndPreservesAMROnRefresh(t *testing.T) {
 func TestLoginAttemptsAreRateLimitedByIPAccountAndPair(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st}}
+	fixedTime := time.Date(2026, time.January, 1, 12, 0, 30, 0, time.UTC)
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st, Now: func() time.Time { return fixedTime }}}
 
 	for i := 0; i < 5; i++ {
 		if _, err := accounts.Login(ctx, LoginInput{Email: "pair-limit@example.test", Password: "wrong", IP: net.ParseIP("192.0.2.1")}); err == nil {
@@ -711,7 +712,8 @@ func TestLoginAttemptsAreRateLimitedByIPAccountAndPair(t *testing.T) {
 func TestPasswordResetAndVerificationAttemptsAreRateLimitedWithoutEnumeration(t *testing.T) {
 	ctx := context.Background()
 	st := newAccountStore(t)
-	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st}}
+	fixedTime := time.Date(2026, time.January, 1, 12, 0, 30, 0, time.UTC)
+	accounts := &Service{Store: st, Passwords: security.DefaultPasswordHasher(), Settings: &space.Service{Store: st}, Limiter: &store.RateLimiter{Store: st, Now: func() time.Time { return fixedTime }}}
 
 	for i := 0; i < 5; i++ {
 		if token, err := accounts.RequestPasswordReset(ctx, "unknown-reset@example.test", net.ParseIP("198.51.100.10")); err != nil || token != "" {
