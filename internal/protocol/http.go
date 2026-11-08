@@ -87,12 +87,8 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		memberID = claims.MemberID
 	}
 	if memberID == "" {
-		member, memberErr := h.Authorization.GetMemberForUser(r.Context(), claims.Subject, client.SpaceID)
-		if memberErr != nil {
-			writeErr(w, apierr.New("invalid_request", "member_id is required when the user has multiple members"))
-			return
-		}
-		memberID = member.ID
+		writeErr(w, apierr.New("invalid_request", "member_id is required to select an identity"))
+		return
 	}
 	bound, err := h.Authorization.UserBoundToMember(r.Context(), claims.Subject, memberID)
 	if err != nil {
@@ -112,8 +108,13 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "member_id must identify a human member"))
 		return
 	}
-	if member.SpaceID != client.SpaceID {
-		writeErr(w, apierr.New("invalid_request", "member_id is not in the client's Space"))
+	installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, member.SpaceID)
+	if err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
+		return
+	}
+	if !installed {
+		writeErr(w, apierr.New("invalid_request", "application is not installed in the selected member's Space"))
 		return
 	}
 	scopes := uniqueScopes(strings.Fields(q.Get("scope")))
@@ -148,11 +149,11 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_target", "resource is not registered for this client"))
 		return
 	}
-	if err := h.Authorization.ValidateOAuthGrant(r.Context(), memberID, client.SpaceID, scopes); err != nil {
+	if err := h.Authorization.ValidateOAuthGrant(r.Context(), memberID, member.SpaceID, scopes); err != nil {
 		writeProtocolErr(w, err)
 		return
 	}
-	agentMember, err := h.authorizeOAuthAgent(r, claims, client, memberID, scopes)
+	agentMember, err := h.authorizeOAuthAgent(r, claims, client, memberID, member.SpaceID, scopes)
 	if err != nil {
 		writeProtocolErr(w, err)
 		return
@@ -225,6 +226,15 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, credential.SpaceID)
+		if err != nil {
+			writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
+			return
+		}
+		if !installed {
+			writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
+			return
+		}
 		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), credential.MemberID, credential.SpaceID, resource)
 		if err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
@@ -263,7 +273,7 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
-	if h.Applications == nil || h.Agents == nil || h.Sessions == nil {
+	if h.Applications == nil || h.Agents == nil || h.Sessions == nil || h.Authorization == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
@@ -308,7 +318,28 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_target", "resource does not match the authorization request"))
 		return
 	}
-	tokens, err := h.Sessions.CreateAgentAccess(r.Context(), consumed.MemberID, client.SpaceID, resource)
+	agentMember, err := h.Authorization.GetMemberAnySpace(r.Context(), consumed.MemberID)
+	if err != nil {
+		var public *apierr.Error
+		if !errors.As(err, &public) {
+			writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
+			return
+		}
+	}
+	if err != nil || agentMember.Kind != "agent" {
+		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
+		return
+	}
+	installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, agentMember.SpaceID)
+	if err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
+		return
+	}
+	if !installed {
+		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
+		return
+	}
+	tokens, err := h.Sessions.CreateAgentAccess(r.Context(), consumed.MemberID, agentMember.SpaceID, resource)
 	if err != nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
@@ -336,13 +367,13 @@ func (h HTTP) userClaims(r *http.Request) (security.Claims, error) {
 	return claims, nil
 }
 
-func (h HTTP) authorizeOAuthAgent(r *http.Request, claims security.Claims, client application.OAuthClient, ownerMemberID string, scopes []string) (agent.Agent, error) {
+func (h HTTP) authorizeOAuthAgent(r *http.Request, claims security.Claims, client application.OAuthClient, ownerMemberID, spaceID string, scopes []string) (agent.Agent, error) {
 	agentMember, err := h.Agents.OAuthAgent(r.Context(), ownerMemberID, client.ClientID)
 	if err == nil {
 		if agentMember.Status != "active" {
 			return agent.Agent{}, apierr.New("invalid_request", "the existing OAuth Agent is not active")
 		}
-		if _, err := h.Authorization.ReplaceOAuthInlineGrants(r.Context(), ownerMemberID, client.SpaceID, agentMember.ID, scopes, "space", client.SpaceID); err != nil {
+		if _, err := h.Authorization.ReplaceOAuthInlineGrants(r.Context(), ownerMemberID, spaceID, agentMember.ID, scopes, "space", spaceID); err != nil {
 			return agent.Agent{}, err
 		}
 		return agentMember, nil
@@ -362,7 +393,7 @@ func (h HTTP) authorizeOAuthAgent(r *http.Request, claims security.Claims, clien
 	if err != nil {
 		return agent.Agent{}, err
 	}
-	if _, err := h.Authorization.CreateOAuthInlineGrant(r.Context(), ownerMemberID, client.SpaceID, created.ID, scopes, "space", client.SpaceID); err != nil {
+	if _, err := h.Authorization.CreateOAuthInlineGrant(r.Context(), ownerMemberID, spaceID, created.ID, scopes, "space", spaceID); err != nil {
 		return agent.Agent{}, err
 	}
 	return created, nil

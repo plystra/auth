@@ -410,6 +410,16 @@ func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient
 	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash}, nil
 }
 
+func (s *Service) OAuthClientInstalled(ctx context.Context, applicationID, spaceID string) (bool, error) {
+	_, err := s.Store.Queries().GetActiveApplicationInstallationForSpace(ctx, db.GetActiveApplicationInstallationForSpaceParams{
+		ApplicationID: applicationID, TargetSpaceID: spaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 // AuthenticateOAuthClient resolves a registered OAuth client and verifies its
 // secret when the client is confidential. Public PKCE clients have no stored
 // secret and are intentionally accepted without one.

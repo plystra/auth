@@ -380,8 +380,9 @@ SELECT i.id, i.member_id, i.space_id, i.scope
 FROM application_installations i
 JOIN ancestors ON ancestors.id = i.space_id
 JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
 WHERE i.application_id = $1
-  AND i.status = 'active' AND a.status = 'active'
+  AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
   AND ((i.scope = 'space' AND i.space_id = $2) OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1

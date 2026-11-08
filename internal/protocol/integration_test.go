@@ -73,9 +73,39 @@ func TestOAuthRefreshGrantUsesAgentAccessTokenRenewal(t *testing.T) {
 	clientSecret := "oauth-refresh-client-secret"
 	clientHMACKey := []byte("protocol-oauth-client-hmac-key-0002")
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
-		VALUES ('app_oauth_refresh_protocol', $1, 'OAuth Refresh Client', '[]'::jsonb, '[]'::jsonb, $2, $3)
+		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, manifest_permissions, client_id, client_secret_hash)
+		VALUES ('app_oauth_refresh_protocol', $1, 'OAuth Refresh Client', '[]'::jsonb, '["auth.authz:check"]'::jsonb, '["auth.authz:check"]'::jsonb, $2, $3)
 	`, owner.SpaceID, clientID, hmacSHA256(clientHMACKey, clientSecret)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, type, binding_policy, status)
+		VALUES ('mem_oauth_refresh_application', $1, 'OAuth Refresh Client', 'application', 'single', 'active')
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO roles (id, space_id, name, managed)
+		VALUES ('rol_oauth_refresh_application', $1, 'application:ins_oauth_refresh_protocol', true)
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_id)
+		SELECT 'rol_oauth_refresh_application', id FROM permissions WHERE key = 'auth.authz:check'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_oauth_refresh_application', $1, 'rol_oauth_refresh_application', 'mem_oauth_refresh_application', 'space', $1, $2)
+	`, owner.SpaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO application_installations (id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by)
+		VALUES ('ins_oauth_refresh_protocol', 'app_oauth_refresh_protocol', $1, 'mem_oauth_refresh_application', 'rol_oauth_refresh_application', 'space', '["auth.authz:check"]'::jsonb, $2)
+	`, owner.SpaceID, owner.ID); err != nil {
 		t.Fatal(err)
 	}
 	wrongClientID := "https://other-refresh.client/metadata.json"
@@ -258,7 +288,7 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	}
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO permissions (id, key, description, principal_kinds, agent_approval, risk, status)
-		VALUES ('prm_oauth_group_read', 'oauth.group:read', 'OAuth group-scoped read', '["human","agent"]'::jsonb, 'none', 'low', 'active')
+		VALUES ('prm_oauth_group_read', 'oauth.group:read', 'OAuth group-scoped read', '["human","agent","application"]'::jsonb, 'none', 'low', 'active')
 		ON CONFLICT (key) DO NOTHING
 	`); err != nil {
 		t.Fatal(err)
@@ -282,6 +312,36 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash)
 		VALUES ('app_oauth_code_protocol', $1, 'OAuth Code Client', '["https://client.test/callback"]'::jsonb, '["oauth.group:read"]'::jsonb, $2, $3)
 	`, owner.SpaceID, clientID, hmacSHA256(clientHMACKey, clientSecret)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, type, binding_policy, status)
+		VALUES ('mem_oauth_code_application', $1, 'OAuth Code Client', 'application', 'single', 'active')
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO roles (id, space_id, name, managed)
+		VALUES ('rol_oauth_code_application', $1, 'application:ins_oauth_code_protocol', true)
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO role_permissions (role_id, permission_id)
+		VALUES ('rol_oauth_code_application', 'prm_oauth_group_read')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_oauth_code_application', $1, 'rol_oauth_code_application', 'mem_oauth_code_application', 'space', $1, $2)
+	`, owner.SpaceID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO application_installations (id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by)
+		VALUES ('ins_oauth_code_protocol', 'app_oauth_code_protocol', $1, 'mem_oauth_code_application', 'rol_oauth_code_application', 'space', '["oauth.group:read"]'::jsonb, $2)
+	`, owner.SpaceID, owner.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
@@ -701,8 +761,8 @@ func TestOAuthRevokeDisablesAgentAuthorizationTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var mux http.ServeMux
 	apps := &application.Service{Store: st, HMACKeys: [][]byte{clientHMACKey}}
+	var mux http.ServeMux
 	(HTTP{Applications: apps, Agents: agents, Sessions: sessions, Authorization: authorizer}).Register(&mux)
 	revoke := func(token string) *httptest.ResponseRecorder {
 		form := url.Values{"token": {token}}

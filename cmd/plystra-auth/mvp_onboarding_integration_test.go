@@ -3,17 +3,20 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/account"
+	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/credential"
@@ -23,6 +26,7 @@ import (
 	"github.com/plystra/auth/internal/plane/ops"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/plane/server"
+	"github.com/plystra/auth/internal/protocol"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
@@ -206,6 +210,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	sessions.Factors = factors
 	authz.StepUp = sessions
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{key}}
+	agents := &agent.Service{Store: st, HMACKeys: [][]byte{key}}
 	validator := credential.Validator{
 		Principal: credential.PrincipalParser{Sessions: sessions},
 		Server:    credential.ServerParser{Applications: apps},
@@ -219,6 +224,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	principalMux := http.NewServeMux()
 	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps}).Register(
 		humago.New(principalMux, route.HumaConfig("MVP onboarding principal", "1.0.0")))
+	(protocol.HTTP{Issuer: "https://auth.example.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authz}).Register(principalMux)
 	principalHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, nil, st, validateCredential, nil, nil)
 	principalRequest := func(path, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -376,11 +382,12 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	}
 	var appResult struct {
 		Data struct {
-			ID string `json:"id"`
+			ID       string `json:"id"`
+			ClientID string `json:"client_id"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(registered.Body.Bytes(), &appResult); err != nil || appResult.Data.ID == "" {
-		t.Fatal("public registration omitted application ID")
+	if err := json.Unmarshal(registered.Body.Bytes(), &appResult); err != nil || appResult.Data.ID == "" || appResult.Data.ClientID == "" {
+		t.Fatal("public registration omitted application identity")
 	}
 	customerGrantBody, err := json.Marshal(map[string]any{
 		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"auth.applications:manage"},
@@ -450,6 +457,14 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	installed := principalRequest(installPath, customer.token, string(installBody))
 	if installed.Code != http.StatusOK || !strings.Contains(installed.Body.String(), `"invoice:read"`) || !strings.Contains(installed.Body.String(), `"invoice:approve"`) {
 		t.Fatalf("approved public application installation = %d %s", installed.Code, installed.Body.String())
+	}
+	var installationResult struct {
+		Data struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(installed.Body.Bytes(), &installationResult); err != nil || installationResult.Data.ID == "" {
+		t.Fatal("approved installation omitted its ID")
 	}
 	resourceGrantBody, err := json.Marshal(map[string]any{
 		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"invoice:read"},
@@ -581,5 +596,117 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	}
 	if denied := principalRequest("/v1/spaces", keyResult.Data.Secret, `{"name":"Wrong plane","slug":"wrong-plane"}`); denied.Code != http.StatusUnauthorized || !strings.Contains(denied.Body.String(), "CREDENTIAL_PLANE_MISMATCH") {
 		t.Fatalf("server key on principal plane = %d %s", denied.Code, denied.Body.String())
+	}
+	verifier := "mvp-onboarding-pkce-verifier-123456789"
+	challenge := sha256.Sum256([]byte(verifier))
+	authorizeQuery := url.Values{
+		"response_type":         {"code"},
+		"client_id":             {appResult.Data.ClientID},
+		"redirect_uri":          {"https://saas.example.test/callback"},
+		"member_id":             {customer.memberID},
+		"scope":                 {"invoice:read"},
+		"resource":              {appResult.Data.ClientID},
+		"state":                 {"mvp-state"},
+		"nonce":                 {"mvp-nonce"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(challenge[:])},
+		"code_challenge_method": {"S256"},
+	}
+	uninstalledQuery, err := url.ParseQuery(authorizeQuery.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	uninstalledQuery.Set("member_id", publisher.memberID)
+	uninstalledRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+uninstalledQuery.Encode(), nil)
+	uninstalledRequest.Header.Set("Authorization", "Bearer "+publisher.token)
+	uninstalled := httptest.NewRecorder()
+	principalHandler.ServeHTTP(uninstalled, uninstalledRequest)
+	if uninstalled.Code != http.StatusBadRequest || !strings.Contains(uninstalled.Body.String(), "application is not installed") {
+		t.Fatalf("OAuth authorization without installation = %d %s", uninstalled.Code, uninstalled.Body.String())
+	}
+	authorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
+	authorizeRequest.Header.Set("Authorization", "Bearer "+customer.token)
+	authorized := httptest.NewRecorder()
+	principalHandler.ServeHTTP(authorized, authorizeRequest)
+	if authorized.Code != http.StatusFound {
+		t.Fatalf("customer OAuth authorization = %d %s", authorized.Code, authorized.Body.String())
+	}
+	callback, err := url.Parse(authorized.Header().Get("Location"))
+	if err != nil || callback.Query().Get("code") == "" || callback.Query().Get("state") != "mvp-state" {
+		t.Fatal("OAuth callback omitted a bound authorization code")
+	}
+	form := url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {appResult.Data.ClientID},
+		"redirect_uri":  {"https://saas.example.test/callback"},
+		"code":          {callback.Query().Get("code")},
+		"code_verifier": {verifier},
+		"resource":      {appResult.Data.ClientID},
+	}
+	tokenRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	tokenRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	tokenResponse := httptest.NewRecorder()
+	principalHandler.ServeHTTP(tokenResponse, tokenRequest)
+	if tokenResponse.Code != http.StatusOK {
+		t.Fatalf("customer OAuth token exchange = %d %s", tokenResponse.Code, tokenResponse.Body.String())
+	}
+	var oauthToken struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.Unmarshal(tokenResponse.Body.Bytes(), &oauthToken); err != nil || oauthToken.AccessToken == "" || oauthToken.RefreshToken == "" {
+		t.Fatal("OAuth token exchange omitted its credentials")
+	}
+	claims, active, err := sessions.Introspect(ctx, oauthToken.AccessToken, appResult.Data.ClientID)
+	if err != nil || !active || claims.Type != "agent" || claims.SpaceID != customer.spaceID {
+		t.Fatalf("customer OAuth Agent claims = %+v active=%v err=%v", claims, active, err)
+	}
+	oauthAgent, err := agents.OAuthAgent(ctx, customer.memberID, appResult.Data.ClientID)
+	if err != nil || oauthAgent.ID != claims.Subject {
+		t.Fatalf("customer OAuth Agent identity = %+v err=%v", oauthAgent, err)
+	}
+	repeatQuery, err := url.ParseQuery(authorizeQuery.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeatQuery.Set("state", "mvp-repeat")
+	repeatRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+repeatQuery.Encode(), nil)
+	repeatRequest.Header.Set("Authorization", "Bearer "+customer.token)
+	repeated := httptest.NewRecorder()
+	principalHandler.ServeHTTP(repeated, repeatRequest)
+	if repeated.Code != http.StatusFound {
+		t.Fatalf("repeat OAuth authorization = %d %s", repeated.Code, repeated.Body.String())
+	}
+	repeatCallback, err := url.Parse(repeated.Header().Get("Location"))
+	if err != nil || repeatCallback.Query().Get("code") == "" {
+		t.Fatal("repeat OAuth callback omitted its code")
+	}
+	reusedAgent, err := agents.OAuthAgent(ctx, customer.memberID, appResult.Data.ClientID)
+	if err != nil || reusedAgent.ID != oauthAgent.ID {
+		t.Fatalf("repeat OAuth authorization created another Agent: %+v err=%v", reusedAgent, err)
+	}
+	suspended := principalRequest("/v1/spaces/"+customer.spaceID+"/installations/"+installationResult.Data.ID+"/suspend", customer.token, "")
+	if suspended.Code != http.StatusOK {
+		t.Fatalf("customer application suspension = %d %s", suspended.Code, suspended.Body.String())
+	}
+	form.Set("code", repeatCallback.Query().Get("code"))
+	staleRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+	staleRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	staleToken := httptest.NewRecorder()
+	principalHandler.ServeHTTP(staleToken, staleRequest)
+	if staleToken.Code != http.StatusBadRequest || !strings.Contains(staleToken.Body.String(), "invalid_grant") {
+		t.Fatalf("OAuth code after installation suspension = %d %s", staleToken.Code, staleToken.Body.String())
+	}
+	refreshForm := url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {appResult.Data.ClientID},
+		"refresh_token": {oauthToken.RefreshToken},
+		"resource":      {appResult.Data.ClientID},
+	}
+	refreshRequest := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(refreshForm.Encode()))
+	refreshRequest.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	staleRefresh := httptest.NewRecorder()
+	principalHandler.ServeHTTP(staleRefresh, refreshRequest)
+	if staleRefresh.Code != http.StatusBadRequest || !strings.Contains(staleRefresh.Body.String(), "invalid_grant") {
+		t.Fatalf("OAuth refresh after installation suspension = %d %s", staleRefresh.Code, staleRefresh.Body.String())
 	}
 }
