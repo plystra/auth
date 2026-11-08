@@ -1,6 +1,7 @@
 package protocol
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -321,6 +323,12 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO members (id, space_id, name, type, binding_policy, status)
+		VALUES ('mem_oauth_code_unbound', $1, 'Unbound User', 'human', 'single', 'active')
+	`, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO roles (id, space_id, name, managed)
 		VALUES ('rol_oauth_code_application', $1, 'application:ins_oauth_code_protocol', true)
 	`, owner.SpaceID); err != nil {
@@ -402,13 +410,23 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		t.Fatalf("unregistered resource status=%d body=%s", badResourceResponse.Code, badResourceResponse.Body.String())
 	}
 	unboundMemberQuery := cloneValues(authorizeQuery)
-	unboundMemberQuery.Set("member_id", "mem_oauth_code_application")
+	unboundMemberQuery.Set("member_id", "mem_oauth_code_unbound")
 	unboundMemberRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+unboundMemberQuery.Encode(), nil)
 	unboundMemberRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
 	unboundMemberResponse := httptest.NewRecorder()
 	mux.ServeHTTP(unboundMemberResponse, unboundMemberRequest)
-	if unboundMemberResponse.Code != http.StatusBadRequest || !strings.Contains(unboundMemberResponse.Body.String(), "not bound") {
-		t.Fatalf("unbound member status=%d body=%s", unboundMemberResponse.Code, unboundMemberResponse.Body.String())
+	if unboundMemberResponse.Code != http.StatusOK {
+		t.Fatalf("pre-consent request status=%d body=%s", unboundMemberResponse.Code, unboundMemberResponse.Body.String())
+	}
+	var unboundBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(unboundMemberResponse.Body.Bytes(), &unboundBody); err != nil {
+		t.Fatal(err)
+	}
+	unboundConsent := oauthConsentRequest(&mux, userTokens.AccessToken, unboundBody.RequestID, "approve", "mem_oauth_code_unbound", []string{"oauth.group:read"})
+	if unboundConsent.Code != http.StatusBadRequest || !strings.Contains(unboundConsent.Body.String(), "not bound") {
+		t.Fatalf("unbound member status=%d body=%s", unboundConsent.Code, unboundConsent.Body.String())
 	}
 	outOfManifestQuery := cloneValues(authorizeQuery)
 	outOfManifestQuery.Set("scope", "auth.authz:check")
@@ -429,6 +447,10 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		UPDATE applications SET allowed_scopes = '["oauth.group:read","oauth.unheld:read"]'::jsonb,
 			manifest_permissions = '["oauth.group:read","oauth.unheld:read"]'::jsonb
 		WHERE id = 'app_oauth_code_protocol'
+		;
+		UPDATE application_installations
+		SET approved_permissions = '["oauth.group:read","oauth.unheld:read"]'::jsonb
+		WHERE id = 'ins_oauth_code_protocol'
 	`); err != nil {
 		t.Fatal(err)
 	}
@@ -438,17 +460,63 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	unheldScopeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
 	unheldScopeResponse := httptest.NewRecorder()
 	mux.ServeHTTP(unheldScopeResponse, unheldScopeRequest)
-	if unheldScopeResponse.Code != http.StatusBadRequest || !strings.Contains(unheldScopeResponse.Body.String(), "does not hold") {
-		t.Fatalf("unheld scope status=%d body=%s", unheldScopeResponse.Code, unheldScopeResponse.Body.String())
+	if unheldScopeResponse.Code != http.StatusOK {
+		t.Fatalf("unheld scope request status=%d body=%s", unheldScopeResponse.Code, unheldScopeResponse.Body.String())
+	}
+	var unheldBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(unheldScopeResponse.Body.Bytes(), &unheldBody); err != nil {
+		t.Fatal(err)
+	}
+	unheldConsent := oauthConsentRequest(&mux, userTokens.AccessToken, unheldBody.RequestID, "approve", owner.ID, []string{"oauth.unheld:read"})
+	if unheldConsent.Code != http.StatusBadRequest || !strings.Contains(unheldConsent.Body.String(), "cannot grant") {
+		t.Fatalf("unheld scope status=%d body=%s", unheldConsent.Code, unheldConsent.Body.String())
 	}
 	authorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
 	authorizeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
 	authorizeResponse := httptest.NewRecorder()
 	mux.ServeHTTP(authorizeResponse, authorizeRequest)
-	if authorizeResponse.Code != http.StatusFound {
+	if authorizeResponse.Code != http.StatusOK {
 		t.Fatalf("authorize status=%d body=%s", authorizeResponse.Code, authorizeResponse.Body.String())
 	}
-	redirect, err := url.Parse(authorizeResponse.Header().Get("Location"))
+	var authorizationBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(authorizeResponse.Body.Bytes(), &authorizationBody); err != nil {
+		t.Fatal(err)
+	}
+	if authorizationBody.RequestID == "" {
+		t.Fatal("authorization request handle is missing")
+	}
+	var prematureCodes int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_codes`).Scan(&prematureCodes); err != nil {
+		t.Fatal(err)
+	}
+	if prematureCodes != 0 {
+		t.Fatalf("GET /oauth/authorize issued %d codes before consent", prematureCodes)
+	}
+	var prematureAgents int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM members WHERE source = 'oauth' AND oauth_client_id = $1`, clientID).Scan(&prematureAgents); err != nil {
+		t.Fatal(err)
+	}
+	if prematureAgents != 0 {
+		t.Fatalf("GET /oauth/authorize created %d Agents before consent", prematureAgents)
+	}
+	if unauthenticated := oauthConsentRequest(&mux, "", authorizationBody.RequestID, "approve", owner.ID, []string{"oauth.group:read"}); unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated consent status=%d body=%s", unauthenticated.Code, unauthenticated.Body.String())
+	}
+	consentResponse := oauthConsentRequest(&mux, userTokens.AccessToken, authorizationBody.RequestID, "approve", owner.ID, []string{"oauth.group:read"})
+	if consentResponse.Code != http.StatusOK {
+		t.Fatalf("consent status=%d body=%s", consentResponse.Code, consentResponse.Body.String())
+	}
+	var consentBody struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.Unmarshal(consentResponse.Body.Bytes(), &consentBody); err != nil {
+		t.Fatal(err)
+	}
+	redirect, err := url.Parse(consentBody.RedirectTo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,16 +586,38 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	if directKeyCount != 0 {
 		t.Fatalf("OAuth Agent has %d hidden direct keys, want none", directKeyCount)
 	}
+	if _, err := agents.CreateOAuth(ctx, agent.CreateInput{
+		OwnerMemberID: owner.ID, CreatedByUser: "usr_oauth_code_protocol", Name: "Duplicate OAuth Agent",
+		Source: "oauth", OAuthClientID: clientID, ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+	}); err == nil {
+		t.Fatal("database accepted a second live OAuth Agent for the same owner and client")
+	}
 	wrongVerifierQuery := cloneValues(authorizeQuery)
 	wrongVerifierQuery.Set("state", "state-wrong-verifier")
 	wrongAuthorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+wrongVerifierQuery.Encode(), nil)
 	wrongAuthorizeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
 	wrongAuthorizeResponse := httptest.NewRecorder()
 	mux.ServeHTTP(wrongAuthorizeResponse, wrongAuthorizeRequest)
-	if wrongAuthorizeResponse.Code != http.StatusFound {
+	if wrongAuthorizeResponse.Code != http.StatusOK {
 		t.Fatalf("second authorize status=%d body=%s", wrongAuthorizeResponse.Code, wrongAuthorizeResponse.Body.String())
 	}
-	wrongCode, err := url.Parse(wrongAuthorizeResponse.Header().Get("Location"))
+	var wrongRequestBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(wrongAuthorizeResponse.Body.Bytes(), &wrongRequestBody); err != nil {
+		t.Fatal(err)
+	}
+	wrongConsent := oauthConsentRequest(&mux, userTokens.AccessToken, wrongRequestBody.RequestID, "approve", owner.ID, []string{"oauth.group:read"})
+	if wrongConsent.Code != http.StatusOK {
+		t.Fatalf("second consent status=%d body=%s", wrongConsent.Code, wrongConsent.Body.String())
+	}
+	var wrongConsentBody struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.Unmarshal(wrongConsent.Body.Bytes(), &wrongConsentBody); err != nil {
+		t.Fatal(err)
+	}
+	wrongCode, err := url.Parse(wrongConsentBody.RedirectTo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,6 +649,103 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	if replayResponse.Code != http.StatusBadRequest {
 		t.Fatalf("authorization code replay status=%d body=%s", replayResponse.Code, replayResponse.Body.String())
 	}
+
+	deniedID := oauthStartRequest(t, &mux, authorizeQuery)
+	denied := oauthConsentRequest(&mux, userTokens.AccessToken, deniedID, "deny", "", nil)
+	if denied.Code != http.StatusOK {
+		t.Fatalf("denied consent status=%d body=%s", denied.Code, denied.Body.String())
+	}
+	var deniedBody struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.Unmarshal(denied.Body.Bytes(), &deniedBody); err != nil {
+		t.Fatal(err)
+	}
+	deniedRedirect, err := url.Parse(deniedBody.RedirectTo)
+	if err != nil || deniedRedirect.Query().Get("error") != "access_denied" || deniedRedirect.Query().Get("code") != "" || deniedRedirect.Query().Get("state") != "state-123" {
+		t.Fatalf("denied redirect=%q error=%v", deniedBody.RedirectTo, err)
+	}
+	if reused := oauthConsentRequest(&mux, userTokens.AccessToken, deniedID, "approve", owner.ID, []string{"oauth.group:read"}); reused.Code != http.StatusBadRequest {
+		t.Fatalf("denied request was reused: %d %s", reused.Code, reused.Body.String())
+	}
+
+	retryID := oauthStartRequest(t, &mux, authorizeQuery)
+	if invalid := oauthConsentRequest(&mux, userTokens.AccessToken, retryID, "approve", owner.ID, []string{"oauth.unheld:read"}); invalid.Code != http.StatusBadRequest {
+		t.Fatalf("out-of-request scope was accepted: %d %s", invalid.Code, invalid.Body.String())
+	}
+	if corrected := oauthConsentRequest(&mux, userTokens.AccessToken, retryID, "approve", owner.ID, []string{"oauth.group:read"}); corrected.Code != http.StatusOK {
+		t.Fatalf("corrected consent failed: %d %s", corrected.Code, corrected.Body.String())
+	}
+
+	concurrentID := oauthStartRequest(t, &mux, authorizeQuery)
+	results := make(chan int, 2)
+	for range 2 {
+		go func() {
+			results <- oauthConsentRequest(&mux, userTokens.AccessToken, concurrentID, "approve", owner.ID, []string{"oauth.group:read"}).Code
+		}()
+	}
+	first, second := <-results, <-results
+	statuses := []int{first, second}
+	slices.Sort(statuses)
+	if statuses[0] != http.StatusOK || statuses[1] != http.StatusBadRequest {
+		t.Fatalf("concurrent consent statuses = %d, %d", first, second)
+	}
+
+	rollbackID := oauthStartRequest(t, &mux, authorizeQuery)
+	var codesBefore, grantsBefore int
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_codes`).Scan(&codesBefore); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, agentMember.ID).Scan(&grantsBefore); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_oauth_consent_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action = 'oauth.consent.approve' THEN RAISE EXCEPTION 'audit failed'; END IF; RETURN NEW; END;
+		$$;
+		CREATE TRIGGER reject_oauth_consent_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_oauth_consent_audit()
+	`); err != nil {
+		t.Fatal(err)
+	}
+	failed := oauthConsentRequest(&mux, userTokens.AccessToken, rollbackID, "approve", owner.ID, []string{"oauth.group:read"})
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("audit failure consent status=%d body=%s", failed.Code, failed.Body.String())
+	}
+	var requestStatus string
+	var codesAfter, grantsAfter int
+	rollbackHash := sha256.Sum256([]byte(rollbackID))
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM oauth_authorization_requests WHERE request_hash = $1`, rollbackHash[:]).Scan(&requestStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_codes`).Scan(&codesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM authorization_grants WHERE grantee_member_id = $1 AND revoked_at IS NULL`, agentMember.ID).Scan(&grantsAfter); err != nil {
+		t.Fatal(err)
+	}
+	if requestStatus != "pending" || codesAfter != codesBefore || grantsAfter != grantsBefore {
+		t.Fatalf("audit failure committed partial consent: request=%s codes=%d/%d grants=%d/%d", requestStatus, codesAfter, codesBefore, grantsAfter, grantsBefore)
+	}
+}
+
+func oauthStartRequest(t *testing.T, mux *http.ServeMux, query url.Values) string {
+	t.Helper()
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+query.Encode(), nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("authorization request status=%d body=%s", response.Code, response.Body.String())
+	}
+	var body struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.RequestID == "" {
+		t.Fatal("authorization request handle is missing")
+	}
+	return body.RequestID
 }
 
 func cloneValues(in url.Values) url.Values {
@@ -567,6 +754,18 @@ func cloneValues(in url.Values) url.Values {
 		out[key] = append([]string(nil), values...)
 	}
 	return out
+}
+
+func oauthConsentRequest(mux *http.ServeMux, userToken, requestID, decision, memberID string, permissions []string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]any{
+		"request_id": requestID, "decision": decision, "member_id": memberID, "permissions": permissions,
+	})
+	request := httptest.NewRequest(http.MethodPost, "/oauth/authorize", bytes.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+userToken)
+	response := httptest.NewRecorder()
+	mux.ServeHTTP(response, request)
+	return response
 }
 
 func hmacSHA256(key []byte, value string) []byte {

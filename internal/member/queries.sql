@@ -27,6 +27,11 @@ WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id) AND status
 SELECT user_id, member_id, status, expires_at, revoked_at
 FROM user_members WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id);
 
+-- name: LockUserMemberBinding :one
+SELECT user_id, member_id, status, expires_at, revoked_at
+FROM user_members WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id)
+FOR UPDATE;
+
 -- name: CountActiveMemberBindings :one
 SELECT count(*)::bigint FROM user_members
 WHERE member_id = sqlc.arg(member_id) AND status = 'active' AND revoked_at IS NULL

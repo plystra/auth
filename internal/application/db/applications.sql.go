@@ -435,7 +435,7 @@ WITH RECURSIVE ancestors AS (
     FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
     WHERE parent.status = 'active'
 )
-SELECT i.id, i.member_id, i.space_id, i.scope
+SELECT i.id, i.member_id, i.space_id, i.scope, i.approved_permissions
 FROM application_installations i
 JOIN ancestors ON ancestors.id = i.space_id
 JOIN applications a ON a.id = i.application_id
@@ -453,10 +453,11 @@ type GetActiveApplicationInstallationForSpaceParams struct {
 }
 
 type GetActiveApplicationInstallationForSpaceRow struct {
-	ID       string `json:"id"`
-	MemberID string `json:"member_id"`
-	SpaceID  string `json:"space_id"`
-	Scope    string `json:"scope"`
+	ID                  string `json:"id"`
+	MemberID            string `json:"member_id"`
+	SpaceID             string `json:"space_id"`
+	Scope               string `json:"scope"`
+	ApprovedPermissions []byte `json:"approved_permissions"`
 }
 
 func (q *Queries) GetActiveApplicationInstallationForSpace(ctx context.Context, arg GetActiveApplicationInstallationForSpaceParams) (GetActiveApplicationInstallationForSpaceRow, error) {
@@ -467,6 +468,7 @@ func (q *Queries) GetActiveApplicationInstallationForSpace(ctx context.Context, 
 		&i.MemberID,
 		&i.SpaceID,
 		&i.Scope,
+		&i.ApprovedPermissions,
 	)
 	return i, err
 }
@@ -644,6 +646,51 @@ func (q *Queries) GetInstallationTargetSpace(ctx context.Context, arg GetInstall
 	var space_id string
 	err := row.Scan(&space_id)
 	return space_id, err
+}
+
+const getOAuthClientByID = `-- name: GetOAuthClientByID :one
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+       visibility, review_status, status, created_at
+FROM applications
+WHERE id = $1
+FOR UPDATE
+`
+
+type GetOAuthClientByIDParams struct {
+	ID string `json:"id"`
+}
+
+type GetOAuthClientByIDRow struct {
+	ID               string             `json:"id"`
+	SpaceID          string             `json:"space_id"`
+	Name             string             `json:"name"`
+	RedirectUris     []byte             `json:"redirect_uris"`
+	AllowedScopes    []byte             `json:"allowed_scopes"`
+	ClientID         string             `json:"client_id"`
+	ClientSecretHash []byte             `json:"client_secret_hash"`
+	Visibility       string             `json:"visibility"`
+	ReviewStatus     string             `json:"review_status"`
+	Status           string             `json:"status"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetOAuthClientByID(ctx context.Context, arg GetOAuthClientByIDParams) (GetOAuthClientByIDRow, error) {
+	row := q.db.QueryRow(ctx, getOAuthClientByID, arg.ID)
+	var i GetOAuthClientByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.RedirectUris,
+		&i.AllowedScopes,
+		&i.ClientID,
+		&i.ClientSecretHash,
+		&i.Visibility,
+		&i.ReviewStatus,
+		&i.Status,
+		&i.CreatedAt,
+	)
+	return i, err
 }
 
 const hasOverlappingApplicationInstallation = `-- name: HasOverlappingApplicationInstallation :one
@@ -924,6 +971,54 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockActiveApplicationInstallationForSpace = `-- name: LockActiveApplicationInstallationForSpace :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id, 0 AS depth
+    FROM spaces WHERE spaces.id = $2 AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id, child.depth + 1
+    FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT i.id, i.member_id, i.space_id, i.scope, i.approved_permissions
+FROM application_installations i
+JOIN ancestors ON ancestors.id = i.space_id
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+WHERE i.application_id = $1
+  AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
+  AND ((i.scope = 'space' AND i.space_id = $2) OR i.scope = 'space_tree')
+ORDER BY ancestors.depth
+LIMIT 1
+FOR SHARE OF i, m, a
+`
+
+type LockActiveApplicationInstallationForSpaceParams struct {
+	ApplicationID string `json:"application_id"`
+	TargetSpaceID string `json:"target_space_id"`
+}
+
+type LockActiveApplicationInstallationForSpaceRow struct {
+	ID                  string `json:"id"`
+	MemberID            string `json:"member_id"`
+	SpaceID             string `json:"space_id"`
+	Scope               string `json:"scope"`
+	ApprovedPermissions []byte `json:"approved_permissions"`
+}
+
+func (q *Queries) LockActiveApplicationInstallationForSpace(ctx context.Context, arg LockActiveApplicationInstallationForSpaceParams) (LockActiveApplicationInstallationForSpaceRow, error) {
+	row := q.db.QueryRow(ctx, lockActiveApplicationInstallationForSpace, arg.ApplicationID, arg.TargetSpaceID)
+	var i LockActiveApplicationInstallationForSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.MemberID,
+		&i.SpaceID,
+		&i.Scope,
+		&i.ApprovedPermissions,
+	)
+	return i, err
 }
 
 const lockApplicationForUpdate = `-- name: LockApplicationForUpdate :one

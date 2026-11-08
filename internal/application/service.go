@@ -420,6 +420,24 @@ func (s *Service) OAuthClientInstalled(ctx context.Context, applicationID, space
 	return err == nil, err
 }
 
+func (s *Service) OAuthClientByIDTx(ctx context.Context, q *db.Queries, id string) (OAuthClient, error) {
+	row, err := q.GetOAuthClientByID(ctx, db.GetOAuthClientByIDParams{ID: id})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OAuthClient{}, apierr.New("invalid_request", "client_id is not registered")
+	}
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	if row.Status != "active" || (row.Visibility == "public" && row.ReviewStatus != "approved") {
+		return OAuthClient{}, apierr.New("invalid_request", "client_id is not registered")
+	}
+	var redirects, scopes []string
+	if json.Unmarshal(row.RedirectUris, &redirects) != nil || json.Unmarshal(row.AllowedScopes, &scopes) != nil {
+		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
+	}
+	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects, AllowedScopes: scopes, ClientSecretHash: row.ClientSecretHash}, nil
+}
+
 // AuthenticateOAuthClient resolves a registered OAuth client and verifies its
 // secret when the client is confidential. Public PKCE clients have no stored
 // secret and are intentionally accepted without one.
@@ -459,13 +477,17 @@ func HMACClientSecretHash(key []byte, rawSecret string) []byte {
 
 func (s *Service) CreateAuthorizationCode(ctx context.Context, in CreateAuthorizationCodeInput) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		return q.CreateAuthorizationCode(ctx, db.CreateAuthorizationCodeParams{
-			ID: in.ID, ApplicationID: in.ApplicationID, UserID: in.UserID,
-			MemberID: nullableText(in.MemberID), RedirectUri: in.RedirectURI,
-			CodeHash: in.CodeHash, CodeChallenge: pgtype.Text{String: in.CodeChallenge, Valid: true},
-			CodeChallengeMethod: pgtype.Text{String: in.CodeChallengeMethod, Valid: true}, Scope: in.Scope,
-			Nonce: nullableText(in.Nonce), Resource: nullableText(in.Resource), ExpiresAt: pgtype.Timestamptz{Time: in.ExpiresAt, Valid: true},
-		})
+		return s.CreateAuthorizationCodeTx(ctx, q, in)
+	})
+}
+
+func (s *Service) CreateAuthorizationCodeTx(ctx context.Context, q *db.Queries, in CreateAuthorizationCodeInput) error {
+	return q.CreateAuthorizationCode(ctx, db.CreateAuthorizationCodeParams{
+		ID: in.ID, ApplicationID: in.ApplicationID, UserID: in.UserID,
+		MemberID: nullableText(in.MemberID), RedirectUri: in.RedirectURI,
+		CodeHash: in.CodeHash, CodeChallenge: pgtype.Text{String: in.CodeChallenge, Valid: true},
+		CodeChallengeMethod: pgtype.Text{String: in.CodeChallengeMethod, Valid: true}, Scope: in.Scope,
+		Nonce: nullableText(in.Nonce), Resource: nullableText(in.Resource), ExpiresAt: pgtype.Timestamptz{Time: in.ExpiresAt, Valid: true},
 	})
 }
 

@@ -1,14 +1,14 @@
 package protocol
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -18,8 +18,8 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
-	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 )
@@ -37,6 +37,7 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.metadata", "GET", "/.well-known/oauth-authorization-server", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.metadata))
 	route.RegisterNonJSON(mux, route.NewSpec("oidc.metadata", "GET", "/.well-known/openid-configuration", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.metadata))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.authorize", "GET", "/oauth/authorize", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.authorize))
+	route.RegisterNonJSON(mux, route.NewSpec("oauth.consent", "POST", "/oauth/authorize", route.Principal, "", []route.Subject{route.User}, route.WithNonJSON(), route.WithMaxBodyBytes(64<<10)), http.HandlerFunc(h.consent))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.token", "POST", "/oauth/token", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.token))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.revoke", "POST", "/oauth/revoke", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.revoke))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.device_authorization", "POST", "/oauth/device_authorization", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
@@ -56,7 +57,9 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "response_type, client_id and redirect_uri are required"))
 		return
 	}
-	if q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
+	challenge := q.Get("code_challenge")
+	decodedChallenge, challengeErr := base64.RawURLEncoding.DecodeString(challenge)
+	if q.Get("code_challenge_method") != "S256" || challengeErr != nil || len(decodedChallenge) != sha256.Size || base64.RawURLEncoding.EncodeToString(decodedChallenge) != challenge {
 		writeErr(w, apierr.New("invalid_request", "PKCE S256 is required"))
 		return
 	}
@@ -64,7 +67,7 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "state and nonce are required"))
 		return
 	}
-	if h.Applications == nil || h.Agents == nil || h.Authorization == nil {
+	if h.Applications == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
 		return
 	}
@@ -77,67 +80,14 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "redirect_uri is not registered for this client"))
 		return
 	}
-	claims, err := h.userClaims(r)
-	if err != nil {
-		writeProtocolErr(w, err)
-		return
-	}
-	memberID := strings.TrimSpace(q.Get("member_id"))
-	if memberID == "" {
-		memberID = claims.MemberID
-	}
-	if memberID == "" {
-		writeErr(w, apierr.New("invalid_request", "member_id is required to select an identity"))
-		return
-	}
-	bound, err := h.Authorization.UserBoundToMember(r.Context(), claims.Subject, memberID)
-	if err != nil {
-		writeProtocolErr(w, err)
-		return
-	}
-	if !bound {
-		writeErr(w, apierr.New("invalid_request", "member_id is not bound to the authenticated user"))
-		return
-	}
-	member, err := h.Authorization.GetMemberAnySpace(r.Context(), memberID)
-	if err != nil {
-		writeProtocolErr(w, err)
-		return
-	}
-	if member.Kind != "human" {
-		writeErr(w, apierr.New("invalid_request", "member_id must identify a human member"))
-		return
-	}
-	installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, member.SpaceID)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
-		return
-	}
-	if !installed {
-		writeErr(w, apierr.New("invalid_request", "application is not installed in the selected member's Space"))
-		return
-	}
 	scopes := uniqueScopes(strings.Fields(q.Get("scope")))
-	if len(scopes) == 0 {
+	if len(scopes) == 0 || len(scopes) > 100 {
 		writeErr(w, apierr.New("invalid_scope", "at least one scope is required"))
 		return
-	}
-	effective, err := h.Authorization.ListEffectivePermissions(r.Context(), memberID)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
-		return
-	}
-	effectivePermissions := make(map[string]struct{}, len(effective))
-	for _, permission := range effective {
-		effectivePermissions[permission.Permission] = struct{}{}
 	}
 	for _, scope := range scopes {
 		if !containsString(client.AllowedScopes, scope) {
 			writeErr(w, apierr.New("invalid_scope", "requested scope is not allowed for this client"))
-			return
-		}
-		if _, ok := effectivePermissions[scope]; !ok {
-			writeErr(w, apierr.New("invalid_scope", "the selected member does not hold the requested scope"))
 			return
 		}
 	}
@@ -149,39 +99,57 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_target", "resource is not registered for this client"))
 		return
 	}
-	if err := h.Authorization.ValidateOAuthGrant(r.Context(), memberID, member.SpaceID, scopes); err != nil {
-		writeProtocolErr(w, err)
-		return
-	}
-	agentMember, err := h.authorizeOAuthAgent(r, claims, client, memberID, member.SpaceID, scopes)
+	handle, expiresAt, err := h.Applications.CreateOAuthAuthorizationRequest(r.Context(), application.OAuthAuthorizationRequestInput{
+		ApplicationID: client.ID, RedirectURI: q.Get("redirect_uri"), CodeChallenge: challenge,
+		Scopes: scopes, State: q.Get("state"), Nonce: q.Get("nonce"), Resource: resource,
+	})
 	if err != nil {
 		writeProtocolErr(w, err)
 		return
 	}
-	code, codeHash, err := newAuthorizationCode()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"request_id": handle.Value(), "expires_at": expiresAt, "client_id": client.ClientID,
+		"client_name": client.Name, "permissions": scopes, "redirect_uri": q.Get("redirect_uri"),
+	})
+}
+
+func (h HTTP) consent(w http.ResponseWriter, r *http.Request) {
+	claims, err := h.userClaims(r)
 	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+		writeProtocolErr(w, err)
 		return
 	}
-	if err := h.Applications.CreateAuthorizationCode(r.Context(), application.CreateAuthorizationCodeInput{
-		ID: string(ids.New[ids.ID]("cod")), ApplicationID: client.ID, UserID: claims.Subject, MemberID: agentMember.ID,
-		RedirectURI: q.Get("redirect_uri"), CodeHash: codeHash, CodeChallenge: q.Get("code_challenge"),
-		CodeChallengeMethod: "S256", Scope: strings.Join(scopes, " "), Nonce: q.Get("nonce"), Resource: resource,
-		ExpiresAt: time.Now().UTC().Add(60 * time.Second),
-	}); err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeErr(w, apierr.New("invalid_request", "JSON request body is required"))
 		return
 	}
-	redirect, err := url.Parse(q.Get("redirect_uri"))
+	var body struct {
+		RequestID   string   `json:"request_id"`
+		Decision    string   `json:"decision"`
+		MemberID    string   `json:"member_id"`
+		Permissions []string `json:"permissions"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeErr(w, apierr.New("invalid_request", "authorization decision body is invalid"))
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeErr(w, apierr.New("invalid_request", "authorization decision body is invalid"))
+		return
+	}
+	redirectTo, err := (application.OAuthConsent{Applications: h.Applications, Agents: h.Agents, Authorization: h.Authorization}).Decide(r.Context(), application.OAuthConsentInput{
+		RequestID: secret.New(body.RequestID), UserID: claims.Subject, Decision: body.Decision,
+		MemberID: body.MemberID, Permissions: body.Permissions,
+	})
 	if err != nil {
-		writeErr(w, apierr.New("invalid_request", "redirect_uri is invalid"))
+		writeProtocolErr(w, err)
 		return
 	}
-	params := redirect.Query()
-	params.Set("code", code)
-	params.Set("state", q.Get("state"))
-	redirect.RawQuery = params.Encode()
-	http.Redirect(w, r, redirect.String(), http.StatusFound)
+	writeJSON(w, http.StatusOK, map[string]any{"redirect_to": redirectTo})
 }
 func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 	if e := r.ParseForm(); e != nil {
@@ -365,48 +333,6 @@ func (h HTTP) userClaims(r *http.Request) (security.Claims, error) {
 		return security.Claims{}, apierr.New("invalid_token", "an authenticated user session is required")
 	}
 	return claims, nil
-}
-
-func (h HTTP) authorizeOAuthAgent(r *http.Request, claims security.Claims, client application.OAuthClient, ownerMemberID, spaceID string, scopes []string) (agent.Agent, error) {
-	agentMember, err := h.Agents.OAuthAgent(r.Context(), ownerMemberID, client.ClientID)
-	if err == nil {
-		if agentMember.Status != "active" {
-			return agent.Agent{}, apierr.New("invalid_request", "the existing OAuth Agent is not active")
-		}
-		if _, err := h.Authorization.ReplaceOAuthInlineGrants(r.Context(), ownerMemberID, spaceID, agentMember.ID, scopes, "space", spaceID); err != nil {
-			return agent.Agent{}, err
-		}
-		return agentMember, nil
-	}
-	var publicErr *apierr.Error
-	if !errors.As(err, &publicErr) || publicErr.Code != "NOT_FOUND" {
-		return agent.Agent{}, err
-	}
-	name := strings.TrimSpace(client.Name + " OAuth Agent")
-	if len([]rune(name)) > 128 {
-		name = string([]rune(name)[:128])
-	}
-	created, err := h.Agents.CreateOAuth(r.Context(), agent.CreateInput{
-		OwnerMemberID: ownerMemberID, CreatedByUser: claims.Subject, Name: name,
-		Source: "oauth", OAuthClientID: client.ClientID, ExpiresAt: time.Now().UTC().Add(30 * 24 * time.Hour),
-	})
-	if err != nil {
-		return agent.Agent{}, err
-	}
-	if _, err := h.Authorization.CreateOAuthInlineGrant(r.Context(), ownerMemberID, spaceID, created.ID, scopes, "space", spaceID); err != nil {
-		return agent.Agent{}, err
-	}
-	return created, nil
-}
-
-func newAuthorizationCode() (string, []byte, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", nil, err
-	}
-	code := "ply_ac_" + base64.RawURLEncoding.EncodeToString(raw)
-	hash := sha256.Sum256([]byte(code))
-	return code, hash[:], nil
 }
 
 func containsString(values []string, want string) bool {

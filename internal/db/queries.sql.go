@@ -2842,6 +2842,38 @@ func (q *Queries) LockTOTPFactors(ctx context.Context, arg LockTOTPFactorsParams
 	return items, nil
 }
 
+const lockUserMemberBinding = `-- name: LockUserMemberBinding :one
+SELECT user_id, member_id, status, expires_at, revoked_at
+FROM user_members WHERE user_id = $1 AND member_id = $2
+FOR UPDATE
+`
+
+type LockUserMemberBindingParams struct {
+	UserID   string `json:"user_id"`
+	MemberID string `json:"member_id"`
+}
+
+type LockUserMemberBindingRow struct {
+	UserID    string             `json:"user_id"`
+	MemberID  string             `json:"member_id"`
+	Status    string             `json:"status"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) LockUserMemberBinding(ctx context.Context, arg LockUserMemberBindingParams) (LockUserMemberBindingRow, error) {
+	row := q.db.QueryRow(ctx, lockUserMemberBinding, arg.UserID, arg.MemberID)
+	var i LockUserMemberBindingRow
+	err := row.Scan(
+		&i.UserID,
+		&i.MemberID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const markAgentCredentialUsed = `-- name: MarkAgentCredentialUsed :execresult
 UPDATE agent_credentials
 SET last_used_at = now()
@@ -2873,6 +2905,34 @@ type RemoveAgentGroupSubtreeParams struct {
 func (q *Queries) RemoveAgentGroupSubtree(ctx context.Context, arg RemoveAgentGroupSubtreeParams) error {
 	_, err := q.db.Exec(ctx, removeAgentGroupSubtree, arg.GroupID)
 	return err
+}
+
+const renewOAuthAgent = `-- name: RenewOAuthAgent :execrows
+UPDATE members
+SET expires_at = $1, version = version + 1
+WHERE id = $2 AND type = 'agent' AND source = 'oauth'
+  AND created_by_member_id = $3
+  AND oauth_client_id = $4 AND status = 'active'
+`
+
+type RenewOAuthAgentParams struct {
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	MemberID      string             `json:"member_id"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	OauthClientID pgtype.Text        `json:"oauth_client_id"`
+}
+
+func (q *Queries) RenewOAuthAgent(ctx context.Context, arg RenewOAuthAgentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewOAuthAgent,
+		arg.ExpiresAt,
+		arg.MemberID,
+		arg.OwnerMemberID,
+		arg.OauthClientID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const resumeSuspendedAgent = `-- name: ResumeSuspendedAgent :exec

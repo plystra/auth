@@ -1259,11 +1259,29 @@ func (s *Service) ValidateOAuthGrant(ctx context.Context, ownerMemberID, spaceID
 		if err := lockAuthorizationMembersTx(ctx, q, ownerMemberID); err != nil {
 			return err
 		}
-		return s.authorizeAgentOwnerGrantTx(ctx, q, ownerMemberID, spaceID, uniqueSorted(permissions), inlineGrantOAuthConsent)
+		return s.ValidateOAuthGrantTx(ctx, q, ownerMemberID, spaceID, permissions)
 	})
 }
 
+func (s *Service) ValidateOAuthGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID string, permissions []string) error {
+	return s.authorizeAgentOwnerGrantTx(ctx, q, ownerMemberID, spaceID, uniqueSorted(permissions), inlineGrantOAuthConsent)
+}
+
+func (s *Service) CreateOAuthInlineGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID, granteeMemberID string, permissions []string) (Grant, error) {
+	return s.createInlineGrantTx(ctx, q, ownerMemberID, spaceID, granteeMemberID, permissions, "space", spaceID, inlineGrantOAuthConsent)
+}
+
 func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
+	var out Grant
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		out, err = s.createInlineGrantTx(ctx, q, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, mode)
+		return err
+	})
+	return out, err
+}
+
+func (s *Service) createInlineGrantTx(ctx context.Context, q *db.Queries, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1282,7 +1300,7 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		return Grant{}, err
 	}
 	var out Grant
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+	err = func() error {
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
@@ -1342,7 +1360,7 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
 		return nil
-	})
+	}()
 	return out, err
 }
 
@@ -1421,6 +1439,10 @@ func (s *Service) ReplaceOAuthInlineGrants(ctx context.Context, ownerMemberID, s
 	return s.replaceInlineGrants(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantOAuthConsent)
 }
 
+func (s *Service) ReplaceOAuthInlineGrantsTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID, granteeMemberID string, permissions []string) (Grant, error) {
+	return s.replaceInlineGrantsTx(ctx, q, ownerMemberID, spaceID, granteeMemberID, permissions, "space", spaceID, inlineGrantOAuthConsent)
+}
+
 // ReplaceAgentGrants applies the direct owner's system assignment right. Other
 // managers still use the ordinary grant permission and authority-delta check.
 func (s *Service) ReplaceAgentGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
@@ -1428,6 +1450,16 @@ func (s *Service) ReplaceAgentGrants(ctx context.Context, actorMemberID, spaceID
 }
 
 func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
+	var out Grant
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		out, err = s.replaceInlineGrantsTx(ctx, q, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, mode)
+		return err
+	})
+	return out, err
+}
+
+func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1446,7 +1478,7 @@ func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		return Grant{}, err
 	}
 	var out Grant
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+	err = func() error {
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
@@ -1522,7 +1554,7 @@ func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
 		return nil
-	})
+	}()
 	return out, err
 }
 

@@ -197,7 +197,7 @@ WITH RECURSIVE ancestors AS (
     FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
     WHERE parent.status = 'active'
 )
-SELECT i.id, i.member_id, i.space_id, i.scope
+SELECT i.id, i.member_id, i.space_id, i.scope, i.approved_permissions
 FROM application_installations i
 JOIN ancestors ON ancestors.id = i.space_id
 JOIN applications a ON a.id = i.application_id
@@ -207,6 +207,27 @@ WHERE i.application_id = sqlc.arg(application_id)
   AND ((i.scope = 'space' AND i.space_id = sqlc.arg(target_space_id)) OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1;
+
+-- name: LockActiveApplicationInstallationForSpace :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id, 0 AS depth
+    FROM spaces WHERE spaces.id = sqlc.arg(target_space_id) AND spaces.status = 'active'
+    UNION ALL
+    SELECT parent.id, parent.parent_id, child.depth + 1
+    FROM spaces parent JOIN ancestors child ON child.parent_id = parent.id
+    WHERE parent.status = 'active'
+)
+SELECT i.id, i.member_id, i.space_id, i.scope, i.approved_permissions
+FROM application_installations i
+JOIN ancestors ON ancestors.id = i.space_id
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+WHERE i.application_id = sqlc.arg(application_id)
+  AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
+  AND ((i.scope = 'space' AND i.space_id = sqlc.arg(target_space_id)) OR i.scope = 'space_tree')
+ORDER BY ancestors.depth
+LIMIT 1
+FOR SHARE OF i, m, a;
 
 -- name: ListActiveSpaceAncestorsForKey :many
 WITH RECURSIVE ancestors AS (
@@ -225,6 +246,13 @@ SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secr
 FROM applications
 WHERE client_id = sqlc.arg(client_id)
 LIMIT 1;
+
+-- name: GetOAuthClientByID :one
+SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
+       visibility, review_status, status, created_at
+FROM applications
+WHERE id = sqlc.arg(id)
+FOR UPDATE;
 
 -- name: CreateAuthorizationCode :exec
 INSERT INTO authorization_codes (

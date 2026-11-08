@@ -102,24 +102,12 @@ func (s *Service) CreateOAuth(ctx context.Context, in CreateInput) (Agent, error
 	return out, err
 }
 
+// CreateOAuthTx participates in the caller's consent transaction.
+func (s *Service) CreateOAuthTx(ctx context.Context, q *db.Queries, in CreateInput) (Agent, error) {
+	return s.createTx(ctx, q, in, false, "", nil)
+}
+
 func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bool) (Agent, string, error) {
-	in.Name = strings.TrimSpace(in.Name)
-	if in.Name == "" || len(in.Name) > 128 {
-		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent name is invalid")
-	}
-	if in.Source == "" {
-		in.Source = "manual"
-	}
-	if in.Source != "manual" && in.Source != "oauth" && in.Source != "delegation" {
-		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent source is invalid")
-	}
-	if in.ExpiresAt.IsZero() {
-		in.ExpiresAt = time.Now().UTC().Add(30 * 24 * time.Hour)
-	}
-	now := time.Now().UTC()
-	if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
-		return Agent{}, "", apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
-	}
 	var raw, prefix string
 	var hash []byte
 	var err error
@@ -131,6 +119,35 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 	}
 	var out Agent
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		out, err = s.createTx(ctx, q, in, issueCredential, prefix, hash)
+		return err
+	})
+	if err != nil {
+		return Agent{}, "", err
+	}
+	return out, raw, nil
+}
+
+func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, issueCredential bool, prefix string, hash []byte) (Agent, error) {
+	in.Name = strings.TrimSpace(in.Name)
+	if in.Name == "" || len(in.Name) > 128 {
+		return Agent{}, apierr.New("VALIDATION_FAILED", "agent name is invalid")
+	}
+	if in.Source == "" {
+		in.Source = "manual"
+	}
+	if in.Source != "manual" && in.Source != "oauth" && in.Source != "delegation" {
+		return Agent{}, apierr.New("VALIDATION_FAILED", "agent source is invalid")
+	}
+	if in.ExpiresAt.IsZero() {
+		in.ExpiresAt = time.Now().UTC().Add(30 * 24 * time.Hour)
+	}
+	now := time.Now().UTC()
+	if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
+		return Agent{}, apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
+	}
+	var out Agent
+	err := func() error {
 		owner, err := q.GetMemberForAgentOwner(ctx, db.GetMemberForAgentOwnerParams{MemberID: in.OwnerMemberID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -200,17 +217,21 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 			out.OwnerMemberID = group.OwnerMemberID.String
 		}
 		return nil
-	})
+	}()
 	if err != nil {
-		return Agent{}, "", err
+		return Agent{}, err
 	}
-	return out, raw, nil
+	return out, nil
 }
 
 // OAuthAgent returns the active OAuth Agent previously authorized by an owner
 // for the same client. A client gets one Agent per owner member.
 func (s *Service) OAuthAgent(ctx context.Context, ownerMemberID, clientID string) (Agent, error) {
-	row, err := s.Store.Queries().GetOAuthAgentForOwnerClient(ctx, db.GetOAuthAgentForOwnerClientParams{OwnerMemberID: pgtype.Text{String: ownerMemberID, Valid: true}, OauthClientID: pgtype.Text{String: clientID, Valid: true}})
+	return s.OAuthAgentTx(ctx, s.Store.Queries(), ownerMemberID, clientID)
+}
+
+func (s *Service) OAuthAgentTx(ctx context.Context, q *db.Queries, ownerMemberID, clientID string) (Agent, error) {
+	row, err := q.GetOAuthAgentForOwnerClient(ctx, db.GetOAuthAgentForOwnerClientParams{OwnerMemberID: pgtype.Text{String: ownerMemberID, Valid: true}, OauthClientID: pgtype.Text{String: clientID, Valid: true}})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Agent{}, apierr.New("NOT_FOUND", "OAuth Agent was not found")
 	}

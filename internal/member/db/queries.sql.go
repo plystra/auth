@@ -770,6 +770,38 @@ func (q *Queries) LockMemberInSpace(ctx context.Context, arg LockMemberInSpacePa
 	return i, err
 }
 
+const lockUserMemberBinding = `-- name: LockUserMemberBinding :one
+SELECT user_id, member_id, status, expires_at, revoked_at
+FROM user_members WHERE user_id = $1 AND member_id = $2
+FOR UPDATE
+`
+
+type LockUserMemberBindingParams struct {
+	UserID   string `json:"user_id"`
+	MemberID string `json:"member_id"`
+}
+
+type LockUserMemberBindingRow struct {
+	UserID    string             `json:"user_id"`
+	MemberID  string             `json:"member_id"`
+	Status    string             `json:"status"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) LockUserMemberBinding(ctx context.Context, arg LockUserMemberBindingParams) (LockUserMemberBindingRow, error) {
+	row := q.db.QueryRow(ctx, lockUserMemberBinding, arg.UserID, arg.MemberID)
+	var i LockUserMemberBindingRow
+	err := row.Scan(
+		&i.UserID,
+		&i.MemberID,
+		&i.Status,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const revokeUserMember = `-- name: RevokeUserMember :exec
 UPDATE user_members SET status = 'revoked', revoked_at = now()
 WHERE user_id = $1 AND member_id = $2 AND status = 'active'

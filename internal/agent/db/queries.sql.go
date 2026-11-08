@@ -860,6 +860,34 @@ func (q *Queries) RemoveAgentGroupSubtree(ctx context.Context, arg RemoveAgentGr
 	return err
 }
 
+const renewOAuthAgent = `-- name: RenewOAuthAgent :execrows
+UPDATE members
+SET expires_at = $1, version = version + 1
+WHERE id = $2 AND type = 'agent' AND source = 'oauth'
+  AND created_by_member_id = $3
+  AND oauth_client_id = $4 AND status = 'active'
+`
+
+type RenewOAuthAgentParams struct {
+	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+	MemberID      string             `json:"member_id"`
+	OwnerMemberID pgtype.Text        `json:"owner_member_id"`
+	OauthClientID pgtype.Text        `json:"oauth_client_id"`
+}
+
+func (q *Queries) RenewOAuthAgent(ctx context.Context, arg RenewOAuthAgentParams) (int64, error) {
+	result, err := q.db.Exec(ctx, renewOAuthAgent,
+		arg.ExpiresAt,
+		arg.MemberID,
+		arg.OwnerMemberID,
+		arg.OauthClientID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const resumeSuspendedAgent = `-- name: ResumeSuspendedAgent :exec
 UPDATE members
 SET status = 'active', version = version + 1

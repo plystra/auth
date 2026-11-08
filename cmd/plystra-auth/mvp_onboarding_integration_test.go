@@ -603,7 +603,6 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		"response_type":         {"code"},
 		"client_id":             {appResult.Data.ClientID},
 		"redirect_uri":          {"https://saas.example.test/callback"},
-		"member_id":             {customer.memberID},
 		"scope":                 {"invoice:read"},
 		"resource":              {appResult.Data.ClientID},
 		"state":                 {"mvp-state"},
@@ -615,22 +614,56 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	uninstalledQuery.Set("member_id", publisher.memberID)
 	uninstalledRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+uninstalledQuery.Encode(), nil)
 	uninstalledRequest.Header.Set("Authorization", "Bearer "+publisher.token)
 	uninstalled := httptest.NewRecorder()
 	principalHandler.ServeHTTP(uninstalled, uninstalledRequest)
-	if uninstalled.Code != http.StatusBadRequest || !strings.Contains(uninstalled.Body.String(), "application is not installed") {
-		t.Fatalf("OAuth authorization without installation = %d %s", uninstalled.Code, uninstalled.Body.String())
+	if uninstalled.Code != http.StatusOK {
+		t.Fatalf("OAuth request before consent = %d %s", uninstalled.Code, uninstalled.Body.String())
+	}
+	var uninstalledBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(uninstalled.Body.Bytes(), &uninstalledBody); err != nil {
+		t.Fatal(err)
+	}
+	consent := func(token, requestID, memberID string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"request_id": requestID, "decision": "approve", "member_id": memberID, "permissions": []string{"invoice:read"}})
+		request := httptest.NewRequest(http.MethodPost, "/oauth/authorize", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("Authorization", "Bearer "+token)
+		response := httptest.NewRecorder()
+		principalHandler.ServeHTTP(response, request)
+		return response
+	}
+	uninstalledConsent := consent(publisher.token, uninstalledBody.RequestID, publisher.memberID)
+	if uninstalledConsent.Code != http.StatusBadRequest || !strings.Contains(uninstalledConsent.Body.String(), "application is not installed") {
+		t.Fatalf("OAuth authorization without installation = %d %s", uninstalledConsent.Code, uninstalledConsent.Body.String())
 	}
 	authorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
 	authorizeRequest.Header.Set("Authorization", "Bearer "+customer.token)
 	authorized := httptest.NewRecorder()
 	principalHandler.ServeHTTP(authorized, authorizeRequest)
-	if authorized.Code != http.StatusFound {
+	if authorized.Code != http.StatusOK {
 		t.Fatalf("customer OAuth authorization = %d %s", authorized.Code, authorized.Body.String())
 	}
-	callback, err := url.Parse(authorized.Header().Get("Location"))
+	var authorizedBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(authorized.Body.Bytes(), &authorizedBody); err != nil {
+		t.Fatal(err)
+	}
+	oauthApproved := consent(customer.token, authorizedBody.RequestID, customer.memberID)
+	if oauthApproved.Code != http.StatusOK {
+		t.Fatalf("customer OAuth consent = %d %s", oauthApproved.Code, oauthApproved.Body.String())
+	}
+	var approvedBody struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.Unmarshal(oauthApproved.Body.Bytes(), &approvedBody); err != nil {
+		t.Fatal(err)
+	}
+	callback, err := url.Parse(approvedBody.RedirectTo)
 	if err != nil || callback.Query().Get("code") == "" || callback.Query().Get("state") != "mvp-state" {
 		t.Fatal("OAuth callback omitted a bound authorization code")
 	}
@@ -673,10 +706,26 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	repeatRequest.Header.Set("Authorization", "Bearer "+customer.token)
 	repeated := httptest.NewRecorder()
 	principalHandler.ServeHTTP(repeated, repeatRequest)
-	if repeated.Code != http.StatusFound {
+	if repeated.Code != http.StatusOK {
 		t.Fatalf("repeat OAuth authorization = %d %s", repeated.Code, repeated.Body.String())
 	}
-	repeatCallback, err := url.Parse(repeated.Header().Get("Location"))
+	var repeatedBody struct {
+		RequestID string `json:"request_id"`
+	}
+	if err := json.Unmarshal(repeated.Body.Bytes(), &repeatedBody); err != nil {
+		t.Fatal(err)
+	}
+	repeatConsent := consent(customer.token, repeatedBody.RequestID, customer.memberID)
+	if repeatConsent.Code != http.StatusOK {
+		t.Fatalf("repeat OAuth consent = %d %s", repeatConsent.Code, repeatConsent.Body.String())
+	}
+	var repeatConsentBody struct {
+		RedirectTo string `json:"redirect_to"`
+	}
+	if err := json.Unmarshal(repeatConsent.Body.Bytes(), &repeatConsentBody); err != nil {
+		t.Fatal(err)
+	}
+	repeatCallback, err := url.Parse(repeatConsentBody.RedirectTo)
 	if err != nil || repeatCallback.Query().Get("code") == "" {
 		t.Fatal("repeat OAuth callback omitted its code")
 	}

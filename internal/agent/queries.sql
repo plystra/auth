@@ -41,6 +41,13 @@ WHERE m.type = 'agent'
 ORDER BY m.created_at DESC, m.id DESC
 LIMIT 1;
 
+-- name: RenewOAuthAgent :execrows
+UPDATE members
+SET expires_at = sqlc.arg(expires_at), version = version + 1
+WHERE id = sqlc.arg(member_id) AND type = 'agent' AND source = 'oauth'
+  AND created_by_member_id = sqlc.arg(owner_member_id)
+  AND oauth_client_id = sqlc.arg(oauth_client_id) AND status = 'active';
+
 -- name: AddAgentToGroup :exec
 INSERT INTO group_members (group_id, member_id, source)
 VALUES (sqlc.arg(group_id), sqlc.arg(member_id), 'manual')
