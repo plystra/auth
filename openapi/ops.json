@@ -13,6 +13,39 @@
         ],
         "type": "object"
       },
+      "CreatePermissionInput": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_approval": {
+            "type": "string"
+          },
+          "delegable": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "principal_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "risk": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      },
       "DataStruct": {
         "additionalProperties": false,
         "properties": {
@@ -271,6 +304,87 @@
         ],
         "type": "object"
       },
+      "Permission": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_approval": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "delegable": {
+            "type": "boolean"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "principal_kinds": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "risk": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "description",
+          "risk",
+          "principal_kinds",
+          "delegable",
+          "agent_approval",
+          "status",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "PermissionOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/Permission"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "PermissionsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Permission"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "SettingsOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -368,6 +482,7 @@
               "ops.operators.create",
               "ops.operators.update",
               "ops.operators.disable",
+              "ops.permissions.create",
               "ops.users.suspend",
               "ops.users.sign_out_all",
               "ops.users.require_password_reset"
@@ -705,6 +820,88 @@
           }
         },
         "summary": "ops.operators.disable"
+      }
+    },
+    "/ops/v1/permissions": {
+      "get": {
+        "operationId": "ops.permissions.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.permissions.list"
+      },
+      "post": {
+        "operationId": "ops.permissions.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePermissionInput"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.permissions.create"
       }
     },
     "/ops/v1/settings": {

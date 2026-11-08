@@ -45,7 +45,7 @@ type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
 		Code      secret.String   `json:"mfa_code" minLength:"6" maxLength:"6"`
-		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
+		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.permissions.create,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
 }
@@ -64,6 +64,20 @@ type SettingsOutput struct {
 type SettingsInput struct {
 	Authorization string `header:"Authorization"`
 	Body          space.SettingsPatch
+}
+type PermissionCreateInput struct {
+	Authorization string `header:"Authorization"`
+	Body          operator.CreatePermissionInput
+}
+type PermissionOutput struct {
+	Body struct {
+		Data operator.Permission `json:"data"`
+	}
+}
+type PermissionsOutput struct {
+	Body struct {
+		Data []operator.Permission `json:"data"`
+	}
 }
 type OperatorsInput struct {
 	Authorization string `header:"Authorization"`
@@ -112,6 +126,8 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("ops.auth.sign_out", "POST", "/ops/v1/auth/sign-out", route.Ops, "ops:session", []route.Subject{route.Human}), a.signOut)
 	route.Register(api, route.NewSpec("ops.settings.get", "GET", "/ops/v1/settings", route.Ops, "ops:settings:read", []route.Subject{route.Human}), a.get)
 	route.Register(api, route.NewSpec("ops.settings.update", "PATCH", "/ops/v1/settings", route.Ops, "ops:settings:write", []route.Subject{route.Human}, route.WithStepUp()), a.update)
+	route.Register(api, route.NewSpec("ops.permissions.list", "GET", "/ops/v1/permissions", route.Ops, "ops:permissions:manage", []route.Subject{route.Human}), a.listPermissions)
+	route.Register(api, route.NewSpec("ops.permissions.create", "POST", "/ops/v1/permissions", route.Ops, "ops:permissions:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createPermission)
 	route.Register(api, route.NewSpec("ops.operators.list", "GET", "/ops/v1/operators", route.Ops, "ops:operators:read", []route.Subject{route.Human}), a.listOperators)
 	route.Register(api, route.NewSpec("ops.operators.create", "POST", "/ops/v1/operators", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createOperator)
 	route.Register(api, route.NewSpec("ops.operators.update", "PATCH", "/ops/v1/operators/{id}", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.updateOperator)
@@ -119,6 +135,36 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("ops.users.suspend", "POST", "/ops/v1/users/{id}/suspend", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.suspendUser)
 	route.Register(api, route.NewSpec("ops.users.sign_out_all", "POST", "/ops/v1/users/{id}/sign-out-all", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.signOutAllUserSessions)
 	route.Register(api, route.NewSpec("ops.users.require_password_reset", "POST", "/ops/v1/users/{id}/require-password-reset", route.Ops, "ops:users:manage", []route.Subject{route.Human}, route.WithStepUp()), a.requirePasswordReset)
+}
+func (a *API) listPermissions(ctx context.Context, in *AuthInput) (*PermissionsOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	items, err := a.Operators.ListPermissions(ctx, token)
+	if err != nil {
+		return nil, err
+	}
+	out := &PermissionsOutput{}
+	out.Body.Data = items
+	return out, nil
+}
+func (a *API) createPermission(ctx context.Context, in *PermissionCreateInput) (*PermissionOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(in.Body)
+	if err != nil {
+		return nil, err
+	}
+	created, err := a.Operators.CreatePermission(ctx, token, in.Body, digest)
+	if err != nil {
+		return nil, err
+	}
+	out := &PermissionOutput{}
+	out.Body.Data = created
+	return out, nil
 }
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)
