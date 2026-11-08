@@ -86,8 +86,8 @@ func initCommand() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "default space: %s\ndefault application: %s\nbootstrap API key (shown once): %s\n", result.SpaceID, result.ApplicationID, result.APIKey)
-		return nil
+		_, err := fmt.Fprintf(cmd.OutOrStdout(), "default space: %s\ndefault application: %s\nbootstrap API key (shown once): %s\n", result.SpaceID, result.ApplicationID, result.APIKey)
+		return err
 	}}
 }
 func doctorCommand() *cobra.Command {
@@ -161,8 +161,8 @@ func operatorCommand() *cobra.Command {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", result.UserID, result.TOTPSecret, result.APIKey)
-		return nil
+		_, err = fmt.Fprintf(cmd.OutOrStdout(), "operator created: %s\noperator TOTP secret (shown once): %s\nbootstrap API key (shown once): %s\n", result.UserID, result.TOTPSecret, result.APIKey)
+		return err
 	}}
 	bootstrap.Flags().StringVar(&userID, "user-id", "", "existing user ID to promote to the first operator")
 	bootstrap.Flags().StringVar(&email, "email", "", "email for a new first operator account")
