@@ -401,6 +401,46 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	if badResourceResponse.Code != http.StatusBadRequest {
 		t.Fatalf("unregistered resource status=%d body=%s", badResourceResponse.Code, badResourceResponse.Body.String())
 	}
+	unboundMemberQuery := cloneValues(authorizeQuery)
+	unboundMemberQuery.Set("member_id", "mem_oauth_code_application")
+	unboundMemberRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+unboundMemberQuery.Encode(), nil)
+	unboundMemberRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	unboundMemberResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unboundMemberResponse, unboundMemberRequest)
+	if unboundMemberResponse.Code != http.StatusBadRequest || !strings.Contains(unboundMemberResponse.Body.String(), "not bound") {
+		t.Fatalf("unbound member status=%d body=%s", unboundMemberResponse.Code, unboundMemberResponse.Body.String())
+	}
+	outOfManifestQuery := cloneValues(authorizeQuery)
+	outOfManifestQuery.Set("scope", "auth.authz:check")
+	outOfManifestRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+outOfManifestQuery.Encode(), nil)
+	outOfManifestRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	outOfManifestResponse := httptest.NewRecorder()
+	mux.ServeHTTP(outOfManifestResponse, outOfManifestRequest)
+	if outOfManifestResponse.Code != http.StatusBadRequest || !strings.Contains(outOfManifestResponse.Body.String(), "not allowed") {
+		t.Fatalf("out-of-manifest scope status=%d body=%s", outOfManifestResponse.Code, outOfManifestResponse.Body.String())
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description, principal_kinds, agent_approval, risk, status)
+		VALUES ('prm_oauth_unheld_read', 'oauth.unheld:read', 'OAuth unheld read', '["human","agent","application"]'::jsonb, 'none', 'low', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		UPDATE applications SET allowed_scopes = '["oauth.group:read","oauth.unheld:read"]'::jsonb,
+			manifest_permissions = '["oauth.group:read","oauth.unheld:read"]'::jsonb
+		WHERE id = 'app_oauth_code_protocol'
+	`); err != nil {
+		t.Fatal(err)
+	}
+	unheldScopeQuery := cloneValues(authorizeQuery)
+	unheldScopeQuery.Set("scope", "oauth.unheld:read")
+	unheldScopeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+unheldScopeQuery.Encode(), nil)
+	unheldScopeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+	unheldScopeResponse := httptest.NewRecorder()
+	mux.ServeHTTP(unheldScopeResponse, unheldScopeRequest)
+	if unheldScopeResponse.Code != http.StatusBadRequest || !strings.Contains(unheldScopeResponse.Body.String(), "does not hold") {
+		t.Fatalf("unheld scope status=%d body=%s", unheldScopeResponse.Code, unheldScopeResponse.Body.String())
+	}
 	authorizeRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
 	authorizeRequest.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
 	authorizeResponse := httptest.NewRecorder()
@@ -463,6 +503,9 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 	claims, active, err := sessions.Introspect(ctx, tokenBody.AccessToken, clientID)
 	if err != nil || !active || claims.Type != "agent" || claims.Subject == owner.ID {
 		t.Fatalf("OAuth access claims=%+v active=%v err=%v", claims, active, err)
+	}
+	if _, active, err := sessions.Introspect(ctx, tokenBody.AccessToken, "https://other-client.test/metadata.json"); err != nil || active {
+		t.Fatalf("OAuth token was accepted for another audience: active=%v err=%v", active, err)
 	}
 	agentMember, err := agents.OAuthAgent(ctx, owner.ID, clientID)
 	if err != nil || agentMember.ID != claims.Subject {
