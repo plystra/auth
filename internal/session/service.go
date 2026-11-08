@@ -277,6 +277,16 @@ func (s *Service) CreateAgentDelegatedAccess(ctx context.Context, memberID, spac
 }
 
 func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, _ string, scopes []string, notAfter int64) (Tokens, error) {
+	agent, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Tokens{}, apierr.New("invalid_grant", "agent credential is invalid or expired")
+	}
+	if err != nil {
+		return Tokens{}, err
+	}
+	if agent.SpaceID != spaceID || agent.Status != "active" || agent.GroupStatus != "active" || !agent.ExpiresAt.Valid || !agent.ExpiresAt.Time.After(time.Now().UTC()) {
+		return Tokens{}, apierr.New("invalid_grant", "agent credential is invalid or expired")
+	}
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
