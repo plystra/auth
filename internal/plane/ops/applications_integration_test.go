@@ -2,10 +2,12 @@ package ops
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/jackc/pgx/v5"
@@ -15,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
+	"github.com/pquerna/otp/totp"
 )
 
 func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testing.T) {
@@ -35,11 +38,12 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 	}
 	t.Cleanup(st.Close)
 	key := []byte(strings.Repeat("r", 32))
-	svc, err := operator.New(st, &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}, [][]byte{key})
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}
+	svc, err := operator.New(st, factors, [][]byte{key})
 	if err != nil {
 		t.Fatal(err)
 	}
-	createOpsTestUser(t, st, "usr_app_reviewer", `["ops:applications:manage"]`)
+	createOpsTestUser(t, st, "usr_app_reviewer", `["ops:applications:manage","ops:session"]`)
 	createOpsTestUser(t, st, "usr_app_unrelated", `["ops:users:manage"]`)
 	reviewerToken, reviewerSession := createOpsTestSession(t, st, key, "usr_app_reviewer", "r")
 	unrelatedToken, unrelatedSession := createOpsTestSession(t, st, key, "usr_app_unrelated", "u")
@@ -74,6 +78,24 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 		mux.ServeHTTP(out, r)
 		return out
 	}
+	stepUpReview := func(operation string, value any) {
+		t.Helper()
+		enrollment, err := factors.EnrollTOTPForUser(ctx, "usr_app_reviewer", "reviewer@example.test", operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(map[string]any{"mfa_code": code, "operation": operation, "request": value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := request(http.MethodPost, "/ops/v1/auth/step-up", reviewerToken, string(body)); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"accepted":true`) {
+			t.Fatalf("review step-up %s = %d %s", operation, got.Code, got.Body.String())
+		}
+	}
 	path := "/ops/v1/applications/app_public_review/approve"
 	body := `{"manifest_permissions":["auth.authz:check"]}`
 	if got := request(http.MethodGet, "/ops/v1/applications", reviewerToken, ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"review_status":"pending"`) {
@@ -98,7 +120,7 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 	if got := request(http.MethodPost, path, reviewerToken, `{"manifest_permissions":["auth.agents:create"]}`); got.Code != http.StatusBadRequest || !strings.Contains(got.Body.String(), "VALIDATION_FAILED") {
 		t.Fatalf("approval outside requested manifest = %d %s", got.Code, got.Body.String())
 	}
-	seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.approve", map[string]any{"application_id": "app_public_review", "manifest_permissions": []string{"auth.authz:check"}})
+	stepUpReview("ops.applications.approve", map[string]any{"application_id": "app_public_review", "manifest_permissions": []string{"auth.authz:check"}})
 	if got := request(http.MethodPost, path, reviewerToken, body); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"review_status":"approved"`) {
 		t.Fatalf("approved trimmed manifest = %d %s", got.Code, got.Body.String())
 	}
@@ -110,7 +132,7 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 		t.Fatalf("approval proof reused = %d %s", got.Code, got.Body.String())
 	}
 	rejectPath := "/ops/v1/applications/app_public_reject/reject"
-	seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.reject", map[string]any{"application_id": "app_public_reject"})
+	stepUpReview("ops.applications.reject", map[string]any{"application_id": "app_public_reject"})
 	if got := request(http.MethodPost, rejectPath, reviewerToken, ""); got.Code != http.StatusOK {
 		t.Fatalf("rejected application = %d %s", got.Code, got.Body.String())
 	}
