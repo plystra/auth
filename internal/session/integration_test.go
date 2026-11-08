@@ -349,14 +349,18 @@ func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
 			return Settings{AccessTTL: time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: 30 * time.Minute}, nil
 		},
 	}
-	if _, err := sessions.CreateAgentAccess(ctx, child.ID, "spc_wrong", security.DefaultApplicationAudience); err == nil {
-		t.Fatal("Agent access token accepted a Space other than the member's Space")
-	} else {
+	assertInvalidAgentAccess := func(spaceID, reason string) {
+		t.Helper()
+		_, err := sessions.CreateAgentAccess(ctx, child.ID, spaceID, security.DefaultApplicationAudience)
+		if err == nil {
+			t.Fatalf("%s Agent received an access token", reason)
+		}
 		var public *apierr.Error
 		if !errors.As(err, &public) || public.Code != "invalid_grant" {
-			t.Fatalf("mismatched Agent Space = %v, want invalid_grant", err)
+			t.Fatalf("%s Agent access = %v, want invalid_grant", reason, err)
 		}
 	}
+	assertInvalidAgentAccess("spc_wrong", "mismatched Space")
 	tokens, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, security.DefaultApplicationAudience)
 	if err != nil {
 		t.Fatal(err)
@@ -377,14 +381,21 @@ func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE members SET status = 'suspended' WHERE id = $1`, child.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, security.DefaultApplicationAudience); err == nil {
-		t.Fatal("suspended Agent received an access token")
-	} else {
-		var public *apierr.Error
-		if !errors.As(err, &public) || public.Code != "invalid_grant" {
-			t.Fatalf("suspended Agent access = %v, want invalid_grant", err)
-		}
+	assertInvalidAgentAccess(space.ID, "suspended")
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET status = 'active' WHERE id = $1`, child.ID); err != nil {
+		t.Fatal(err)
 	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'suspended' WHERE id = $1`, child.HomeGroupID); err != nil {
+		t.Fatal(err)
+	}
+	assertInvalidAgentAccess(space.ID, "suspended home group")
+	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'active' WHERE id = $1`, child.HomeGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET expires_at = now() - interval '1 second' WHERE id = $1`, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertInvalidAgentAccess(space.ID, "expired")
 }
 
 func hmacSHA256(key []byte, value string) []byte {
