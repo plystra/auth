@@ -21,6 +21,50 @@ import (
 	"github.com/pquerna/otp/totp"
 )
 
+func TestPrincipalStepUpAcceptsApplicationAndInvitationOperations(t *testing.T) {
+	ctx := context.Background()
+	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", actor.ID, nil, "step-up operations test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	(&API{Accounts: &account.Service{Store: st}, Authorization: authz, Sessions: sessions, Signer: signer, Factors: factors}).Register(
+		humago.New(mux, route.HumaConfig("step-up operations test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	for _, operation := range []string{
+		"applications.register", "applications.keys.create", "applications.keys.rotate",
+		"installations.create", "invitations.create",
+	} {
+		t.Run(operation, func(t *testing.T) {
+			enrollment, err := factors.EnrollTOTPForUser(ctx, "usr_principal_actor", "actor@example.test", operation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := json.Marshal(map[string]any{
+				"mfa_code": code, "operation": operation, "request": map[string]any{"target": operation},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/v1/auth/step-up", strings.NewReader(string(body)))
+			req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+			req.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"accepted":true`) {
+				t.Fatalf("step-up operation %s returned status %d", operation, response.Code)
+			}
+		})
+	}
+}
+
 func TestPrincipalStepUpEndpointBindsProofToManagementRequest(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)

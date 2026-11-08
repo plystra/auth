@@ -12,14 +12,23 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
+	"github.com/pquerna/otp/totp"
 )
 
 func TestPrivateApplicationRegistrationAndListingRequireAuthorityAndStepUp(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, spaceID, sessions, signer := newPrincipalFixture(t)
 	seedTestInlineGrant(t, st, spaceID, actor.ID, actor.ID, "auth.applications:manage")
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}
+	sessions.Factors = factors
+	enrollment, err := factors.EnrollTOTPForUser(ctx, "usr_principal_actor", "actor@example.test", "application registration")
+	if err != nil {
+		t.Fatal(err)
+	}
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Applications: apps}
 	mux := http.NewServeMux()
@@ -43,10 +52,26 @@ func TestPrivateApplicationRegistrationAndListingRequireAuthorityAndStepUp(t *te
 	if withoutStepUp.Code != http.StatusForbidden || !strings.Contains(withoutStepUp.Body.String(), "STEP_UP_REQUIRED") {
 		t.Fatalf("registration without step-up = %d %s", withoutStepUp.Code, withoutStepUp.Body.String())
 	}
-	seedStepUpProof(t, st, tokens.SessionID, "applications.register", map[string]any{
+	stepUpRequest := map[string]any{
 		"space_id": spaceID, "name": "Billing", "manifest_permissions": []string{"auth.authz:check"},
 		"redirect_uris": []string{"https://billing.example.test/callback"},
-	})
+	}
+	code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepBody, err := json.Marshal(map[string]any{"mfa_code": code, "operation": "applications.register", "request": stepUpRequest})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepRequest := httptest.NewRequest(http.MethodPost, "/v1/auth/step-up", strings.NewReader(string(stepBody)))
+	stepRequest.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	stepRequest.Header.Set("Content-Type", "application/json")
+	stepped := httptest.NewRecorder()
+	handler.ServeHTTP(stepped, stepRequest)
+	if stepped.Code != http.StatusOK || !strings.Contains(stepped.Body.String(), `"accepted":true`) {
+		t.Fatalf("application registration step-up = %d %s", stepped.Code, stepped.Body.String())
+	}
 	created := post(payload)
 	if created.Code != http.StatusOK {
 		t.Fatalf("registered application = %d %s", created.Code, created.Body.String())
