@@ -194,6 +194,21 @@ func TestGroupCreationRouteDeclaresHumanAgentAndAuthoritativeCheck(t *testing.T)
 	t.Fatal("group creation route was not registered")
 }
 
+func TestAgentGrantRouteDeclaresSystemAssignmentRight(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Name != "me.agents.grants.replace" {
+			continue
+		}
+		if spec.Method != http.MethodPut || spec.Path != "/v1/me/agents/{id}/grants" || spec.Permission != "" || spec.ConditionalPermission != "auth.grants:assign" || !spec.SystemAssignmentRight || !spec.AuthoritativeCheck || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("Agent grant route = %+v, want owner system right with ordinary assignment fallback", spec)
+		}
+		return
+	}
+	t.Fatal("Agent grant route was not registered")
+}
+
 func TestInvitationCreationRouteDeclaresHumanAgent(t *testing.T) {
 	api := &API{}
 	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))

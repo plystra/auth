@@ -46,6 +46,7 @@ type Declaration struct {
 	Plane                 Plane
 	Permission            string
 	ConditionalPermission string
+	SystemAssignmentRight bool
 	Subjects              []Subject
 	StepUp                bool
 	AuthoritativeCheck    bool
@@ -72,6 +73,10 @@ func WithStepUp() SpecOption {
 
 func WithConditionalPermission(permission string) SpecOption {
 	return func(spec *Declaration) { spec.ConditionalPermission = permission }
+}
+
+func WithSystemAssignmentRight() SpecOption {
+	return func(spec *Declaration) { spec.SystemAssignmentRight = true }
 }
 
 func WithAuthoritativeCheck() SpecOption {
@@ -196,7 +201,7 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	if !ok || declaration.Name == "" || declaration.Method == "" || declaration.Path == "" || declaration.Plane == "" || len(declaration.Subjects) == 0 {
 		panic("route: incomplete route.Spec")
 	}
-	if declaration.Permission == "" && !contains(declaration.Subjects, Public) && !userOnly(declaration.Subjects) {
+	if declaration.Permission == "" && !declaration.SystemAssignmentRight && !contains(declaration.Subjects, Public) && !userOnly(declaration.Subjects) {
 		panic("route: non-public route requires permission")
 	}
 	registry.Lock()

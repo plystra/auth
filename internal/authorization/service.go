@@ -1227,11 +1227,19 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	return out, err
 }
 
+type inlineGrantMode uint8
+
+const (
+	inlineGrantOrdinary inlineGrantMode = iota
+	inlineGrantOAuthConsent
+	inlineGrantAgentOwner
+)
+
 // CreateInlineGrant records a permission set directly on one grant. It is
 // intentionally separate from named roles so short-lived consent (such as an
 // OAuth Agent authorization) does not create or mutate the Space role catalog.
 func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
-	return s.createInlineGrant(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, false)
+	return s.createInlineGrant(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantOrdinary)
 }
 
 // CreateOAuthInlineGrant applies the system assignment right from the
@@ -1240,7 +1248,7 @@ func (s *Service) CreateInlineGrant(ctx context.Context, actorMemberID, spaceID,
 // auth.grants:assign. The owner's permission is still evaluated by CheckTx for
 // every requested permission inside the same transaction.
 func (s *Service) CreateOAuthInlineGrant(ctx context.Context, ownerMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
-	return s.createInlineGrant(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, true)
+	return s.createInlineGrant(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantOAuthConsent)
 }
 
 // ValidateOAuthGrant checks the owner's system assignment right before an
@@ -1251,11 +1259,11 @@ func (s *Service) ValidateOAuthGrant(ctx context.Context, ownerMemberID, spaceID
 		if err := lockAuthorizationMembersTx(ctx, q, ownerMemberID); err != nil {
 			return err
 		}
-		return s.authorizeOAuthGrantTx(ctx, q, ownerMemberID, spaceID, uniqueSorted(permissions))
+		return s.authorizeAgentOwnerGrantTx(ctx, q, ownerMemberID, spaceID, uniqueSorted(permissions), inlineGrantOAuthConsent)
 	})
 }
 
-func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, oauthConsent bool) (Grant, error) {
+func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1291,7 +1299,7 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if oauthConsent {
+		if mode == inlineGrantOAuthConsent {
 			agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: member.ID})
 			if agentErr != nil {
 				if errors.Is(agentErr, pgx.ErrNoRows) {
@@ -1302,7 +1310,7 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 			if agent.Source.String != "oauth" || !agent.CreatedByMemberID.Valid || agent.CreatedByMemberID.String != actorMemberID {
 				return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an owner's OAuth Agent")
 			}
-			if err := s.authorizeOAuthGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions); err != nil {
+			if err := s.authorizeAgentOwnerGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions, mode); err != nil {
 				return err
 			}
 		} else if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
@@ -1320,13 +1328,13 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if !oauthConsent {
+		if mode == inlineGrantOrdinary {
 			if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 				return err
 			}
 		}
 		action := "grant.inline.create"
-		if oauthConsent {
+		if mode == inlineGrantOAuthConsent {
 			action = "grant.oauth_consent.create"
 		}
 		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {
@@ -1338,12 +1346,29 @@ func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID,
 	return out, err
 }
 
-func (s *Service) authorizeOAuthGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID string, permissions []string) error {
+func (s *Service) authorizeAgentOwnerGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID string, permissions []string, mode inlineGrantMode) error {
+	owner, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: ownerMemberID})
+	if err != nil {
+		return err
+	}
 	assignments, _, err := s.assignmentsQueries(ctx, q, ownerMemberID)
 	if err != nil {
 		return err
 	}
+	denied := make([]string, 0)
 	for _, permission := range permissions {
+		catalog, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: permission})
+		if errors.Is(err, pgx.ErrNoRows) {
+			denied = append(denied, permission)
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if owner.Type == "agent" && catalog.AgentApproval == "required" {
+			denied = append(denied, permission)
+			continue
+		}
 		allowed := false
 		for _, assignment := range assignments {
 			if !slices.Contains(assignment.Permissions, permission) || !slices.Contains(assignment.Envelope, permission) {
@@ -1371,8 +1396,14 @@ func (s *Service) authorizeOAuthGrantTx(ctx context.Context, q *db.Queries, owne
 			}
 		}
 		if !allowed {
-			return apierr.New("invalid_scope", "the owner does not hold the requested permission")
+			denied = append(denied, permission)
 		}
+	}
+	if len(denied) > 0 {
+		if mode == inlineGrantOAuthConsent {
+			return &apierr.Error{Code: "invalid_scope", Message: "the owner cannot grant the requested scopes", Details: map[string]string{"uncovered": strings.Join(denied, ",")}}
+		}
+		return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "the Agent grant exceeds the owner's current authority", Details: map[string]string{"uncovered": strings.Join(denied, ",")}}
 	}
 	return nil
 }
@@ -1381,16 +1412,22 @@ func (s *Service) authorizeOAuthGrantTx(ctx context.Context, q *db.Queries, owne
 // Named-role grants remain intact; the resulting effective authority is
 // checked once before the transaction can commit.
 func (s *Service) ReplaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
-	return s.replaceInlineGrants(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, false)
+	return s.replaceInlineGrants(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantOrdinary)
 }
 
 // ReplaceOAuthInlineGrants updates an existing OAuth Agent's consent grant
 // using the same owner system assignment right as initial consent.
 func (s *Service) ReplaceOAuthInlineGrants(ctx context.Context, ownerMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
-	return s.replaceInlineGrants(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, true)
+	return s.replaceInlineGrants(ctx, ownerMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantOAuthConsent)
 }
 
-func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, oauthConsent bool) (Grant, error) {
+// ReplaceAgentGrants applies the direct owner's system assignment right. Other
+// managers still use the ordinary grant permission and authority-delta check.
+func (s *Service) ReplaceAgentGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string) (Grant, error) {
+	return s.replaceInlineGrants(ctx, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, inlineGrantAgentOwner)
+}
+
+func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	permissions = uniqueSorted(permissions)
 	if len(permissions) == 0 || len(permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "at least one permission is required")
@@ -1426,22 +1463,35 @@ func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
 			return err
 		}
-		if oauthConsent {
+		systemOwner := false
+		if mode == inlineGrantOAuthConsent || mode == inlineGrantAgentOwner {
 			agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: member.ID})
 			if agentErr != nil {
 				if errors.Is(agentErr, pgx.ErrNoRows) {
-					return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an OAuth Agent")
+					return apierr.New("VALIDATION_FAILED", "only an Agent can receive an owner grant")
 				}
 				return agentErr
 			}
-			if agent.Source.String != "oauth" || !agent.CreatedByMemberID.Valid || agent.CreatedByMemberID.String != actorMemberID {
+			if mode == inlineGrantOAuthConsent && (agent.Source.String != "oauth" || !agent.CreatedByMemberID.Valid || agent.CreatedByMemberID.String != actorMemberID) {
 				return apierr.New("VALIDATION_FAILED", "OAuth consent can only grant an owner's OAuth Agent")
 			}
-			if err := s.authorizeOAuthGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions); err != nil {
+			if mode == inlineGrantAgentOwner && agent.Source.String == "oauth" {
+				return apierr.New("VALIDATION_FAILED", "OAuth Agent grants can only be changed through consent")
+			}
+			if mode == inlineGrantOAuthConsent || (agent.OwnerMemberID.Valid && agent.OwnerMemberID.String == actorMemberID) {
+				if agent.Status != "active" || agent.GroupStatus != "active" {
+					return apierr.New("OWNER_INACTIVE", "the Agent or its group is not active")
+				}
+				if err := s.authorizeAgentOwnerGrantTx(ctx, q, actorMemberID, member.SpaceID, permissions, mode); err != nil {
+					return err
+				}
+				systemOwner = true
+			}
+		}
+		if !systemOwner {
+			if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
 				return err
 			}
-		} else if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
-			return err
 		}
 		before, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)
 		if err != nil {
@@ -1458,13 +1508,13 @@ func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceI
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if !oauthConsent {
+		if !systemOwner {
 			if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 				return err
 			}
 		}
 		action := "grant.replace"
-		if oauthConsent {
+		if mode == inlineGrantOAuthConsent {
 			action = "grant.oauth_consent.replace"
 		}
 		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {

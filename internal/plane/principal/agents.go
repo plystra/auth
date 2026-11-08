@@ -81,7 +81,7 @@ func (a *API) registerAgentRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("me.agents.list", "GET", "/v1/me/agents", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.listAgents)
 	route.Register(api, route.NewSpec("me.agents.create", "POST", "/v1/me/agents", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAgent)
 	route.Register(api, route.NewSpec("me.agents.rotate", "POST", "/v1/me/agents/{id}/rotate", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateAgent)
-	route.Register(api, route.NewSpec("me.agents.grants.replace", "PUT", "/v1/me/agents/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.replaceAgentGrants)
+	route.Register(api, route.NewSpec("me.agents.grants.replace", "PUT", "/v1/me/agents/{id}/grants", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithSystemAssignmentRight(), route.WithConditionalPermission("auth.grants:assign"), route.WithAuthoritativeCheck()), a.replaceAgentGrants)
 	route.Register(api, route.NewSpec("me.agents.stop", "POST", "/v1/me/agents/{id}/stop", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.stopAgent)
 	route.Register(api, route.NewSpec("me.agents.delete", "DELETE", "/v1/me/agents/{id}", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.deleteAgent)
 }
@@ -173,7 +173,7 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if !canManage {
 		return nil, apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 	}
-	grant, err := a.Authorization.ReplaceInlineGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	grant, err := a.Authorization.ReplaceAgentGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
 	if err != nil {
 		return nil, err
 	}

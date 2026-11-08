@@ -1382,6 +1382,128 @@ func TestAgentGrantReplacementEndpointReplacesDirectGrants(t *testing.T) {
 	}
 }
 
+func TestOwnerDelegatesToAgentWithoutOrdinaryAssignmentRight(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_principal_actor", Name: "system-right-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		DELETE FROM role_permissions rp USING permissions p, authorization_grants g
+		WHERE rp.permission_id = p.id AND rp.role_id = g.role_id
+		  AND g.grantee_member_id = $1 AND p.key = 'auth.grants:assign'
+	`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $1`, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: owner.ID, Permission: "auth.grants:assign", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Deny {
+		t.Fatalf("ordinary grant permission = %+v err=%v, want deny", decision, err)
+	}
+	userTokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &agentGrantInput{Authorization: "Bearer " + userTokens.AccessToken, ID: created.ID}
+	in.Body.Permissions = []string{"auth.members:read"}
+	in.Body.Scope = "space"
+	in.Body.AnchorSpaceID = spaceID
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("principal test", "1.0.0")))
+	body, err := json.Marshal(in.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/me/agents/"+created.ID+"/grants", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", in.Authorization)
+	req.Header.Set("Content-Type", "application/json")
+	res := httptest.NewRecorder()
+	mux.ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("owner system assignment right over HTTP = %d %s", res.Code, res.Body.String())
+	}
+	decision, _, err = authz.Check(ctx, authorization.CheckRequest{MemberID: created.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Allow {
+		t.Fatalf("Agent delegated permission = %+v err=%v, want allow", decision, err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description, principal_kinds, agent_approval, risk, status)
+		VALUES ('prm_agent_human_only', 'agent.human:only', 'Human only', '["human"]'::jsonb, 'none', 'low', 'active')
+	`); err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "agent.human:only")
+	in.Body.Permissions = []string{"agent.human:only"}
+	_, err = api.replaceAgentGrants(ctx, in)
+	assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	decision, _, err = authz.Check(ctx, authorization.CheckRequest{MemberID: created.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Allow {
+		t.Fatalf("denied principal-kind replacement changed Agent authority: %+v err=%v", decision, err)
+	}
+	oauthAgent, err := agents.CreateOAuth(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_principal_actor", Name: "OAuth Agent", Source: "oauth", OAuthClientID: "https://client.example.test/metadata.json", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.ID = oauthAgent.ID
+	in.Body.Permissions = []string{"auth.members:read"}
+	_, err = api.replaceAgentGrants(ctx, in)
+	assertPrincipalError(t, err, "VALIDATION_FAILED")
+}
+
+func TestAgentOwnerCannotDelegateApprovalRequiredPermission(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	agents := &agent.Service{Store: st}
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_principal_actor", Name: "delegating-parent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, CreatedByUser: "usr_principal_actor", Name: "delegating-child", ExpiresAt: parent.ExpiresAt.Add(-time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTestInlineGrant(t, st, spaceID, owner.ID, parent.ID, "auth.members:read")
+	seedTestInlineGrant(t, st, spaceID, owner.ID, parent.ID, "auth.connections:manage")
+	parentTokens, err := sessions.CreateAgentAccess(ctx, parent.ID, spaceID, security.DefaultApplicationAudience)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
+	in := &agentGrantInput{Authorization: "Bearer " + parentTokens.AccessToken, ID: child.ID}
+	in.Body.Permissions = []string{"auth.members:read"}
+	in.Body.Scope = "space"
+	in.Body.AnchorSpaceID = spaceID
+	if _, err := api.replaceAgentGrants(ctx, in); err != nil {
+		t.Fatalf("parent Agent could not delegate usable permission: %v", err)
+	}
+	decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: child.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Allow {
+		t.Fatalf("child delegated permission = %+v err=%v, want allow", decision, err)
+	}
+	in.Body.Permissions = []string{"auth.connections:manage"}
+	_, err = api.replaceAgentGrants(ctx, in)
+	assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	decision, _, err = authz.Check(ctx, authorization.CheckRequest{MemberID: child.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Allow {
+		t.Fatalf("denied replacement changed child authority: %+v err=%v", decision, err)
+	}
+	if _, err := st.Pool.Exec(ctx, `
+		UPDATE authorization_grants SET revoked_at = now()
+		WHERE grantee_member_id = $1 AND permission_keys ? 'auth.members:read'
+	`, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	decision, _, err = authz.Check(ctx, authorization.CheckRequest{MemberID: child.ID, Permission: "auth.members:read", ResourceSpace: spaceID})
+	if err != nil || decision.Effect != engine.Deny || decision.Code != "OWNER_ENVELOPE_EXCLUDED" {
+		t.Fatalf("child authority after parent revocation = %+v err=%v, want owner-envelope deny", decision, err)
+	}
+}
+
 func newPrincipalFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, *session.Service, *security.Signer) {
 	t.Helper()
 	ctx := context.Background()
