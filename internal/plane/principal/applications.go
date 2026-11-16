@@ -362,7 +362,7 @@ func (a *API) updateApplication(ctx context.Context, in *updateApplicationInput)
 	if err != nil {
 		return nil, err
 	}
-	updated, err := a.Applications.UpdatePrivate(ctx, actorID, in.ApplicationID, application.UpdateInput{
+	updated, err := a.Applications.Update(ctx, actorID, in.ApplicationID, application.UpdateInput{
 		Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs, ManifestPermissions: in.Body.ManifestPermissions,
 	})
 	if err != nil {

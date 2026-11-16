@@ -19,7 +19,7 @@ SET manifest_permissions = sqlc.arg(manifest_permissions),
     pending_manifest_permissions = NULL,
     review_status = 'approved'
 WHERE id = sqlc.arg(application_id) AND visibility = 'public'
-  AND review_status = 'pending';
+  AND pending_manifest_permissions IS NOT NULL;
 
 -- name: SuspendApplicationGlobally :exec
 UPDATE applications SET status = 'suspended'
@@ -43,6 +43,7 @@ WHERE id = sqlc.arg(member_id) AND type = 'application' AND status = 'active';
 
 -- name: RejectPublicApplicationReview :execrows
 UPDATE applications
-SET pending_manifest_permissions = NULL, review_status = 'rejected'
+SET pending_manifest_permissions = NULL,
+    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
 WHERE id = sqlc.arg(application_id) AND visibility = 'public'
-  AND review_status = 'pending';
+  AND pending_manifest_permissions IS NOT NULL;

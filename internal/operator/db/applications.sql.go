@@ -18,7 +18,7 @@ SET manifest_permissions = $1,
     pending_manifest_permissions = NULL,
     review_status = 'approved'
 WHERE id = $2 AND visibility = 'public'
-  AND review_status = 'pending'
+  AND pending_manifest_permissions IS NOT NULL
 `
 
 type ApprovePublicApplicationReviewParams struct {
@@ -175,9 +175,10 @@ func (q *Queries) LockPublicApplicationReview(ctx context.Context, arg LockPubli
 
 const rejectPublicApplicationReview = `-- name: RejectPublicApplicationReview :execrows
 UPDATE applications
-SET pending_manifest_permissions = NULL, review_status = 'rejected'
+SET pending_manifest_permissions = NULL,
+    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
 WHERE id = $1 AND visibility = 'public'
-  AND review_status = 'pending'
+  AND pending_manifest_permissions IS NOT NULL
 `
 
 type RejectPublicApplicationReviewParams struct {

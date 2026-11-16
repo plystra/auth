@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1053,6 +1054,76 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil || reusedAgent.ID != oauthAgent.ID {
 		t.Fatalf("repeat OAuth authorization created another Agent: %+v err=%v", reusedAgent, err)
 	}
+	t.Run("PublicManifestReviewAndCustomerReapproval", func(t *testing.T) {
+		patchPath := "/v1/applications/" + appResult.Data.ID
+		approvalPath := "/ops/v1/applications/" + appResult.Data.ID + "/approve"
+		installationsPath := "/v1/spaces/" + customer.spaceID + "/installations"
+		installation := func() application.Installation {
+			t.Helper()
+			items := mvpData[[]application.Installation](t, mvpJSON(t, principalHandler, http.MethodGet, installationsPath, customer.token, nil))
+			for _, item := range items {
+				if item.ID == installationResult.Data.ID {
+					return item
+				}
+			}
+			t.Fatal("customer installation disappeared during manifest review")
+			return application.Installation{}
+		}
+		publish := func(permissions []string) {
+			t.Helper()
+			step := map[string]any{
+				"mfa_code": nextTOTP(secretValue), "operation": "ops.applications.approve",
+				"request": map[string]any{"application_id": appResult.Data.ID, "manifest_permissions": permissions},
+			}
+			mvpData[struct{ Accepted bool }](t, mvpJSON(t, handler, http.MethodPost, "/ops/v1/auth/step-up", loginResult.Data.AccessToken, step))
+			approved := mvpData[operator.PublicApplicationReview](t, mvpJSON(t, handler, http.MethodPost, approvalPath, loginResult.Data.AccessToken,
+				map[string]any{"manifest_permissions": permissions}))
+			if !slices.Equal(approved.ManifestPermissions, permissions) {
+				t.Fatal("public manifest approval returned a different scope")
+			}
+		}
+		shrunk := slices.DeleteFunc(slices.Clone(manifest), func(key string) bool { return key == "invoice:approve" })
+		slices.Sort(shrunk)
+		pending := mvpData[application.PublishedApplication](t, mvpJSON(t, principalHandler, http.MethodPatch, patchPath, publisher.token,
+			map[string]any{"manifest_permissions": shrunk}))
+		if pending.ReviewStatus != "approved" || !slices.Contains(pending.ManifestPermissions, "invoice:approve") ||
+			!slices.Equal(pending.PendingManifestPermissions, shrunk) || !slices.Contains(installation().ApprovedPermissions, "invoice:approve") {
+			t.Fatal("unreviewed public update changed the live customer scope")
+		}
+		publish(shrunk)
+		if slices.Contains(installation().ApprovedPermissions, "invoice:approve") {
+			t.Fatal("approved manifest shrink did not reach the customer installation")
+		}
+		removedScope := url.Values{
+			"response_type": {"code"}, "client_id": {appResult.Data.ClientID}, "redirect_uri": {"https://saas.example.test/callback"},
+			"scope": {"invoice:approve"}, "code_challenge": {base64.RawURLEncoding.EncodeToString(challenge[:])}, "code_challenge_method": {"S256"},
+			"state": {"manifest-removed"}, "nonce": {"manifest-removed-nonce"},
+		}
+		removedRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+removedScope.Encode(), nil)
+		removedResponse := httptest.NewRecorder()
+		principalHandler.ServeHTTP(removedResponse, removedRequest)
+		if removedResponse.Code != http.StatusBadRequest || !strings.Contains(removedResponse.Body.String(), "invalid_scope") {
+			t.Fatalf("removed OAuth scope still authorized: status=%d", removedResponse.Code)
+		}
+		expanded := slices.Clone(manifest)
+		slices.Sort(expanded)
+		mvpData[application.PublishedApplication](t, mvpJSON(t, principalHandler, http.MethodPatch, patchPath, publisher.token,
+			map[string]any{"manifest_permissions": expanded}))
+		publish(expanded)
+		if slices.Contains(installation().ApprovedPermissions, "invoice:approve") {
+			t.Fatal("operator approval expanded a customer installation without its approval")
+		}
+		approved := mvpData[application.Installation](t, mvpJSON(t, principalHandler, http.MethodPut,
+			installationsPath+"/"+installationResult.Data.ID+"/approvals", customer.token, nil))
+		if !slices.Equal(approved.ApprovedPermissions, expanded) {
+			t.Fatal("customer reapproval did not restore the explicitly approved scope")
+		}
+		events := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet,
+			"/v1/spaces/"+customer.spaceID+"/audit-logs?action=application.installation.manifest.narrow", customer.token, nil))
+		if len(events) != 1 || events[0].ApplicationID != appResult.Data.ID || events[0].MemberID != approved.MemberID {
+			t.Fatal("customer cannot correlate its public manifest narrowing audit")
+		}
+	})
 	suspended := principalRequest("/v1/spaces/"+customer.spaceID+"/installations/"+installationResult.Data.ID+"/suspend", customer.token, "")
 	if suspended.Code != http.StatusOK {
 		t.Fatalf("customer application suspension = %d %s", suspended.Code, suspended.Body.String())

@@ -93,6 +93,10 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 	if shrunk.Code != http.StatusOK || !strings.Contains(shrunk.Body.String(), `"manifest_permissions":["auth.authz:check"]`) {
 		t.Fatalf("manifest shrink = %d %s", shrunk.Code, shrunk.Body.String())
 	}
+	client, err := apps.OAuthClient(ctx, appID)
+	if err != nil || !slices.Equal(client.AllowedScopes, []string{checkPermission}) {
+		t.Fatalf("private OAuth scope did not follow the saved manifest: %v", err)
+	}
 	for _, item := range []struct {
 		spaceID      string
 		installation application.Installation
@@ -129,6 +133,10 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 	expanded := patchApplication(t, handler, appID, token, `{"manifest_permissions":["auth.authz:check","auth.tokens:introspect"]}`)
 	if expanded.Code != http.StatusOK {
 		t.Fatalf("manifest expansion = %d %s", expanded.Code, expanded.Body.String())
+	}
+	client, err = apps.OAuthClient(ctx, appID)
+	if err != nil || !slices.Equal(client.AllowedScopes, []string{checkPermission, introspectPermission}) {
+		t.Fatalf("private OAuth scope did not follow the expanded manifest: %v", err)
 	}
 	for _, item := range []struct {
 		spaceID      string
@@ -371,7 +379,7 @@ func TestManifestShrinkSerializesConcurrentKeyCreation(t *testing.T) {
 	keyResult := make(chan error, 1)
 	go func() {
 		<-start
-		_, err := apps.UpdatePrivate(ctx, actorID, appID, application.UpdateInput{ManifestPermissions: &manifest})
+		_, err := apps.Update(ctx, actorID, appID, application.UpdateInput{ManifestPermissions: &manifest})
 		updateResult <- err
 	}()
 	go func() {

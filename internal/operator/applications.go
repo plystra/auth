@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/member"
@@ -51,6 +52,9 @@ func (s *Service) ListPublicApplications(ctx context.Context, raw string) ([]Pub
 }
 
 func (s *Service) ApprovePublicApplication(ctx context.Context, raw, applicationID string, permissions []string, digest []byte) (PublicApplicationReview, error) {
+	if len(digest) != sha256.Size {
+		return PublicApplicationReview{}, apierr.New("STEP_UP_REQUIRED", "Verify MFA for this manifest review.")
+	}
 	permissions = slices.Clone(permissions)
 	if len(permissions) == 0 || len(permissions) > 100 {
 		return PublicApplicationReview{}, apierr.New("VALIDATION_FAILED", "approved manifest must contain 1 to 100 permissions")
@@ -74,11 +78,15 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 		if err != nil {
 			return err
 		}
-		if row.ReviewStatus != "pending" || len(row.PendingManifestPermissions) == 0 {
+		if len(row.PendingManifestPermissions) == 0 {
 			return apierr.New("CONFLICT", "application has no pending manifest review")
 		}
 		var requested []string
 		if err := json.Unmarshal(row.PendingManifestPermissions, &requested); err != nil {
+			return err
+		}
+		var previous []string
+		if err := json.Unmarshal(row.ManifestPermissions, &previous); err != nil {
 			return err
 		}
 		for _, key := range permissions {
@@ -86,7 +94,8 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 				return apierr.New("VALIDATION_FAILED", "approved manifest must be a subset of the request")
 			}
 			permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
-			if errors.Is(err, pgx.ErrNoRows) || (err == nil && permission.Status != "active") {
+			if errors.Is(err, pgx.ErrNoRows) || (err == nil && (permission.Status == "disabled" ||
+				permission.Status == "deprecated" && !slices.Contains(previous, key))) {
 				return apierr.New("PERMISSION_DISABLED", "approved manifest contains an inactive permission")
 			}
 			if err != nil {
@@ -99,6 +108,11 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 			if !slices.Contains(kinds, "application") {
 				return apierr.New("VALIDATION_FAILED", "approved manifest contains a permission unavailable to applications")
 			}
+		}
+		if err := application.NarrowManifestAuthorityTx(ctx, q, applicationID, previous, permissions, audit.SecurityEvent{
+			ActorType: "operator_session", ActorID: current.UserID, UserID: current.UserID,
+		}); err != nil {
+			return err
 		}
 		changed, err := q.ApprovePublicApplicationReview(ctx, db.ApprovePublicApplicationReviewParams{
 			ApplicationID: applicationID, ManifestPermissions: approved,
@@ -120,6 +134,9 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 }
 
 func (s *Service) RejectPublicApplication(ctx context.Context, raw, applicationID string, digest []byte) error {
+	if len(digest) != sha256.Size {
+		return apierr.New("STEP_UP_REQUIRED", "Verify MFA for this manifest review.")
+	}
 	return s.Run(ctx, raw, "ops.applications.reject", "ops:applications:manage", digest, func(q *db.Queries, current Session) error {
 		row, err := q.LockPublicApplicationReview(ctx, db.LockPublicApplicationReviewParams{ApplicationID: applicationID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -128,7 +145,7 @@ func (s *Service) RejectPublicApplication(ctx context.Context, raw, applicationI
 		if err != nil {
 			return err
 		}
-		if row.ReviewStatus != "pending" {
+		if len(row.PendingManifestPermissions) == 0 {
 			return apierr.New("CONFLICT", "application has no pending manifest review")
 		}
 		changed, err := q.RejectPublicApplicationReview(ctx, db.RejectPublicApplicationReviewParams{ApplicationID: applicationID})

@@ -23,7 +23,7 @@ type UpdateInput struct {
 	ManifestPermissions *[]string
 }
 
-func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationID string, in UpdateInput) (PublishedApplication, error) {
+func (s *Service) Update(ctx context.Context, actorMemberID, applicationID string, in UpdateInput) (PublishedApplication, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return PublishedApplication{}, apierr.New("UNAVAILABLE", "application updates are unavailable")
 	}
@@ -80,17 +80,20 @@ func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationI
 		if decision.Effect != engine.Allow {
 			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 		}
-		if row.Visibility != "private" {
-			return apierr.New("CONFLICT", "public application changes require operator approval")
-		}
-		var oldRedirects, oldManifest []string
+		var oldRedirects, oldManifest, oldPending []string
 		if err := json.Unmarshal(row.RedirectUris, &oldRedirects); err != nil {
 			return err
 		}
 		if err := json.Unmarshal(row.ManifestPermissions, &oldManifest); err != nil {
 			return err
 		}
+		if len(row.PendingManifestPermissions) > 0 {
+			if err := json.Unmarshal(row.PendingManifestPermissions, &oldPending); err != nil {
+				return err
+			}
+		}
 		name, redirects, manifest := row.Name, oldRedirects, oldManifest
+		pending, reviewStatus := oldPending, row.ReviewStatus
 		if in.Name != nil {
 			name = *in.Name
 		}
@@ -98,8 +101,7 @@ func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationI
 			redirects = slices.Clone(*in.RedirectURIs)
 		}
 		if in.ManifestPermissions != nil {
-			manifest = slices.Clone(*in.ManifestPermissions)
-			for _, key := range manifest {
+			for _, key := range *in.ManifestPermissions {
 				permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
 				if errors.Is(err, pgx.ErrNoRows) {
 					return apierr.New("VALIDATION_FAILED", "application manifest contains an unknown permission")
@@ -111,11 +113,21 @@ func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationI
 					return apierr.New("PERMISSION_DISABLED", "application manifest contains a disabled permission")
 				}
 			}
+			if row.Visibility == "private" {
+				manifest = slices.Clone(*in.ManifestPermissions)
+			} else if !slices.Equal(*in.ManifestPermissions, oldManifest) || len(oldPending) > 0 || reviewStatus == "rejected" {
+				// Pending review never replaces an already approved runtime manifest.
+				pending = slices.Clone(*in.ManifestPermissions)
+				if len(oldManifest) == 0 {
+					reviewStatus = "pending"
+				}
+			}
 		}
-		if name == row.Name && slices.Equal(redirects, oldRedirects) && slices.Equal(manifest, oldManifest) {
+		if name == row.Name && slices.Equal(redirects, oldRedirects) && slices.Equal(manifest, oldManifest) &&
+			slices.Equal(pending, oldPending) && reviewStatus == row.ReviewStatus {
 			out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: name, ClientID: row.ClientID,
 				RedirectURIs: redirects, ManifestPermissions: manifest, Visibility: row.Visibility,
-				Status: row.Status, CreatedAt: row.CreatedAt.Time}
+				PendingManifestPermissions: pending, ReviewStatus: reviewStatus, Status: row.Status, CreatedAt: row.CreatedAt.Time}
 			return nil
 		}
 		manifestJSON, err := json.Marshal(manifest)
@@ -126,41 +138,21 @@ func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationI
 		if err != nil {
 			return err
 		}
-		removed := false
-		for _, key := range oldManifest {
-			if !slices.Contains(manifest, key) {
-				removed = true
-				break
-			}
+		if err := NarrowManifestAuthorityTx(ctx, q, applicationID, oldManifest, manifest, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID,
+		}); err != nil {
+			return err
 		}
-		if removed {
-			spaces, err := q.ListCurrentInstallationSpaces(ctx, db.ListCurrentInstallationSpacesParams{ApplicationID: applicationID})
+		var pendingJSON []byte
+		if pending != nil {
+			pendingJSON, err = json.Marshal(pending)
 			if err != nil {
 				return err
 			}
-			if err := q.TrimInstallationApprovalsToManifest(ctx, db.TrimInstallationApprovalsToManifestParams{
-				ApplicationID: applicationID, ManifestPermissions: manifestJSON,
-			}); err != nil {
-				return err
-			}
-			if err := q.TrimInstallationRolePermissionsToManifest(ctx, db.TrimInstallationRolePermissionsToManifestParams{
-				ApplicationID: applicationID, ManifestPermissions: manifestJSON,
-			}); err != nil {
-				return err
-			}
-			if err := q.TrimAPIKeyGrantsToManifest(ctx, db.TrimAPIKeyGrantsToManifestParams{
-				ApplicationID: applicationID, ManifestPermissions: manifestJSON,
-			}); err != nil {
-				return err
-			}
-			for _, spaceID := range spaces {
-				if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
-					return err
-				}
-			}
 		}
-		updated, err := q.UpdatePrivateApplication(ctx, db.UpdatePrivateApplicationParams{
+		updated, err := q.UpdateApplication(ctx, db.UpdateApplicationParams{
 			ApplicationID: applicationID, Name: name, RedirectUris: redirectJSON, ManifestPermissions: manifestJSON,
+			PendingManifestPermissions: pendingJSON, ReviewStatus: reviewStatus,
 		})
 		if err != nil {
 			return err
@@ -170,10 +162,66 @@ func (s *Service) UpdatePrivate(ctx context.Context, actorMemberID, applicationI
 		}
 		out = PublishedApplication{ID: updated.ID, SpaceID: updated.SpaceID, Name: updated.Name, ClientID: updated.ClientID,
 			RedirectURIs: redirects, ManifestPermissions: manifest, Visibility: updated.Visibility,
-			Status: updated.Status, CreatedAt: updated.CreatedAt.Time}
+			PendingManifestPermissions: pending, ReviewStatus: updated.ReviewStatus, Status: updated.Status, CreatedAt: updated.CreatedAt.Time}
 		return nil
 	})
 	return out, err
+}
+
+// NarrowManifestAuthorityTx is shared by publisher saves and operator reviews.
+// The caller holds the application lock and publishes the new manifest in this
+// transaction. Expansion never restores an installation approval or key grant.
+func NarrowManifestAuthorityTx(ctx context.Context, q *db.Queries, applicationID string, previous, next []string, actor audit.SecurityEvent) error {
+	removed := false
+	for _, key := range previous {
+		if !slices.Contains(next, key) {
+			removed = true
+			break
+		}
+	}
+	if !removed {
+		return nil
+	}
+	manifest, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	installations, err := q.ListManifestInstallationMembers(ctx, db.ListManifestInstallationMembersParams{ApplicationID: applicationID})
+	if err != nil {
+		return err
+	}
+	if err := q.TrimInstallationApprovalsToManifest(ctx, db.TrimInstallationApprovalsToManifestParams{
+		ApplicationID: applicationID, ManifestPermissions: manifest,
+	}); err != nil {
+		return err
+	}
+	if err := q.TrimInstallationRolePermissionsToManifest(ctx, db.TrimInstallationRolePermissionsToManifestParams{
+		ApplicationID: applicationID, ManifestPermissions: manifest,
+	}); err != nil {
+		return err
+	}
+	if err := q.TrimAPIKeyGrantsToManifest(ctx, db.TrimAPIKeyGrantsToManifestParams{
+		ApplicationID: applicationID, ManifestPermissions: manifest,
+	}); err != nil {
+		return err
+	}
+	var previousSpace string
+	for _, installation := range installations {
+		if installation.SpaceID != previousSpace {
+			if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: installation.SpaceID}); err != nil {
+				return err
+			}
+			previousSpace = installation.SpaceID
+		}
+		event := actor
+		event.Action, event.Outcome = "application.installation.manifest.narrow", "success"
+		event.MemberID, event.ApplicationID = installation.MemberID, applicationID
+		event.Resource = audit.Resource{Type: "installation", ID: installation.ID, SpaceID: installation.SpaceID}
+		if err := audit.WriteSecurityEvent(ctx, q, event); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID, spaceID, installationID string) (Installation, error) {
@@ -215,8 +263,8 @@ func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID
 		if app.Status != "active" {
 			return apierr.New("CONFLICT", "application is not active")
 		}
-		if app.Visibility != "private" {
-			return apierr.New("CONFLICT", "public application approval is unavailable")
+		if app.Visibility == "public" && app.ReviewStatus != "approved" {
+			return apierr.New("CONFLICT", "public application has no approved manifest")
 		}
 		var manifest, approved []string
 		if err := json.Unmarshal(app.ManifestPermissions, &manifest); err != nil {

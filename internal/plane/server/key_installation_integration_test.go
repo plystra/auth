@@ -98,7 +98,7 @@ func TestServerKeyImmediatelyLosesRemovedManifestPermission(t *testing.T) {
 		t.Fatalf("manifest key baseline = %d %s", baseline.Code, baseline.Body.String())
 	}
 	manifest := []string{"auth.tokens:introspect"}
-	if _, err := apps.UpdatePrivate(ctx, actor.ID, "app_server_test", application.UpdateInput{ManifestPermissions: &manifest}); err != nil {
+	if _, err := apps.Update(ctx, actor.ID, "app_server_test", application.UpdateInput{ManifestPermissions: &manifest}); err != nil {
 		t.Fatal(err)
 	}
 	denied := check()

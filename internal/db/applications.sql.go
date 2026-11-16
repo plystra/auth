@@ -18,7 +18,7 @@ SET manifest_permissions = $1,
     pending_manifest_permissions = NULL,
     review_status = 'approved'
 WHERE id = $2 AND visibility = 'public'
-  AND review_status = 'pending'
+  AND pending_manifest_permissions IS NOT NULL
 `
 
 type ApprovePublicApplicationReviewParams struct {
@@ -894,35 +894,6 @@ func (q *Queries) ListApplicationSuspensionMembers(ctx context.Context, arg List
 	return items, nil
 }
 
-const listCurrentInstallationSpaces = `-- name: ListCurrentInstallationSpaces :many
-SELECT DISTINCT space_id FROM application_installations
-WHERE application_id = $1 AND status <> 'uninstalled'
-`
-
-type ListCurrentInstallationSpacesParams struct {
-	ApplicationID string `json:"application_id"`
-}
-
-func (q *Queries) ListCurrentInstallationSpaces(ctx context.Context, arg ListCurrentInstallationSpacesParams) ([]string, error) {
-	rows, err := q.db.Query(ctx, listCurrentInstallationSpaces, arg.ApplicationID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	items := []string{}
-	for rows.Next() {
-		var space_id string
-		if err := rows.Scan(&space_id); err != nil {
-			return nil, err
-		}
-		items = append(items, space_id)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
 const listKeyInstallations = `-- name: ListKeyInstallations :many
 WITH RECURSIVE allowed_spaces AS (
     SELECT s.id, COALESCE((r.value->>'include_descendants')::boolean, false) AS include_descendants
@@ -1051,6 +1022,42 @@ func (q *Queries) ListManagedAPIKeys(ctx context.Context, arg ListManagedAPIKeys
 			&i.CreatedAt,
 			&i.AllowSubjectAssertion,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listManifestInstallationMembers = `-- name: ListManifestInstallationMembers :many
+SELECT id, member_id, space_id FROM application_installations
+WHERE application_id = $1 AND status <> 'uninstalled'
+ORDER BY space_id, id
+`
+
+type ListManifestInstallationMembersParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+type ListManifestInstallationMembersRow struct {
+	ID       string `json:"id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+}
+
+func (q *Queries) ListManifestInstallationMembers(ctx context.Context, arg ListManifestInstallationMembersParams) ([]ListManifestInstallationMembersRow, error) {
+	rows, err := q.db.Query(ctx, listManifestInstallationMembers, arg.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListManifestInstallationMembersRow{}
+	for rows.Next() {
+		var i ListManifestInstallationMembersRow
+		if err := rows.Scan(&i.ID, &i.MemberID, &i.SpaceID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1500,9 +1507,10 @@ func (q *Queries) PreserveAPIKeySecretForGrace(ctx context.Context, arg Preserve
 
 const rejectPublicApplicationReview = `-- name: RejectPublicApplicationReview :execrows
 UPDATE applications
-SET pending_manifest_permissions = NULL, review_status = 'rejected'
+SET pending_manifest_permissions = NULL,
+    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
 WHERE id = $1 AND visibility = 'public'
-  AND review_status = 'pending'
+  AND pending_manifest_permissions IS NOT NULL
 `
 
 type RejectPublicApplicationReviewParams struct {
@@ -1807,41 +1815,51 @@ func (q *Queries) UpdateAPIKeyHash(ctx context.Context, arg UpdateAPIKeyHashPara
 	return result.RowsAffected(), nil
 }
 
-const updatePrivateApplication = `-- name: UpdatePrivateApplication :one
+const updateApplication = `-- name: UpdateApplication :one
 UPDATE applications
 SET name = $1, redirect_uris = $2,
-    manifest_permissions = $3
-WHERE id = $4 AND visibility = 'private'
-RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at
+    manifest_permissions = $3,
+    allowed_scopes = $3,
+    pending_manifest_permissions = $4,
+    review_status = $5
+WHERE id = $6
+RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions,
+          pending_manifest_permissions, visibility, review_status, status, created_at
 `
 
-type UpdatePrivateApplicationParams struct {
-	Name                string `json:"name"`
-	RedirectUris        []byte `json:"redirect_uris"`
-	ManifestPermissions []byte `json:"manifest_permissions"`
-	ApplicationID       string `json:"application_id"`
+type UpdateApplicationParams struct {
+	Name                       string `json:"name"`
+	RedirectUris               []byte `json:"redirect_uris"`
+	ManifestPermissions        []byte `json:"manifest_permissions"`
+	PendingManifestPermissions []byte `json:"pending_manifest_permissions"`
+	ReviewStatus               string `json:"review_status"`
+	ApplicationID              string `json:"application_id"`
 }
 
-type UpdatePrivateApplicationRow struct {
-	ID                  string             `json:"id"`
-	SpaceID             string             `json:"space_id"`
-	Name                string             `json:"name"`
-	ClientID            string             `json:"client_id"`
-	RedirectUris        []byte             `json:"redirect_uris"`
-	ManifestPermissions []byte             `json:"manifest_permissions"`
-	Visibility          string             `json:"visibility"`
-	Status              string             `json:"status"`
-	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+type UpdateApplicationRow struct {
+	ID                         string             `json:"id"`
+	SpaceID                    string             `json:"space_id"`
+	Name                       string             `json:"name"`
+	ClientID                   string             `json:"client_id"`
+	RedirectUris               []byte             `json:"redirect_uris"`
+	ManifestPermissions        []byte             `json:"manifest_permissions"`
+	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	Visibility                 string             `json:"visibility"`
+	ReviewStatus               string             `json:"review_status"`
+	Status                     string             `json:"status"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
 
-func (q *Queries) UpdatePrivateApplication(ctx context.Context, arg UpdatePrivateApplicationParams) (UpdatePrivateApplicationRow, error) {
-	row := q.db.QueryRow(ctx, updatePrivateApplication,
+func (q *Queries) UpdateApplication(ctx context.Context, arg UpdateApplicationParams) (UpdateApplicationRow, error) {
+	row := q.db.QueryRow(ctx, updateApplication,
 		arg.Name,
 		arg.RedirectUris,
 		arg.ManifestPermissions,
+		arg.PendingManifestPermissions,
+		arg.ReviewStatus,
 		arg.ApplicationID,
 	)
-	var i UpdatePrivateApplicationRow
+	var i UpdateApplicationRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -1849,7 +1867,9 @@ func (q *Queries) UpdatePrivateApplication(ctx context.Context, arg UpdatePrivat
 		&i.ClientID,
 		&i.RedirectUris,
 		&i.ManifestPermissions,
+		&i.PendingManifestPermissions,
 		&i.Visibility,
+		&i.ReviewStatus,
 		&i.Status,
 		&i.CreatedAt,
 	)

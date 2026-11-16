@@ -51,12 +51,16 @@ SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visib
 FROM applications WHERE id = sqlc.arg(application_id)
 FOR UPDATE;
 
--- name: UpdatePrivateApplication :one
+-- name: UpdateApplication :one
 UPDATE applications
 SET name = sqlc.arg(name), redirect_uris = sqlc.arg(redirect_uris),
-    manifest_permissions = sqlc.arg(manifest_permissions)
-WHERE id = sqlc.arg(application_id) AND visibility = 'private'
-RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility, status, created_at;
+    manifest_permissions = sqlc.arg(manifest_permissions),
+    allowed_scopes = sqlc.arg(manifest_permissions),
+    pending_manifest_permissions = sqlc.narg(pending_manifest_permissions),
+    review_status = sqlc.arg(review_status)
+WHERE id = sqlc.arg(application_id)
+RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions,
+          pending_manifest_permissions, visibility, review_status, status, created_at;
 
 -- name: TrimInstallationApprovalsToManifest :exec
 UPDATE application_installations i
@@ -78,9 +82,10 @@ WHERE i.application_id = sqlc.arg(application_id) AND i.status <> 'uninstalled'
   AND rp.role_id = i.role_id AND p.id = rp.permission_id
   AND NOT (sqlc.arg(manifest_permissions)::jsonb ? p.key);
 
--- name: ListCurrentInstallationSpaces :many
-SELECT DISTINCT space_id FROM application_installations
-WHERE application_id = sqlc.arg(application_id) AND status <> 'uninstalled';
+-- name: ListManifestInstallationMembers :many
+SELECT id, member_id, space_id FROM application_installations
+WHERE application_id = sqlc.arg(application_id) AND status <> 'uninstalled'
+ORDER BY space_id, id;
 
 -- name: TrimAPIKeyGrantsToManifest :exec
 UPDATE api_keys k
