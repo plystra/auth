@@ -344,6 +344,75 @@ func TestBusinessApprovalReasonLimitCountsUnicodeCharacters(t *testing.T) {
 	}
 }
 
+func TestApprovalInboxShowsDelegationChainOnlyToActiveApprovers(t *testing.T) {
+	ctx := context.Background()
+	f := newApprovalFixture(t)
+	agents := &agent.Service{Store: f.store}
+	child, childKey, err := agents.Create(ctx, agent.CreateInput{
+		OwnerMemberID: f.agentID, Name: "Report Worker", ExpiresAt: time.Now().UTC().Add(30 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(ctx, `
+		INSERT INTO permissions (id, key, description, principal_kinds, agent_approval, status)
+		VALUES ('prm_report_publish', 'report:publish', 'Publish report', '["human","agent","application"]'::jsonb, 'none', 'active');
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		SELECT 'grt_report_' || id, $1, '["report:publish"]'::jsonb, id, 'space', $1, $2
+		FROM unnest($3::text[]) AS id
+	`, f.spaceID, f.ownerID, []string{f.ownerID, f.agentID, child.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// An existing delegated permission can start requiring approval after a
+	// catalog change, so its inbox must explain every hop back to the human.
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE permissions SET agent_approval = 'required' WHERE key = 'report:publish'`); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("publish delegated report"))
+	created, err := f.service.CreateBusiness(ctx, "key_approval_test", child.ID, "report:publish", f.resource("report_chain"), digest[:], "Publish report")
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox, err := f.service.ListForUser(ctx, "usr_approval_owner")
+	if err != nil || len(inbox) != 1 || inbox[0].ID != created.ID {
+		t.Fatalf("owner inbox entries = %d, error = %v", len(inbox), err)
+	}
+	chain := inbox[0].DelegationChain
+	if len(chain) != 3 || chain[0].ID != child.ID || chain[0].Name != child.Name || chain[0].Type != "agent" || chain[1].ID != f.agentID || chain[1].Type != "agent" || chain[2].ID != f.ownerID || chain[2].Type != "human" {
+		t.Fatalf("delegation chain = %+v", chain)
+	}
+	encoded, err := json.Marshal(inbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), childKey) || strings.Contains(string(encoded), "ply_ag_") || strings.Contains(string(encoded), "password_hash") {
+		t.Fatal("approval inbox exposed credentials")
+	}
+	assertEmpty := func(userID, reason string) {
+		t.Helper()
+		inbox, err := f.service.ListForUser(ctx, userID)
+		if err != nil || len(inbox) != 0 {
+			t.Fatalf("%s inbox entries = %d, error = %v", reason, len(inbox), err)
+		}
+	}
+	assertEmpty("usr_approval_other", "unbound user")
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE users SET status = 'suspended' WHERE id = 'usr_approval_owner'`); err != nil {
+		t.Fatal(err)
+	}
+	assertEmpty("usr_approval_owner", "suspended user")
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE users SET status = 'active' WHERE id = 'usr_approval_owner'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE user_members SET status = 'revoked', revoked_at = now() WHERE user_id = 'usr_approval_owner' AND member_id = $1`, f.ownerID); err != nil {
+		t.Fatal(err)
+	}
+	assertEmpty("usr_approval_owner", "revoked binding")
+}
+
 func TestGovernanceApprovalRequiresMatchingDetailsAndDigest(t *testing.T) {
 	f := newApprovalFixture(t)
 	details := json.RawMessage(fmt.Sprintf(`{"operation":"members.update","space_id":%q,"member_id":%q,"binding_policy":"shared"}`, f.spaceID, f.ownerID))

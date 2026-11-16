@@ -87,6 +87,23 @@ func TestApprovalPrincipalHTTPInboxStepUpAndUserOnlyDecision(t *testing.T) {
 	if inbox.Code != http.StatusOK || !strings.Contains(inbox.Body.String(), first.ID) || !strings.Contains(inbox.Body.String(), second.ID) {
 		t.Fatalf("user inbox = %d %s", inbox.Code, inbox.Body.String())
 	}
+	var inboxBody struct {
+		Data []struct {
+			DelegationChain []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+				Type string `json:"type"`
+			} `json:"delegation_chain"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(inbox.Body.Bytes(), &inboxBody); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range inboxBody.Data {
+		if len(item.DelegationChain) != 2 || item.DelegationChain[0].ID != createdAgent.ID || item.DelegationChain[0].Name != createdAgent.Name || item.DelegationChain[0].Type != "agent" || item.DelegationChain[1].ID != owner.ID || item.DelegationChain[1].Type != "human" {
+			t.Fatalf("approval inbox omitted the Agent identity or human owner: %+v", item.DelegationChain)
+		}
+	}
 	withoutProof := request(http.MethodPost, "/v1/approvals/"+first.ID+"/approve", userTokens.AccessToken, "")
 	if withoutProof.Code != http.StatusForbidden || !strings.Contains(withoutProof.Body.String(), "STEP_UP_REQUIRED") {
 		t.Fatalf("approval without step-up = %d %s", withoutProof.Code, withoutProof.Body.String())

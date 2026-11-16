@@ -336,12 +336,38 @@ func (q *Queries) FindPendingOrRejectedApprovalRequest(ctx context.Context, arg 
 }
 
 const listPendingApprovalRequestsForUser = `-- name: ListPendingApprovalRequestsForUser :many
-SELECT a.id, a.agent_member_id, a.approver_member_id, a.permission_key, a.resource_type, a.resource_id, a.resource_space_id, a.resource_group_id, a.resource_owner_member_id, a.request_digest, a.reason, a.status, a.expires_at, a.decided_by_user_id, a.decided_at, a.approved_expires_at, a.consumed_at, a.created_at, a.kind, a.operation, a.request_details FROM approval_requests a
-JOIN user_members um ON um.member_id = a.approver_member_id
-WHERE um.user_id = $1
-  AND um.status = 'active' AND um.revoked_at IS NULL
-  AND (um.expires_at IS NULL OR um.expires_at > now())
-  AND a.status = 'pending' AND a.expires_at > now()
+WITH RECURSIVE pending AS (
+    SELECT a.id, a.agent_member_id FROM approval_requests a
+    JOIN user_members um ON um.member_id = a.approver_member_id
+    JOIN users u ON u.id = um.user_id
+    JOIN members approver ON approver.id = a.approver_member_id
+    WHERE um.user_id = $1
+      AND um.status = 'active' AND um.revoked_at IS NULL
+      AND (um.expires_at IS NULL OR um.expires_at > now())
+      AND u.status = 'active' AND u.disabled_at IS NULL
+      AND approver.type = 'human' AND approver.status = 'active'
+      AND a.status = 'pending' AND a.expires_at > now()
+), chain AS (
+    SELECT p.id AS approval_id, m.id, m.space_id, m.name, m.type, m.status,
+           m.home_group_id, m.source, m.oauth_client_id, 0 AS depth, ARRAY[m.id] AS visited
+    FROM pending p JOIN members m ON m.id = p.agent_member_id
+    UNION ALL
+    SELECT c.approval_id, m.id, m.space_id, m.name, m.type, m.status,
+           m.home_group_id, m.source, m.oauth_client_id, c.depth + 1, c.visited || m.id
+    FROM chain c
+    JOIN groups g ON g.id = c.home_group_id AND g.kind = 'agents'
+    JOIN members m ON m.id = g.owner_member_id AND m.space_id = c.space_id
+    WHERE c.type = 'agent' AND c.depth < 64 AND NOT m.id = ANY(c.visited)
+)
+SELECT a.id, a.agent_member_id, a.approver_member_id, a.permission_key, a.resource_type, a.resource_id, a.resource_space_id, a.resource_group_id, a.resource_owner_member_id, a.request_digest, a.reason, a.status, a.expires_at, a.decided_by_user_id, a.decided_at, a.approved_expires_at, a.consumed_at, a.created_at, a.kind, a.operation, a.request_details, (
+    SELECT jsonb_agg(jsonb_build_object(
+        'id', c.id, 'space_id', c.space_id, 'name', c.name, 'type', c.type, 'status', c.status,
+        'source', CASE WHEN c.type = 'agent' THEN c.source ELSE '' END,
+        'oauth_client_id', c.oauth_client_id
+    ) ORDER BY c.depth)
+    FROM chain c WHERE c.approval_id = a.id
+)::jsonb AS delegation_chain
+FROM approval_requests a JOIN pending p ON p.id = a.id
 ORDER BY a.created_at DESC, a.id DESC
 `
 
@@ -349,37 +375,43 @@ type ListPendingApprovalRequestsForUserParams struct {
 	UserID string `json:"user_id"`
 }
 
-func (q *Queries) ListPendingApprovalRequestsForUser(ctx context.Context, arg ListPendingApprovalRequestsForUserParams) ([]ApprovalRequest, error) {
+type ListPendingApprovalRequestsForUserRow struct {
+	ApprovalRequest ApprovalRequest `json:"approval_request"`
+	DelegationChain []byte          `json:"delegation_chain"`
+}
+
+func (q *Queries) ListPendingApprovalRequestsForUser(ctx context.Context, arg ListPendingApprovalRequestsForUserParams) ([]ListPendingApprovalRequestsForUserRow, error) {
 	rows, err := q.db.Query(ctx, listPendingApprovalRequestsForUser, arg.UserID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []ApprovalRequest{}
+	items := []ListPendingApprovalRequestsForUserRow{}
 	for rows.Next() {
-		var i ApprovalRequest
+		var i ListPendingApprovalRequestsForUserRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.AgentMemberID,
-			&i.ApproverMemberID,
-			&i.PermissionKey,
-			&i.ResourceType,
-			&i.ResourceID,
-			&i.ResourceSpaceID,
-			&i.ResourceGroupID,
-			&i.ResourceOwnerMemberID,
-			&i.RequestDigest,
-			&i.Reason,
-			&i.Status,
-			&i.ExpiresAt,
-			&i.DecidedByUserID,
-			&i.DecidedAt,
-			&i.ApprovedExpiresAt,
-			&i.ConsumedAt,
-			&i.CreatedAt,
-			&i.Kind,
-			&i.Operation,
-			&i.RequestDetails,
+			&i.ApprovalRequest.ID,
+			&i.ApprovalRequest.AgentMemberID,
+			&i.ApprovalRequest.ApproverMemberID,
+			&i.ApprovalRequest.PermissionKey,
+			&i.ApprovalRequest.ResourceType,
+			&i.ApprovalRequest.ResourceID,
+			&i.ApprovalRequest.ResourceSpaceID,
+			&i.ApprovalRequest.ResourceGroupID,
+			&i.ApprovalRequest.ResourceOwnerMemberID,
+			&i.ApprovalRequest.RequestDigest,
+			&i.ApprovalRequest.Reason,
+			&i.ApprovalRequest.Status,
+			&i.ApprovalRequest.ExpiresAt,
+			&i.ApprovalRequest.DecidedByUserID,
+			&i.ApprovalRequest.DecidedAt,
+			&i.ApprovalRequest.ApprovedExpiresAt,
+			&i.ApprovalRequest.ConsumedAt,
+			&i.ApprovalRequest.CreatedAt,
+			&i.ApprovalRequest.Kind,
+			&i.ApprovalRequest.Operation,
+			&i.ApprovalRequest.RequestDetails,
+			&i.DelegationChain,
 		); err != nil {
 			return nil, err
 		}

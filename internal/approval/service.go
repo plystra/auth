@@ -54,6 +54,21 @@ type Request struct {
 	CreatedAt      time.Time       `json:"created_at"`
 }
 
+type Participant struct {
+	ID            string `json:"id"`
+	SpaceID       string `json:"space_id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	Status        string `json:"status"`
+	Source        string `json:"source,omitempty"`
+	OAuthClientID string `json:"oauth_client_id,omitempty"`
+}
+
+type InboxRequest struct {
+	Request
+	DelegationChain []Participant `json:"delegation_chain"`
+}
+
 type GovernanceInput struct {
 	AgentMemberID  string
 	Permission     string
@@ -164,7 +179,7 @@ func (s *Service) CreateBusiness(ctx context.Context, applicationKeyID, agentMem
 	return publicRequest(created), nil
 }
 
-func (s *Service) ListForUser(ctx context.Context, userID string) ([]Request, error) {
+func (s *Service) ListForUser(ctx context.Context, userID string) ([]InboxRequest, error) {
 	if s == nil || s.Store == nil {
 		return nil, apierr.New("UNAVAILABLE", "approvals are unavailable")
 	}
@@ -172,9 +187,16 @@ func (s *Service) ListForUser(ctx context.Context, userID string) ([]Request, er
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Request, 0, len(rows))
+	out := make([]InboxRequest, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, publicRequest(row))
+		var chain []Participant
+		if err := json.Unmarshal(row.DelegationChain, &chain); err != nil {
+			return nil, err
+		}
+		if len(chain) < 2 || chain[0].ID != row.ApprovalRequest.AgentMemberID || chain[0].Type != "agent" || chain[len(chain)-1].ID != row.ApprovalRequest.ApproverMemberID || chain[len(chain)-1].Type != "human" {
+			return nil, apierr.New("OWNER_INACTIVE", "the approval owner chain is unavailable")
+		}
+		out = append(out, InboxRequest{Request: publicRequest(row.ApprovalRequest), DelegationChain: chain})
 	}
 	return out, nil
 }

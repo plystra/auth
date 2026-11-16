@@ -25,12 +25,38 @@ VALUES (
 RETURNING *;
 
 -- name: ListPendingApprovalRequestsForUser :many
-SELECT a.* FROM approval_requests a
-JOIN user_members um ON um.member_id = a.approver_member_id
-WHERE um.user_id = sqlc.arg(user_id)
-  AND um.status = 'active' AND um.revoked_at IS NULL
-  AND (um.expires_at IS NULL OR um.expires_at > now())
-  AND a.status = 'pending' AND a.expires_at > now()
+WITH RECURSIVE pending AS (
+    SELECT a.id, a.agent_member_id FROM approval_requests a
+    JOIN user_members um ON um.member_id = a.approver_member_id
+    JOIN users u ON u.id = um.user_id
+    JOIN members approver ON approver.id = a.approver_member_id
+    WHERE um.user_id = sqlc.arg(user_id)
+      AND um.status = 'active' AND um.revoked_at IS NULL
+      AND (um.expires_at IS NULL OR um.expires_at > now())
+      AND u.status = 'active' AND u.disabled_at IS NULL
+      AND approver.type = 'human' AND approver.status = 'active'
+      AND a.status = 'pending' AND a.expires_at > now()
+), chain AS (
+    SELECT p.id AS approval_id, m.id, m.space_id, m.name, m.type, m.status,
+           m.home_group_id, m.source, m.oauth_client_id, 0 AS depth, ARRAY[m.id] AS visited
+    FROM pending p JOIN members m ON m.id = p.agent_member_id
+    UNION ALL
+    SELECT c.approval_id, m.id, m.space_id, m.name, m.type, m.status,
+           m.home_group_id, m.source, m.oauth_client_id, c.depth + 1, c.visited || m.id
+    FROM chain c
+    JOIN groups g ON g.id = c.home_group_id AND g.kind = 'agents'
+    JOIN members m ON m.id = g.owner_member_id AND m.space_id = c.space_id
+    WHERE c.type = 'agent' AND c.depth < 64 AND NOT m.id = ANY(c.visited)
+)
+SELECT sqlc.embed(a), (
+    SELECT jsonb_agg(jsonb_build_object(
+        'id', c.id, 'space_id', c.space_id, 'name', c.name, 'type', c.type, 'status', c.status,
+        'source', CASE WHEN c.type = 'agent' THEN c.source ELSE '' END,
+        'oauth_client_id', c.oauth_client_id
+    ) ORDER BY c.depth)
+    FROM chain c WHERE c.approval_id = a.id
+)::jsonb AS delegation_chain
+FROM approval_requests a JOIN pending p ON p.id = a.id
 ORDER BY a.created_at DESC, a.id DESC;
 
 -- name: LockApprovalRequest :one

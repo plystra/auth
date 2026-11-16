@@ -20,7 +20,7 @@ type decideApprovalInput struct {
 
 type approvalListOutput struct {
 	Body struct {
-		Data []approval.Request `json:"data"`
+		Data []approval.InboxRequest `json:"data"`
 	}
 }
 
