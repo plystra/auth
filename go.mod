@@ -10,6 +10,7 @@ require (
 	github.com/danielgtaylor/huma/v2 v2.39.1
 	github.com/exaring/otelpgx v0.12.0
 	github.com/go-webauthn/webauthn v0.18.2
+	github.com/google/go-cmp v0.7.0
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/lestrrat-go/jwx/v3 v3.3.0
 	github.com/oklog/ulid/v2 v2.1.2
@@ -17,6 +18,7 @@ require (
 	github.com/pressly/goose/v3 v3.28.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/riverqueue/river v0.48.0
+	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.48.0
 	github.com/russellhaering/gosaml2 v0.12.0
 	github.com/spf13/cobra v1.10.2
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.44.0
@@ -173,7 +175,6 @@ require (
 	github.com/golangci/swaggoswag v0.0.0-20250504205917-77f2aca3143e // indirect
 	github.com/golangci/unconvert v0.0.0-20250410112200-a129a6e6413e // indirect
 	github.com/google/cel-go v0.28.0 // indirect
-	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gordonklaus/ineffassign v0.2.0 // indirect
@@ -211,6 +212,8 @@ require (
 	github.com/ldez/usetesting v0.5.0 // indirect
 	github.com/leonklingele/grouper v1.1.2 // indirect
 	github.com/lestrrat-go/blackmagic v1.0.4 // indirect
+	github.com/lestrrat-go/dsig v1.4.0 // indirect
+	github.com/lestrrat-go/dsig-secp256k1 v1.0.0 // indirect
 	github.com/lestrrat-go/httpcc v1.0.1 // indirect
 	github.com/lestrrat-go/httprc/v3 v3.0.6 // indirect
 	github.com/lestrrat-go/option/v2 v2.0.0 // indirect
@@ -280,7 +283,6 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/riverqueue/river/cmd/river v0.48.0 // indirect
 	github.com/riverqueue/river/riverdriver v0.48.0 // indirect
-	github.com/riverqueue/river/riverdriver/riverpgxv5 v0.48.0 // indirect
 	github.com/riverqueue/river/riverdriver/riversqlite v0.48.0 // indirect
 	github.com/riverqueue/river/rivershared v0.48.0 // indirect
 	github.com/riverqueue/river/rivertype v0.48.0 // indirect

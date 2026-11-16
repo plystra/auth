@@ -10,6 +10,7 @@ endif
 
 gen:
 	$(GO) tool sqlc generate
+	$(GO) tool sqlc generate -f examples/invoice-saas/sqlc.yaml
 	$(GO) run ./internal/tools/schema-snapshot
 	$(GO) run ./internal/tools/openapi
 

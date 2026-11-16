@@ -29,6 +29,7 @@ type mvpDelegationScenario struct {
 	Signer                                                              *security.Signer
 	UserToken, UserMemberID, SpaceID, ClientID, ServerKey, ControlToken string
 	MFACode                                                             func() string
+	BusinessDatabaseURL                                                 string
 }
 
 func newMVPObserver(t *testing.T, databaseURL string, signer *security.Signer, hmacKey []byte, settings func(context.Context) (session.Settings, error)) http.Handler {
@@ -185,9 +186,11 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			t.Fatalf("delegated operation escaped its resource group: %s", result.DenyCode)
 		}
 	}
+	assertSaaSRevoked := runInvoiceSaaSScenario(t, scenario, project.ID, otherProject.ID, parent.Agent.ID, parent.Key, childToken.AccessToken)
 	// Remove only the native parent's business grant; its named governance
 	// role remains so it can still revoke the child through the normal API.
 	replace(scenario.UserToken, parent.Agent.ID, "group_tree", []string{"invoice:approve"})
+	assertSaaSRevoked()
 	var deniedDecisions []string
 	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
 		for _, path := range []string{"check", "explain"} {

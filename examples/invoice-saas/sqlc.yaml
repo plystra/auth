@@ -1,0 +1,18 @@
+version: "2"
+sql:
+  - engine: "postgresql"
+    schema: "migrations"
+    queries: "queries"
+    database:
+      uri: "${INVOICE_SAAS_SQLC_DATABASE_URL}"
+    analyzer:
+      database: false
+    rules:
+      - sqlc/db-prepare
+    gen:
+      go:
+        package: "db"
+        out: "internal/db"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+        query_parameter_limit: 0

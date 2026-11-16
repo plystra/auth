@@ -88,9 +88,18 @@ func ensureDockerHost() {
 }
 
 func (h *Harness) Clone(ctx context.Context) (Database, error) {
+	return h.clone(ctx, h.template)
+}
+
+// CloneEmpty isolates an external application's schema from the Auth schema.
+func (h *Harness) CloneEmpty(ctx context.Context) (Database, error) {
+	return h.clone(ctx, "template0")
+}
+
+func (h *Harness) clone(ctx context.Context, template string) (Database, error) {
 	id := h.nextID.Add(1)
 	name := fmt.Sprintf("auth_test_%d_%s", id, strconv.Itoa(os.Getpid()))
-	if err := h.createDatabase(ctx, name, h.template); err != nil {
+	if err := h.createDatabase(ctx, name, template); err != nil {
 		return Database{}, err
 	}
 	return Database{

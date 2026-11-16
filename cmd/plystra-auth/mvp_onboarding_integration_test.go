@@ -230,6 +230,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps, Agents: agents, Approvals: approvals}).Register(
 		humago.New(principalMux, route.HumaConfig("MVP onboarding principal", "1.0.0")))
 	(protocol.HTTP{Issuer: "https://auth.example.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authz}).Register(principalMux)
+	registerJWKS(principalMux, signer)
 	principalHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, nil, st, validateCredential, nil, nil)
 	principalRequest := func(path, token, body string) *httptest.ResponseRecorder {
 		t.Helper()
@@ -908,12 +909,18 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		}
 	})
 	t.Run("NativeAgentDelegationAndRevocation", func(t *testing.T) {
+		businessDatabase, err := harness.CloneEmpty(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = businessDatabase.Close(context.Background()) })
 		runNativeAgentDelegationScenario(t, mvpDelegationScenario{
 			Principal: principalHandler, Server: serverHandler,
 			Observer: newMVPObserver(t, database.AppURL, signer, key, sessions.Settings), Signer: signer,
 			UserToken: customer.token, UserMemberID: customer.memberID, SpaceID: customer.spaceID,
 			ClientID: appResult.Data.ClientID, ServerKey: keyResult.Data.Secret, ControlToken: oauthToken.AccessToken,
-			MFACode: func() string { return nextTOTP(customerFactorResult.Data.Secret) },
+			MFACode:             func() string { return nextTOTP(customerFactorResult.Data.Secret) },
+			BusinessDatabaseURL: businessDatabase.URL,
 		})
 	})
 	defaultSpaceBody, err := json.Marshal(map[string]any{
