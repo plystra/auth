@@ -29,6 +29,9 @@ func (s *Service) ReplaceAgentGroupGrants(ctx context.Context, actorMemberID, sp
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
+		if err := validateAgentGrantUserTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: granteeMemberID})
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && agent.SpaceID != spaceID {
 			return apierr.New("NOT_FOUND", "Agent was not found in this Space")
@@ -99,7 +102,10 @@ func (s *Service) ReplaceAgentGroupGrants(ctx context.Context, actorMemberID, sp
 				return err
 			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.replace", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: "grant.replace", Outcome: "success", MemberID: granteeMemberID,
+			Resource: audit.Resource{Type: "grant", ID: row.ID},
+		}); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: spaceID, GranteeMemberID: granteeMemberID, Permissions: permissions, Scope: scope, AnchorGroupID: anchorGroupID, GrantedBy: actorMemberID}

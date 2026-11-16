@@ -9,6 +9,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
@@ -167,13 +168,6 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if err != nil {
 		return nil, err
 	}
-	canManage, err := a.Agents.CanManage(ctx, actorID, target.ID)
-	if err != nil {
-		return nil, err
-	}
-	if !canManage {
-		return nil, apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
-	}
 	ctx = authorization.WithAgentGrantUser(ctx, actorID, userID)
 	var grant authorization.Grant
 	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
@@ -273,6 +267,7 @@ func (a *API) currentMember(ctx context.Context, authorizationHeader string) (st
 	if !active {
 		return "", "", ctx, apierr.New("UNAUTHENTICATED", "the access token is invalid")
 	}
+	ctx = principalAuditContext(ctx, claims)
 	if claims.Type == "agent" {
 		return claims.Subject, "", authorization.WithTokenScopes(ctx, claims.Subject, claims.Scopes), nil
 	}
@@ -302,6 +297,14 @@ func (a *API) currentMember(ctx context.Context, authorizationHeader string) (st
 		return "", "", ctx, err
 	}
 	return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
+}
+
+func principalAuditContext(ctx context.Context, claims security.Claims) context.Context {
+	caller := audit.Caller{CredentialType: "agent_access_token"}
+	if claims.Type != "agent" {
+		caller.UserID, caller.CredentialType = claims.Subject, "user_access_token"
+	}
+	return audit.WithCaller(ctx, caller)
 }
 
 func (a *API) authorizeCurrentMember(ctx context.Context, authorizationHeader, permission string) (authorization.Member, string, context.Context, error) {

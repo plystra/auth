@@ -799,18 +799,6 @@ func (s *Service) EnsureDefaultMembershipTx(ctx context.Context, q *db.Queries, 
 	return member.ID, nil
 }
 
-func (s *Service) ListMembers(ctx context.Context, spaceID string) ([]Member, error) {
-	rows, err := s.Store.Queries().ListMembersInSpace(ctx, db.ListMembersInSpaceParams{SpaceID: spaceID})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Member, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, Member{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Type, BindingPolicy: row.BindingPolicy, Status: row.Status})
-	}
-	return out, nil
-}
-
 func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, spaceID, name, kind, bindingPolicy string) (Member, error) {
 	name = strings.TrimSpace(name)
 	if kind == "user" {
@@ -1047,7 +1035,10 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 				}
 			}
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "member.status.update", memberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: "member.status.update", Outcome: "success", MemberID: memberID,
+			Metadata: map[string]string{"status": status},
+		})
 	})
 }
 
@@ -1245,7 +1236,10 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err := s.coverGrantDeltaTx(ctx, q, before, actorMemberID, member.ID, spaceID, member.Type); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "grant.create", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: "grant.create", Outcome: "success", MemberID: granteeMemberID,
+			Resource: audit.Resource{Type: "grant", ID: row.ID},
+		}); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, RoleID: row.RoleID.String, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
@@ -1382,7 +1376,10 @@ func (s *Service) createInlineGrantTx(ctx context.Context, q *db.Queries, actorM
 		if mode == inlineGrantOAuthConsent {
 			action = "grant.oauth_consent.create"
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: action, Outcome: "success", MemberID: granteeMemberID,
+			Resource: audit.Resource{Type: "grant", ID: row.ID},
+		}); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
@@ -1509,6 +1506,11 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
+		if mode == inlineGrantAgentOwner {
+			if err := validateAgentGrantUserTx(ctx, q, actorMemberID); err != nil {
+				return err
+			}
+		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1583,7 +1585,10 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 		if mode == inlineGrantOAuthConsent {
 			action = "grant.oauth_consent.replace"
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, action, row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: action, Outcome: "success", MemberID: granteeMemberID,
+			Resource: audit.Resource{Type: "grant", ID: row.ID},
+		}); err != nil {
 			return err
 		}
 		out = Grant{ID: row.ID, SpaceID: row.SpaceID, Permissions: permissions, GranteeMemberID: granteeMemberID, Scope: row.Scope, AnchorSpaceID: anchorSpaceID, GrantedBy: row.GrantedBy}
@@ -1643,7 +1648,14 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 		if err := q.RevokeGrant(ctx, db.RevokeGrantParams{ID: grantID}); err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "grant.revoke", row.ID, "success")
+		subjectID := targetMemberID
+		if subjectID == "" {
+			subjectID = actorMemberID
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: "grant.revoke", Outcome: "success", MemberID: subjectID,
+			Resource: audit.Resource{Type: "grant", ID: row.ID, SpaceID: spaceID, GroupID: resourceGroup},
+		})
 	})
 }
 

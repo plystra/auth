@@ -21,6 +21,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/approval"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/factor"
@@ -510,7 +511,8 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	}
 	var keyResult struct {
 		Data struct {
-			Secret string `json:"secret"`
+			Key    application.ManagedKey `json:"key"`
+			Secret string                 `json:"secret"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(createdKey.Body.Bytes(), &keyResult); err != nil || !strings.HasPrefix(keyResult.Data.Secret, "ply_sk_") {
@@ -714,6 +716,49 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil || oauthAgent.ID != claims.Subject {
 		t.Fatalf("customer OAuth Agent identity = %+v err=%v", oauthAgent, err)
 	}
+	t.Run("OAuthCredentialAuditContext", func(t *testing.T) {
+		customerClaims, active, err := sessions.Introspect(ctx, customer.token, security.DefaultApplicationAudience)
+		if err != nil || !active || customerClaims.Type != "user" {
+			t.Fatal("customer audit reader is not an active user")
+		}
+		path := "/v1/spaces/" + customer.spaceID + "/audit-logs?" + url.Values{
+			"member_id": {oauthAgent.ID}, "action": {"agent.oauth_refresh.create"},
+			"request_id": {tokenResponse.Header().Get("X-Request-ID")},
+		}.Encode()
+		query := func(token string) *httptest.ResponseRecorder {
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			principalHandler.ServeHTTP(response, request)
+			return response
+		}
+		response := query(customer.token)
+		if response.Code != http.StatusOK {
+			t.Fatalf("OAuth credential audit query status = %d", response.Code)
+		}
+		var page struct {
+			Data []audit.Event `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &page); err != nil || len(page.Data) != 1 {
+			t.Fatal("OAuth credential audit is not uniquely correlated to token exchange")
+		}
+		event := page.Data[0]
+		if event.MemberID != oauthAgent.ID || event.MemberType != "agent" || event.ActorID != oauthAgent.ID || event.UserID != customerClaims.Subject || event.ApplicationID != appResult.Data.ID || event.SpaceID != customer.spaceID || event.ResourceGroupID != oauthAgent.HomeGroupID || event.Plane != "principal" || event.CredentialType != "oauth_authorization_code" || event.RequestID == "" || len(event.OwnerChain) != 1 || event.OwnerChain[0].MemberID != customer.memberID {
+			t.Fatal("OAuth credential audit lost its verified identity, application, request, or owner chain")
+		}
+		if other := query(publisher.token); other.Code == http.StatusOK || strings.Contains(other.Body.String(), event.ID) {
+			t.Fatal("publisher could read the customer's OAuth credential audit")
+		}
+		for _, credential := range []string{oauthToken.AccessToken, oauthToken.RefreshToken, customer.token, keyResult.Data.Secret, callback.Query().Get("code"), verifier, authorizedBody.RequestID} {
+			var leaked bool
+			if err := st.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_logs WHERE to_jsonb(audit_logs)::text LIKE '%' || $1 || '%')`, credential).Scan(&leaked); err != nil {
+				t.Fatal(err)
+			}
+			if leaked || strings.Contains(response.Body.String(), credential) {
+				t.Fatal("OAuth credential audit leaked a credential")
+			}
+		}
+	})
 	t.Run("OAuthAgentBusinessApproval", func(t *testing.T) {
 		serverPost := func(path string, body any) *httptest.ResponseRecorder {
 			t.Helper()
@@ -828,6 +873,37 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		var consumedAudits int
 		if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'approval.consume' AND resource_id = $1`, item.ID).Scan(&consumedAudits); err != nil || consumedAudits != 1 {
 			t.Fatalf("approval consumption audits = %d, error = %v", consumedAudits, err)
+		}
+		for _, action := range []string{"approval.create", "approval.approved", "approval.consume"} {
+			request := httptest.NewRequest(http.MethodGet, "/v1/spaces/"+customer.spaceID+"/audit-logs?"+url.Values{
+				"member_id": {oauthAgent.ID}, "action": {action},
+			}.Encode(), nil)
+			request.Header.Set("Authorization", "Bearer "+customer.token)
+			response := httptest.NewRecorder()
+			principalHandler.ServeHTTP(response, request)
+			var page struct{ Data []audit.Event }
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &page) != nil || len(page.Data) != 1 {
+				t.Fatalf("public %s audit query status=%d records=%d", action, response.Code, len(page.Data))
+			}
+			event := page.Data[0]
+			if event.MemberID != oauthAgent.ID || event.ResourceID != item.ID || event.SpaceID != customer.spaceID || event.ResourceGroupID != "" ||
+				event.PermissionKey != "invoice:approve" || event.RequestID == "" || len(event.OwnerChain) != 1 || event.OwnerChain[0].MemberID != customer.memberID ||
+				!strings.Contains(string(event.Metadata), hex.EncodeToString(digest[:])) {
+				t.Fatalf("%s audit lost its resource or delegation context", action)
+			}
+			if action == "approval.approved" {
+				if event.UserID == "" || event.UserID != event.ActorID || event.Plane != "principal" || event.CredentialType != "user_access_token" {
+					t.Fatal("approval decision audit lost the authenticated human")
+				}
+			} else if event.ApplicationID != appResult.Data.ID || event.Plane != "server" || event.CredentialType != "application_api_key" ||
+				keyResult.Data.Key.ID == "" || !strings.Contains(string(event.Metadata), keyResult.Data.Key.ID) {
+				t.Fatal("approval audit lost the authenticated application and key")
+			}
+			for _, credential := range []string{oauthToken.AccessToken, oauthToken.RefreshToken, keyResult.Data.Secret, customer.token, customerFactorResult.Data.Secret} {
+				if strings.Contains(response.Body.String(), credential) {
+					t.Fatal("public approval audit leaked a credential")
+				}
+			}
 		}
 	})
 	defaultSpaceBody, err := json.Marshal(map[string]any{

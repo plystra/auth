@@ -207,7 +207,10 @@ func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, i
 				return normalize(err)
 			}
 		}
-		if err := audit.Write(ctx, q, "member", in.OwnerMemberID, "agent.create", member.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: in.OwnerMemberID, Action: "agent.create", Outcome: "success",
+			MemberID: member.ID, UserID: in.CreatedByUser,
+		}); err != nil {
 			return err
 		}
 		version, err := q.GetMemberVersion(ctx, db.GetMemberVersionParams{MemberID: member.ID})
@@ -455,7 +458,9 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 		if takeover {
 			action = "agent.credential.takeover"
 		}
-		return audit.Write(ctx, q, "member", ownerMemberID, action, memberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: ownerMemberID, Action: action, Outcome: "success", MemberID: memberID, UserID: actorUserID,
+		})
 	})
 	if err != nil {
 		return "", err
@@ -512,7 +517,9 @@ func (s *Service) CreateOAuthRefreshCredential(ctx context.Context, memberID str
 		}); err != nil {
 			return normalize(err)
 		}
-		return audit.Write(ctx, q, "member", memberID, "agent.oauth_refresh.create", memberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: memberID, Action: "agent.oauth_refresh.create", Outcome: "success", MemberID: memberID,
+		})
 	})
 	if err != nil {
 		return "", err
@@ -570,7 +577,10 @@ func (s *Service) rotateOAuthRefresh(ctx context.Context, raw, clientID string) 
 					return err
 				}
 			}
-			return audit.WriteWithPriority(ctx, q, "member", row.MemberID, "agent.oauth_refresh.replay", row.MemberID, "failure", "high")
+			return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+				ActorType: "member", ActorID: row.MemberID, Action: "agent.oauth_refresh.replay", Outcome: "failure", MemberID: row.MemberID,
+				CredentialType: "oauth_refresh_token", Priority: "high",
+			})
 		}
 		if row.RevokedAt.Valid || !row.ExpiresAt.Time.After(now) || row.MemberStatus != "active" {
 			if family != "" {
@@ -604,7 +614,10 @@ func (s *Service) rotateOAuthRefresh(ctx context.Context, raw, clientID string) 
 			return normalize(err)
 		}
 		out = Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, OAuthClientID: row.OauthClientID.String, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, FamilyID: family, ExpiresAt: expiresAt, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}
-		return audit.Write(ctx, q, "member", row.MemberID, "agent.oauth_refresh", row.MemberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: row.MemberID, Action: "agent.oauth_refresh", Outcome: "success", MemberID: row.MemberID,
+			CredentialType: "oauth_refresh_token",
+		})
 	})
 	if err != nil {
 		return Credential{}, "", err
@@ -707,7 +720,9 @@ func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID str
 	if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, "suspended"); err != nil {
 		return err
 	}
-	return audit.Write(ctx, q, "member", memberID, "agent.oauth.revoke", memberID, "success")
+	return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		ActorType: "member", ActorID: memberID, Action: "agent.oauth.revoke", Outcome: "success", MemberID: memberID,
+	})
 }
 
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {
@@ -751,7 +766,9 @@ func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 			if err := member.SetAgentSubtreeStatusTx(ctx, q, ag.ID, "removed"); err != nil {
 				return err
 			}
-			if err := audit.Write(ctx, q, "system", "", "agent.expire", ag.ID, "success"); err != nil {
+			if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+				ActorType: "system", Action: "agent.expire", Outcome: "success", MemberID: ag.ID,
+			}); err != nil {
 				return err
 			}
 			count++
@@ -784,7 +801,9 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, s
 		if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, status); err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", ownerMemberID, "agent."+action, memberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: ownerMemberID, Action: "agent." + action, Outcome: "success", MemberID: memberID,
+		})
 	})
 }
 

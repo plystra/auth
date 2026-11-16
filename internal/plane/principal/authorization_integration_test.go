@@ -316,7 +316,7 @@ func TestSuspendedSpaceDeniesManagementLikeAuthorizationCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
-	input := &spacePathInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
+	input := &membersListInput{Authorization: "Bearer " + tokens.AccessToken, ID: spaceID}
 	if _, err := api.listMembers(ctx, input); err != nil {
 		t.Fatalf("active Space management: %v", err)
 	}

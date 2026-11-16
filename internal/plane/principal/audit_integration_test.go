@@ -188,7 +188,7 @@ func TestSpaceAuditHTTPEnforcesAgentOwnerCatalogAndTokenScope(t *testing.T) {
 	writeAuditFixtureEvents(t, st, created.ID, spaceID, "req_agent_audit", "")
 	handler := auditHTTPHandler(authz, sessions)
 	path := "/v1/spaces/" + spaceID + "/audit-logs"
-	if page := decodeAuditPage(t, getAuditHTTP(handler, issued.AccessToken, path)); len(page.Body.Data) != 1 {
+	if page := decodeAuditPage(t, getAuditHTTP(handler, issued.AccessToken, path+"?action=authz.check")); len(page.Body.Data) != 1 {
 		t.Fatalf("Agent audit entries = %d, want 1", len(page.Body.Data))
 	}
 	assertAuditHTTPDenied(t, getAuditHTTP(handler, restricted.AccessToken, path), "TOKEN_SCOPE_EXCLUDED")
@@ -229,7 +229,7 @@ func TestSpaceAuditHTTPQueriesPersistedDelegationSnapshots(t *testing.T) {
 	}
 	handler := auditHTTPHandler(authz, sessions)
 	path := "/v1/spaces/" + spaceID + "/audit-logs"
-	first := decodeAuditPage(t, getAuditHTTP(handler, tokens.AccessToken, path+"?member_id="+parent.ID))
+	first := decodeAuditPage(t, getAuditHTTP(handler, tokens.AccessToken, path+"?member_id="+parent.ID+"&action=authz.check"))
 	if len(first.Body.Data) != 1 || first.Body.Data[0].ID != ids[0] {
 		t.Fatalf("owner-chain filter returned %d records", len(first.Body.Data))
 	}
@@ -243,7 +243,7 @@ func TestSpaceAuditHTTPQueriesPersistedDelegationSnapshots(t *testing.T) {
 	for _, query := range []string{
 		"?decision_id=" + event.DecisionID,
 		"?request_id=req_chain_audit",
-		"?member_id=" + child.ID,
+		"?member_id=" + child.ID + "&action=authz.check",
 		"?member_id=" + parent.ID + "&action=authz.check",
 	} {
 		response := getAuditHTTP(handler, tokens.AccessToken, path+query)

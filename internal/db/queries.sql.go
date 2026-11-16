@@ -2055,6 +2055,56 @@ func (q *Queries) ListFactors(ctx context.Context, arg ListFactorsParams) ([]Lis
 	return items, nil
 }
 
+const listGroupMembers = `-- name: ListGroupMembers :many
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id AND gm.space_id = m.space_id
+WHERE gm.group_id = $1 AND gm.space_id = $2
+  AND m.status <> 'removed'
+ORDER BY m.created_at, m.id
+`
+
+type ListGroupMembersParams struct {
+	GroupID string `json:"group_id"`
+	SpaceID string `json:"space_id"`
+}
+
+type ListGroupMembersRow struct {
+	ID            string `json:"id"`
+	SpaceID       string `json:"space_id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	BindingPolicy string `json:"binding_policy"`
+	Status        string `json:"status"`
+}
+
+func (q *Queries) ListGroupMembers(ctx context.Context, arg ListGroupMembersParams) ([]ListGroupMembersRow, error) {
+	rows, err := q.db.Query(ctx, listGroupMembers, arg.GroupID, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListGroupMembersRow{}
+	for rows.Next() {
+		var i ListGroupMembersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.Name,
+			&i.Type,
+			&i.BindingPolicy,
+			&i.Status,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMemberAssignments = `-- name: ListMemberAssignments :many
 WITH RECURSIVE member_groups AS (
     SELECT gm.group_id
@@ -2424,11 +2474,13 @@ func (q *Queries) ListMembersInGroupSubtree(ctx context.Context, arg ListMembers
 const listMembersInSpace = `-- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = $1 AND status <> 'removed'
+  AND ($2::text IS NULL OR type = $2)
 ORDER BY created_at, id
 `
 
 type ListMembersInSpaceParams struct {
-	SpaceID string `json:"space_id"`
+	SpaceID    string      `json:"space_id"`
+	MemberType pgtype.Text `json:"member_type"`
 }
 
 type ListMembersInSpaceRow struct {
@@ -2442,7 +2494,7 @@ type ListMembersInSpaceRow struct {
 }
 
 func (q *Queries) ListMembersInSpace(ctx context.Context, arg ListMembersInSpaceParams) ([]ListMembersInSpaceRow, error) {
-	rows, err := q.db.Query(ctx, listMembersInSpace, arg.SpaceID)
+	rows, err := q.db.Query(ctx, listMembersInSpace, arg.SpaceID, arg.MemberType)
 	if err != nil {
 		return nil, err
 	}

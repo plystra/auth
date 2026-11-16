@@ -5046,6 +5046,59 @@
         "summary": "groups.create"
       }
     },
+    "/v1/spaces/{id}/groups/{group_id}/members": {
+      "get": {
+        "operationId": "groups.members.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputListMemberBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "groups.members.list"
+      }
+    },
     "/v1/spaces/{id}/groups/{group_id}/members/{mid}": {
       "put": {
         "operationId": "groups.members.add",
@@ -5551,6 +5604,19 @@
             "name": "id",
             "required": true,
             "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "enum": [
+                "human",
+                "agent",
+                "application"
+              ],
               "type": "string"
             }
           }

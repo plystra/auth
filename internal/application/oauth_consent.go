@@ -151,6 +151,7 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		if err := s.Authorization.ValidateOAuthGrantTx(ctx, q, member.ID, member.SpaceID, permissions); err != nil {
 			return err
 		}
+		ctx = audit.WithCaller(ctx, audit.Caller{UserID: in.UserID, ApplicationID: client.ID, CredentialType: "user_access_token"})
 		current, err := s.Agents.OAuthAgentTx(ctx, q, member.ID, client.ClientID)
 		if err != nil {
 			var public *apierr.Error
@@ -201,7 +202,9 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		if err := s.Applications.FinishOAuthAuthorizationRequestTx(ctx, q, request.ID, "approved"); err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "user", in.UserID, "oauth.consent.approve", current.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "user", ActorID: in.UserID, Action: "oauth.consent.approve", Outcome: "success", MemberID: current.ID,
+		}); err != nil {
 			return err
 		}
 		query.Set("code", code.Value())

@@ -2,6 +2,7 @@ package authorization
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 
 	"github.com/jackc/pgx/v5"
@@ -123,7 +124,15 @@ func (s *Service) checkBusiness(ctx context.Context, in CheckRequest, resourceTy
 		if count != 1 {
 			return apierr.New("CONFLICT", "the approval was already used")
 		}
-		if err := audit.Write(ctx, q, "member", in.MemberID, "approval.consume", approved.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: in.MemberID, Action: "approval.consume", Outcome: "success", MemberID: in.MemberID,
+			Resource:   audit.Resource{Type: "approval", ID: approved.ID, SpaceID: in.ResourceSpace, GroupID: in.ResourceGroup},
+			Permission: in.Permission, PolicyVersion: allowedVersion,
+			Metadata: map[string]string{
+				"request_digest": hex.EncodeToString(approved.RequestDigest), "approver_member_id": approved.ApproverMemberID,
+				"requested_resource_type": resourceType, "requested_resource_id": resourceID,
+			},
+		}); err != nil {
 			return err
 		}
 		decision, version = allowed, allowedVersion

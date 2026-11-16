@@ -129,7 +129,7 @@ func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Req
 		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", in.AgentMemberID, "approval.create", created.ID, "success")
+		return audit.WriteSecurityEvent(ctx, q, approvalAuditEvent(created, "member", in.AgentMemberID, "approval.create"))
 	})
 	if err != nil {
 		return Request{}, err
@@ -171,7 +171,7 @@ func (s *Service) CreateBusiness(ctx context.Context, applicationKeyID, agentMem
 		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "application", applicationKeyID, "approval.create", created.ID, "success")
+		return audit.WriteSecurityEvent(ctx, q, approvalAuditEvent(created, "application", applicationKeyID, "approval.create"))
 	})
 	if err != nil {
 		return Request{}, err
@@ -261,12 +261,26 @@ func (s *Service) Decide(ctx context.Context, userID, approvalID string, approve
 		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "user", userID, "approval."+status, approvalID, "success")
+		event := approvalAuditEvent(decided, "user", userID, "approval."+status)
+		event.UserID = userID
+		return audit.WriteSecurityEvent(ctx, q, event)
 	})
 	if err != nil {
 		return Request{}, err
 	}
 	return publicRequest(decided), nil
+}
+
+func approvalAuditEvent(row db.ApprovalRequest, actorType, actorID, action string) audit.SecurityEvent {
+	return audit.SecurityEvent{
+		ActorType: actorType, ActorID: actorID, Action: action, Outcome: "success", MemberID: row.AgentMemberID,
+		Resource:   audit.Resource{Type: "approval", ID: row.ID, SpaceID: row.ResourceSpaceID, GroupID: row.ResourceGroupID.String},
+		Permission: row.PermissionKey,
+		Metadata: map[string]string{
+			"request_digest": hex.EncodeToString(row.RequestDigest), "approver_member_id": row.ApproverMemberID,
+			"requested_resource_type": row.ResourceType, "requested_resource_id": row.ResourceID,
+		},
+	}
 }
 
 func nullableText(value string) pgtype.Text {

@@ -228,6 +228,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
 	route.Register(api, route.NewSpec("invitations.create", "POST", "/v1/spaces/{id}/invitations", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.bindings:manage"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createInvitation)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
+	route.Register(api, route.NewSpec("groups.members.list", "GET", "/v1/spaces/{id}/groups/{group_id}/members", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}), a.listGroupMembers)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
 
@@ -294,20 +295,6 @@ func (a *API) listChildren(ctx context.Context, in *spacePathInput) (*authorizat
 	}
 	out := &authorizationDataOutput[[]authorization.Space]{}
 	out.Body.Data = children
-	return out, nil
-}
-
-func (a *API) listMembers(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Member], error) {
-	_, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
-	if err != nil {
-		return nil, err
-	}
-	members, err := a.Authorization.ListMembers(ctx, in.ID)
-	if err != nil {
-		return nil, err
-	}
-	out := &authorizationDataOutput[[]authorization.Member]{}
-	out.Body.Data = members
 	return out, nil
 }
 
@@ -664,7 +651,7 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	ctx = authorization.WithTokenScopes(ctx, member.ID, claims.Scopes)
+	ctx = authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes)
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup,
 	})
@@ -735,7 +722,7 @@ func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHead
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	ctx = authorization.WithTokenScopes(ctx, member.ID, claims.Scopes)
+	ctx = authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes)
 	resourceGroup := ""
 	if targetMemberID != "" {
 		resourceGroup, err = a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
@@ -766,7 +753,7 @@ func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, s
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	return member, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
+	return member, authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes), nil
 }
 
 func (a *API) resolvePrincipalMemberClaims(ctx context.Context, claims security.Claims, spaceID string) (authorization.Member, error) {

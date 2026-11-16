@@ -2,6 +2,24 @@
 INSERT INTO audit_logs (id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata, plane, credential_type)
 VALUES (sqlc.arg(id), sqlc.arg(actor_type), sqlc.narg(actor_id), sqlc.arg(action), sqlc.narg(resource_type), sqlc.narg(resource_id), sqlc.arg(outcome), sqlc.narg(request_id), COALESCE(sqlc.narg(metadata), '{}'::jsonb), sqlc.arg(plane), sqlc.arg(credential_type));
 
+-- name: GetAuditMemberLocation :one
+SELECT m.space_id, m.type AS member_type, m.home_group_id
+FROM members m WHERE m.id = sqlc.arg(member_id);
+
+-- name: AppendSecurityEventAudit :exec
+INSERT INTO audit_logs (
+    id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata,
+    plane, credential_type, space_id, resource_group_id, member_id, member_type, user_id,
+    application_id, owner_chain, permission_key, policy_version
+)
+VALUES (
+    sqlc.arg(id), sqlc.arg(actor_type), sqlc.narg(actor_id), sqlc.arg(action),
+    sqlc.arg(resource_type), sqlc.arg(resource_id), sqlc.arg(outcome), sqlc.narg(request_id), sqlc.arg(metadata),
+    sqlc.arg(plane), sqlc.arg(credential_type), sqlc.arg(space_id), sqlc.narg(resource_group_id),
+    sqlc.arg(member_id), sqlc.arg(member_type), sqlc.narg(user_id), sqlc.narg(application_id),
+    sqlc.arg(owner_chain), sqlc.narg(permission_key), sqlc.narg(policy_version)
+);
+
 -- name: GetAuditMemberChain :many
 WITH RECURSIVE chain AS (
     SELECT m.id, m.space_id, m.type AS member_type, g.owner_member_id,

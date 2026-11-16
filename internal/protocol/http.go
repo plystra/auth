@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
@@ -184,7 +185,8 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, apierr.New("invalid_target", "resource is not registered for this client"))
 			return
 		}
-		credential, refresh, err := h.Agents.RotateOAuthRefreshForClient(r.Context(), r.Form.Get("refresh_token"), client.ClientID)
+		ctx := audit.WithCaller(r.Context(), audit.Caller{ApplicationID: client.ID, CredentialType: "oauth_refresh_token"})
+		credential, refresh, err := h.Agents.RotateOAuthRefreshForClient(ctx, r.Form.Get("refresh_token"), client.ClientID)
 		if err != nil {
 			var publicErr *apierr.Error
 			if errors.As(err, &publicErr) && publicErr.Code == "invalid_client" {
@@ -312,7 +314,8 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
-	refresh, err := h.Agents.CreateOAuthRefreshCredential(r.Context(), consumed.MemberID, time.Time{})
+	ctx := audit.WithCaller(r.Context(), audit.Caller{UserID: consumed.UserID, ApplicationID: client.ID, CredentialType: "oauth_authorization_code"})
+	refresh, err := h.Agents.CreateOAuthRefreshCredential(ctx, consumed.MemberID, time.Time{})
 	if err != nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
@@ -359,7 +362,8 @@ func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(raw, "ply_rt_") {
-		_, err := h.Agents.RevokeOAuthRefreshToken(r.Context(), raw)
+		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "oauth_refresh_token"})
+		_, err := h.Agents.RevokeOAuthRefreshToken(ctx, raw)
 		if err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
 			return
@@ -369,7 +373,8 @@ func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	claims, err := h.Sessions.VerifyAccess(raw)
 	if err == nil && claims.Type == "agent" && claims.Subject != "" {
-		if err := h.Agents.RevokeOAuth(r.Context(), claims.Subject); err != nil {
+		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_access_token"})
+		if err := h.Agents.RevokeOAuth(ctx, claims.Subject); err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
 			return
 		}

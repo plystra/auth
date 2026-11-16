@@ -109,6 +109,70 @@ func (q *Queries) AppendAuthorizationDecisionAudit(ctx context.Context, arg Appe
 	return err
 }
 
+const appendSecurityEventAudit = `-- name: AppendSecurityEventAudit :exec
+INSERT INTO audit_logs (
+    id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata,
+    plane, credential_type, space_id, resource_group_id, member_id, member_type, user_id,
+    application_id, owner_chain, permission_key, policy_version
+)
+VALUES (
+    $1, $2, $3, $4,
+    $5, $6, $7, $8, $9,
+    $10, $11, $12, $13,
+    $14, $15, $16, $17,
+    $18, $19, $20
+)
+`
+
+type AppendSecurityEventAuditParams struct {
+	ID              string      `json:"id"`
+	ActorType       string      `json:"actor_type"`
+	ActorID         pgtype.Text `json:"actor_id"`
+	Action          string      `json:"action"`
+	ResourceType    pgtype.Text `json:"resource_type"`
+	ResourceID      pgtype.Text `json:"resource_id"`
+	Outcome         string      `json:"outcome"`
+	RequestID       pgtype.Text `json:"request_id"`
+	Metadata        []byte      `json:"metadata"`
+	Plane           string      `json:"plane"`
+	CredentialType  string      `json:"credential_type"`
+	SpaceID         pgtype.Text `json:"space_id"`
+	ResourceGroupID pgtype.Text `json:"resource_group_id"`
+	MemberID        pgtype.Text `json:"member_id"`
+	MemberType      pgtype.Text `json:"member_type"`
+	UserID          pgtype.Text `json:"user_id"`
+	ApplicationID   pgtype.Text `json:"application_id"`
+	OwnerChain      []byte      `json:"owner_chain"`
+	PermissionKey   pgtype.Text `json:"permission_key"`
+	PolicyVersion   pgtype.Int8 `json:"policy_version"`
+}
+
+func (q *Queries) AppendSecurityEventAudit(ctx context.Context, arg AppendSecurityEventAuditParams) error {
+	_, err := q.db.Exec(ctx, appendSecurityEventAudit,
+		arg.ID,
+		arg.ActorType,
+		arg.ActorID,
+		arg.Action,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.Outcome,
+		arg.RequestID,
+		arg.Metadata,
+		arg.Plane,
+		arg.CredentialType,
+		arg.SpaceID,
+		arg.ResourceGroupID,
+		arg.MemberID,
+		arg.MemberType,
+		arg.UserID,
+		arg.ApplicationID,
+		arg.OwnerChain,
+		arg.PermissionKey,
+		arg.PolicyVersion,
+	)
+	return err
+}
+
 const getAuditMemberChain = `-- name: GetAuditMemberChain :many
 WITH RECURSIVE chain AS (
     SELECT m.id, m.space_id, m.type AS member_type, g.owner_member_id,
@@ -154,6 +218,28 @@ func (q *Queries) GetAuditMemberChain(ctx context.Context, arg GetAuditMemberCha
 		return nil, err
 	}
 	return items, nil
+}
+
+const getAuditMemberLocation = `-- name: GetAuditMemberLocation :one
+SELECT m.space_id, m.type AS member_type, m.home_group_id
+FROM members m WHERE m.id = $1
+`
+
+type GetAuditMemberLocationParams struct {
+	MemberID string `json:"member_id"`
+}
+
+type GetAuditMemberLocationRow struct {
+	SpaceID     string      `json:"space_id"`
+	MemberType  string      `json:"member_type"`
+	HomeGroupID pgtype.Text `json:"home_group_id"`
+}
+
+func (q *Queries) GetAuditMemberLocation(ctx context.Context, arg GetAuditMemberLocationParams) (GetAuditMemberLocationRow, error) {
+	row := q.db.QueryRow(ctx, getAuditMemberLocation, arg.MemberID)
+	var i GetAuditMemberLocationRow
+	err := row.Scan(&i.SpaceID, &i.MemberType, &i.HomeGroupID)
+	return i, err
 }
 
 const getSpaceAuditCursor = `-- name: GetSpaceAuditCursor :one

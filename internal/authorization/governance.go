@@ -3,6 +3,7 @@ package authorization
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -80,7 +81,15 @@ func (s *Service) checkGovernanceTx(ctx context.Context, q *db.Queries, in Check
 	if count != 1 {
 		return decision, nil
 	}
-	if err := audit.Write(ctx, q, "member", in.MemberID, "approval.consume", row.ID, "success"); err != nil {
+	if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		ActorType: "member", ActorID: in.MemberID, Action: "approval.consume", Outcome: "success", MemberID: in.MemberID,
+		Resource:   audit.Resource{Type: "approval", ID: row.ID, SpaceID: in.ResourceSpace, GroupID: in.ResourceGroup},
+		Permission: in.Permission,
+		Metadata: map[string]string{
+			"request_digest": hex.EncodeToString(row.RequestDigest), "approver_member_id": row.ApproverMemberID,
+			"requested_resource_type": row.ResourceType, "requested_resource_id": row.ResourceID,
+		},
+	}); err != nil {
 		return engine.Decision{}, err
 	}
 	return allowed, nil

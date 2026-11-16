@@ -72,7 +72,16 @@ ORDER BY m.created_at, m.id;
 -- name: ListMembersInSpace :many
 SELECT id, space_id, name, type, binding_policy, status, created_at
 FROM members WHERE space_id = sqlc.arg(space_id) AND status <> 'removed'
+  AND (sqlc.narg(member_type)::text IS NULL OR type = sqlc.narg(member_type))
 ORDER BY created_at, id;
+
+-- name: ListGroupMembers :many
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status
+FROM members m
+JOIN group_members gm ON gm.member_id = m.id AND gm.space_id = m.space_id
+WHERE gm.group_id = sqlc.arg(group_id) AND gm.space_id = sqlc.arg(space_id)
+  AND m.status <> 'removed'
+ORDER BY m.created_at, m.id;
 
 -- name: GetMemberInSpace :one
 SELECT id, space_id, name, type, binding_policy, status, created_at

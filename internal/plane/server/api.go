@@ -217,6 +217,7 @@ func (a *API) createApproval(ctx context.Context, in *ApprovalCreateInput) (*App
 	if err != nil || len(digest) != 32 {
 		return nil, apierr.New("VALIDATION_FAILED", "request_digest must be a SHA-256 hex digest")
 	}
+	ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: key.ApplicationID, KeyID: key.ID, CredentialType: "application_api_key"})
 	created, err := a.Approvals.CreateBusiness(ctx, key.ID, evaluation.memberID, in.Body.Action, approval.Resource{
 		Type: in.Body.Resource.Type, ID: in.Body.Resource.ID, SpaceID: evaluation.spaceID,
 		GroupID: in.Body.Resource.GroupID, OwnerMemberID: in.Body.Resource.OwnerMemberID,
@@ -367,6 +368,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	var decision engine.Decision
 	var policyVersion int64
 	if consumeApproval {
+		ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: key.ApplicationID, KeyID: key.ID, UserID: resolved.UserID, CredentialType: "application_api_key"})
 		decision, policyVersion, err = a.Authorization.CheckBusiness(ctx, check, body.Resource.Type, body.Resource.ID)
 	} else if requiredScope == "auth.authz:explain" {
 		decision, policyVersion, err = a.Authorization.ExplainBusiness(ctx, check, body.Resource.Type, body.Resource.ID)

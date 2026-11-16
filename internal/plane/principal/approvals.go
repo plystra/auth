@@ -79,7 +79,7 @@ func (a *API) decideApproval(ctx context.Context, in *decideApprovalInput, appro
 	if approve {
 		operation = "approvals.approve"
 	}
-	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, map[string]any{"approval_id": in.ID})
+	ctx, err = a.principalStepUpContext(principalAuditContext(ctx, claims), in.Authorization, operation, map[string]any{"approval_id": in.ID})
 	if err != nil {
 		return nil, err
 	}
