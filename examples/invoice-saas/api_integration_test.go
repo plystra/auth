@@ -274,5 +274,22 @@ func TestInvoiceSaaSPostgresAndHTTP(t *testing.T) {
 		if err != nil || row.AmountCents != 456 || row.Currency != "EUR" {
 			t.Fatal("public CLI did not persist the seeded invoice")
 		}
+		var after string
+		for range 2 {
+			command := exec.CommandContext(ctx, binary, "audit-status", "--limit", "1", "--after", after)
+			command.Env = append(os.Environ(), "INVOICE_SAAS_DATABASE_URL="+database.URL)
+			output, err := command.CombinedOutput()
+			var status struct {
+				Data []AuditDeliveryStatus `json:"data"`
+			}
+			if err != nil || json.Unmarshal(output, &status) != nil || len(status.Data) != 1 || status.Data[0].ID == after ||
+				status.Data[0].State != "pending" || status.Data[0].RequestID != "req_invoice_test" || status.Data[0].CreatedAt.IsZero() {
+				t.Fatal("public audit-status CLI omitted durable delivery state or pagination")
+			}
+			after = status.Data[0].ID
+			if strings.Contains(string(output), token) || strings.Contains(string(output), "example-server-key") || strings.Contains(string(output), "destination_hash") {
+				t.Fatal("audit-status exposed credentials or internal fingerprints")
+			}
+		}
 	})
 }

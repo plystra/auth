@@ -71,19 +71,19 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("invoice-saas.approve", "POST", "/invoices/{id}/approve", route.Principal, "invoice:approve", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.approve)
 }
 
-func (a *API) load(ctx context.Context, bearer, id string) (db.Invoice, secret.String, string, error) {
-	token, memberID, err := a.Auth.authenticate(ctx, bearer)
+func (a *API) load(ctx context.Context, bearer, id string) (db.Invoice, secret.String, subjectIdentity, error) {
+	token, subject, err := a.Auth.authenticate(ctx, bearer)
 	if err != nil {
-		return db.Invoice{}, "", "", err
+		return db.Invoice{}, "", subjectIdentity{}, err
 	}
 	row, err := a.Store.queries.GetInvoice(ctx, db.GetInvoiceParams{ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return db.Invoice{}, "", "", apierr.New("NOT_FOUND", "The invoice was not found.")
+		return db.Invoice{}, "", subjectIdentity{}, apierr.New("NOT_FOUND", "The invoice was not found.")
 	}
 	if err != nil {
-		return db.Invoice{}, "", "", unavailable()
+		return db.Invoice{}, "", subjectIdentity{}, unavailable()
 	}
-	return row, token, memberID, nil
+	return row, token, subject, nil
 }
 
 func invoiceResource(row db.Invoice) resource {
@@ -91,12 +91,20 @@ func invoiceResource(row db.Invoice) resource {
 }
 
 func (a *API) read(ctx context.Context, in *InvoiceInput) (*InvoiceOutput, error) {
-	row, token, _, err := a.load(ctx, in.Authorization, in.ID)
+	row, token, subject, err := a.load(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
 	}
 	decision, err := a.Auth.check(ctx, token, "invoice:read", invoiceResource(row), requestinfo.Get(ctx).ID)
 	if err != nil {
+		_ = a.Store.recordAudit(ctx, row, subject, "invoice.read", "failure", "")
+		return nil, err
+	}
+	outcome := "success"
+	if decision.Decision != "allow" {
+		outcome = "deny"
+	}
+	if err := a.Store.recordAudit(ctx, row, subject, "invoice.read", outcome, ""); err != nil {
 		return nil, err
 	}
 	if decision.Decision != "allow" {
@@ -106,51 +114,75 @@ func (a *API) read(ctx context.Context, in *InvoiceInput) (*InvoiceOutput, error
 }
 
 func (a *API) approve(ctx context.Context, in *ApproveInput) (*InvoiceOutput, error) {
-	row, token, memberID, err := a.load(ctx, in.Authorization, in.ID)
+	row, token, subject, err := a.load(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
+	}
+	digest, err := approvalDigest(row)
+	if err != nil {
+		return nil, unavailable()
 	}
 	requestID := requestinfo.Get(ctx).ID
 	decision, err := a.Auth.check(ctx, token, "invoice:approve", invoiceResource(row), requestID)
 	if err != nil {
+		_ = a.Store.recordAudit(ctx, row, subject, "invoice.approve", "failure", digest)
 		return nil, err
 	}
 	if decision.Decision != "allow" {
-		var approvalID, digest string
+		var approvalID string
 		if decision.DenyCode == "APPROVAL_REQUIRED" && row.Status == "draft" && row.Version == in.Body.ExpectedVersion {
-			// Digest and reason describe immutable, server-read invoice facts.
-			payload, err := json.Marshal(struct {
-				Action      string `json:"action"`
-				InvoiceID   string `json:"invoice_id"`
-				Version     int64  `json:"version"`
-				AmountCents int64  `json:"amount_cents"`
-				Currency    string `json:"currency"`
-			}{"invoice:approve", row.ID, row.Version, row.AmountCents, row.Currency})
-			if err != nil {
-				return nil, unavailable()
-			}
-			sum := sha256.Sum256(payload)
-			digest = hex.EncodeToString(sum[:])
 			reason := fmt.Sprintf("Approve invoice %s: %d minor units %s, version %d.", row.ID, row.AmountCents, row.Currency, row.Version)
 			approvalID, err = a.Auth.requestApproval(ctx, token, invoiceResource(row), digest, reason, requestID)
 			if err != nil {
+				_ = a.Store.recordAudit(ctx, row, subject, "invoice.approve", "failure", digest)
 				return nil, err
 			}
+		}
+		if err := a.Store.recordAudit(ctx, row, subject, "invoice.approve", "deny", digest); err != nil {
+			return nil, err
 		}
 		return nil, denied(decision, approvalID, digest)
 	}
 	// Auth's decision and this SaaS mutation are separate transactions. The
 	// version predicate prevents a concurrent request from approving twice.
-	approved, err := a.Store.queries.ApproveInvoice(ctx, db.ApproveInvoiceParams{
-		ID: row.ID, ExpectedVersion: in.Body.ExpectedVersion, MemberID: pgtype.Text{String: memberID, Valid: true},
+	var approved db.Invoice
+	var conflict bool
+	err = a.Store.inTx(ctx, func(q *db.Queries, tx pgx.Tx) error {
+		var err error
+		approved, err = q.ApproveInvoice(ctx, db.ApproveInvoiceParams{
+			ID: row.ID, ExpectedVersion: in.Body.ExpectedVersion, MemberID: pgtype.Text{String: subject.MemberID, Valid: true},
+		})
+		outcome := "success"
+		if errors.Is(err, pgx.ErrNoRows) {
+			conflict, outcome = true, "failure"
+		} else if err != nil {
+			return err
+		}
+		return a.Store.enqueueAudit(ctx, q, tx, row, subject, "invoice.approve", outcome, digest)
 	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, apierr.New("CONFLICT", "The invoice version changed or it is already approved.")
-	}
 	if err != nil {
 		return nil, unavailable()
 	}
+	if conflict {
+		return nil, apierr.New("CONFLICT", "The invoice version changed or it is already approved.")
+	}
 	return invoiceOutput(approved, decision.DecisionID), nil
+}
+
+func approvalDigest(row db.Invoice) (string, error) {
+	// Digest and reason describe immutable, server-read invoice facts.
+	payload, err := json.Marshal(struct {
+		Action      string `json:"action"`
+		InvoiceID   string `json:"invoice_id"`
+		Version     int64  `json:"version"`
+		AmountCents int64  `json:"amount_cents"`
+		Currency    string `json:"currency"`
+	}{"invoice:approve", row.ID, row.Version, row.AmountCents, row.Currency})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func denied(decision decision, approvalID, digest string) *apierr.Error {

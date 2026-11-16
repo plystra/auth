@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -59,7 +60,29 @@ func command() *cobra.Command {
 	seed.Flags().StringVar(&groupID, "group-id", "", "authoritative resource group ID")
 	seed.Flags().Int64Var(&amount, "amount-cents", 0, "positive amount in minor units")
 	seed.Flags().StringVar(&currency, "currency", "", "three-letter uppercase currency")
-	root.AddCommand(seed, &cobra.Command{Use: "serve", Args: cobra.NoArgs, RunE: serve})
+	var after string
+	var limit int
+	auditStatus := &cobra.Command{Use: "audit-status", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
+		databaseURL, err := required("INVOICE_SAAS_DATABASE_URL")
+		if err != nil {
+			return err
+		}
+		store, err := invoicesaas.OpenStore(cmd.Context(), databaseURL)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		rows, err := store.AuditStatus(cmd.Context(), after, limit)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(struct {
+			Data []invoicesaas.AuditDeliveryStatus `json:"data"`
+		}{rows})
+	}}
+	auditStatus.Flags().StringVar(&after, "after", "", "continue after this event ID")
+	auditStatus.Flags().IntVar(&limit, "limit", 50, "number of delivery statuses, from 1 to 100")
+	root.AddCommand(seed, auditStatus, &cobra.Command{Use: "serve", Args: cobra.NoArgs, RunE: serve})
 	return root
 }
 
@@ -90,6 +113,14 @@ func serve(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 	defer store.Close()
+	if err := store.StartAudit(cmd.Context(), client); err != nil {
+		return err
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = store.StopAudit(ctx)
+	}()
 	address := os.Getenv("INVOICE_SAAS_HTTP_ADDR")
 	if address == "" {
 		address = "127.0.0.1:8090"

@@ -7,10 +7,15 @@ import (
 	"errors"
 	"io/fs"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/plystra/auth/examples/invoice-saas/internal/db"
+	authdb "github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/store"
 	"github.com/pressly/goose/v3"
+	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/riverdriver/riverpgxv5"
 )
 
 //go:embed migrations/*.sql
@@ -39,6 +44,7 @@ func Migrate(ctx context.Context, databaseURL string) error {
 type Store struct {
 	pool    *pgxpool.Pool
 	queries *db.Queries
+	jobs    *river.Client[pgx.Tx]
 }
 
 func OpenStore(ctx context.Context, databaseURL string) (*Store, error) {
@@ -50,10 +56,27 @@ func OpenStore(ctx context.Context, databaseURL string) (*Store, error) {
 		pool.Close()
 		return nil, errors.New("cannot connect to the Invoice SaaS database")
 	}
-	return &Store{pool: pool, queries: db.New(pool)}, nil
+	jobs, err := river.NewClient(riverpgxv5.New(pool), &river.Config{})
+	if err != nil {
+		pool.Close()
+		return nil, errors.New("cannot configure the Invoice SaaS audit queue")
+	}
+	return &Store{pool: pool, queries: db.New(pool), jobs: jobs}, nil
 }
 
 func (s *Store) Close() { s.pool.Close() }
+
+// Reuse the infrastructure transaction boundary against the independent SaaS
+// pool. Only the example's generated queries access this database.
+func (s *Store) inTx(ctx context.Context, fn func(*db.Queries, pgx.Tx) error) error {
+	return (&store.Store{Pool: s.pool}).InTx(ctx, func(q *authdb.Queries) error {
+		tx, ok := q.Transaction()
+		if !ok {
+			return unavailable()
+		}
+		return fn(db.New(tx), tx)
+	})
+}
 
 func (s *Store) Seed(ctx context.Context, id, spaceID, groupID string, amountCents int64, currency string) error {
 	_, err := s.queries.CreateInvoice(ctx, db.CreateInvoiceParams{

@@ -14,7 +14,7 @@
 | `INVOICE_SAAS_AUTH_ISSUER` | Auth 签发令牌时使用的精确发行方 URL |
 | `INVOICE_SAAS_AUTH_SERVER_URL` | Auth 服务端面的根 URL，例如本地 `http://127.0.0.1:8081` |
 | `INVOICE_SAAS_CLIENT_ID` | 已审批并安装的 Invoice SaaS 应用 `client_id` |
-| `INVOICE_SAAS_API_KEY` | 该应用的服务端密钥；授予 `auth.authz:check` 并限制在目标客户范围内。应用清单、有效安装和 Agent 当前权威须覆盖业务动作 |
+| `INVOICE_SAAS_API_KEY` | 该应用的服务端密钥；授予 `auth.authz:check` 与 `auth.audit:write`，显式启用 `allow_subject_assertion` 并限制在目标客户范围内。应用清单、有效安装和 Agent 当前权威须覆盖业务动作 |
 | `INVOICE_SAAS_AUTH_JWKS_URL` | 可选；默认发行方 URL 加 `/.well-known/jwks.json`。本地测试或内部反向代理可显式指定实际 JWKS 地址 |
 | `INVOICE_SAAS_HTTP_ADDR` | 可选；默认 `127.0.0.1:8090` |
 
@@ -26,7 +26,7 @@ Auth URL 必须使用 HTTPS；本机演示允许显式回环 IP 上的 HTTP。HT
 go run ./examples/invoice-saas/cmd/invoice-saas migrate
 ```
 
-该命令使用示例自己的迁移表 `invoice_saas_migrations`，可重复执行。服务进程应改用仅可操作业务表的账户。不要让业务账户访问 Auth 数据库。
+该命令使用示例自己的迁移表 `invoice_saas_migrations`，可重复执行。升级已有示例数据库时也须先执行：新增的 `0002`、`0003` 创建该业务数据库自己的 River 队列和审计投递记录，不改变 Auth 数据库。服务进程使用受限业务账户，需有发票及投递表的读写权限、River 表的运行权限及其序列的使用权限。不要让业务账户访问 Auth 数据库。
 
 按手册第 14 节创建资源项目组后，在部署主机导入演示发票。替换以下 Space 与组 ID 为实际响应中的值；资源归属由业务数据库维护，业务 HTTP 请求不能指定或覆盖它们。
 
@@ -70,6 +70,19 @@ Auth 判断与 SaaS 数据库变更是两个独立事务。网络中断、版本
 
 保留业务响应的 `X-Request-Id` 与判断 ID。服务端以同一主体令牌、动作及数据库读取的真实资源事实调用 `authz.explain`；解释不会消费批准，也不能用作执行凭据。授权用户可调用 `GET /v1/spaces/{id}/audit-logs?decision_id=...` 或按 `request_id`、`member_id`、`action` 查询，关联判断、审批与委托链；不要把主体令牌写进日志。
 
+`serve` 同时启动 River 审计消费者。读取、拒绝及失败记录使用 `invoice.read` / `invoice.approve` 事件名；批准成功的发票变更、投递记录和 River 任务在业务数据库的同一事务中提交。入队失败返回 `503`，不提交批准；中央审计暂时不可用时，已提交的业务事件仍留在本地队列，重启后继续投递。后台以已验签的成员和用户 ID 作应用断言，调用公开 `audit.write`，不保存访问令牌；Auth 按投递时的成员、绑定、安装与写入权限重新验证，不放宽撤销规则。
+
+用主机命令查看 JSON 状态，传入末条事件 ID 可继续分页：
+
+```text
+go run ./examples/invoice-saas/cmd/invoice-saas audit-status --limit 50
+go run ./examples/invoice-saas/cmd/invoice-saas audit-status --after <evt_id> --limit 50
+```
+
+`delivered` 带 Auth 审计 ID；`pending` 等待或重试；`failed` 表示 River 自动重试已耗尽；`blocked` 需要核对不确定结果。响应丢失或结果不明时使用原幂等 key；只有收到明确重放的失败响应才推进持久化投递代次。Auth 的去重窗口为 24 小时，示例在首次尝试 23 小时后停止不确定重试；已尝试事件的服务端 URL、应用或密钥变化也会停止发送。失败、阻塞及其事件记录保留，不自动清除或伪造回执。
+
+投递使用当前有效的 ID 断言，主体删除、绑定撤销或安装失权可阻止历史待投递事件继续提交。运维人员须按 `request_id`、资源及所有者链查询 Auth，核对是否已有记录，再处理保留的失败任务；不能直接换 key、修改主体或删除记录来掩盖未知结果。本示例不提供跳过核对的自动重发，也不宣称无限期恰好一次投递。完整投递边界和验证步骤见[接入手册第 16–17 节](../../../auth-docs/mvp-onboarding.md)。
+
 ## 自动化验证
 
 从仓库根目录运行，Docker 必须可用：
@@ -80,6 +93,6 @@ go test -race ./cmd/plystra-auth -run '^TestEmptyDeploymentCreatesBusinessPermis
 make check
 ```
 
-示例测试验证独立数据库、重复迁移、SQL 查询准备、公开 CLI、JWT 与 JWKS 安全边界、真实 HTTP、失败关闭和并发业务变更。空库接入测试通过公开 Auth API/CLI 建立应用、安装、用户、父子 Agent 与授予，再通过独立 SaaS API 验证资源组隔离、审批后的实际业务落库、单次消费、Auth 故障与撤销审计。专项失败测试使用可控 HTTP 响应；空库场景使用真正的 Auth 授权与审批服务。
+示例测试验证独立数据库、重复迁移、SQL 查询准备、公开 CLI、JWT 与 JWKS 安全边界、真实 HTTP、失败关闭和并发业务变更。`TestInvoiceSaaSAuditOutbox` 覆盖业务与入队回滚、River 重启恢复、响应丢失、缓存失败恢复、凭据变化、幂等窗口及秘密扫描。空库接入测试通过公开 Auth API/CLI 建立应用、安装、用户、父子 Agent 与授予，再通过独立 SaaS API 验证资源组隔离、审批后的实际业务落库、单次消费、Auth 故障、中央业务审计故障恢复后的唯一成功记录及撤销审计。专项失败测试使用可控 HTTP 响应；空库场景使用真正的 Auth 授权与审批服务。
 
 当前原生 Agent 分支已有独立业务示例；M3 的 OAuth Agent 治理受众契约及 M5/M6 完整终验仍以 [roadmap](../../../auth-docs/roadmap.md) 为准。完整托管界面、SDK 与其余平台能力继续按长期路线图实施。

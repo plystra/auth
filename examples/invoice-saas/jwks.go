@@ -24,41 +24,46 @@ type keyCache struct {
 	expires, lastMiss time.Time
 }
 
-func (c *AuthClient) authenticate(ctx context.Context, bearer string) (secret.String, string, error) {
+type subjectIdentity struct {
+	MemberID string
+	UserID   string
+}
+
+func (c *AuthClient) authenticate(ctx context.Context, bearer string) (secret.String, subjectIdentity, error) {
 	invalid := apierr.New("INVALID_TOKEN", "A valid SaaS access token is required.")
 	if !strings.HasPrefix(bearer, "Bearer ") {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	token := secret.New(strings.TrimPrefix(bearer, "Bearer "))
 	if len(token.Value()) > 16384 || strings.Count(token.Value(), ".") != 2 {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	message, err := jws.ParseString(token.Value())
 	if err != nil || len(message.Signatures()) != 1 {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	headers := message.Signatures()[0].ProtectedHeaders()
 	algorithm, _ := headers.Algorithm()
 	typ, _ := headers.Type()
 	kid, _ := headers.KeyID()
 	if algorithm != jwa.ES256() || typ != "at+jwt" || kid == "" || len(kid) > 128 {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	if critical, exists := headers.Critical(); exists && len(critical) != 0 {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	key, err := c.signingKey(ctx, kid)
 	if err != nil {
-		return "", "", err
+		return "", subjectIdentity{}, err
 	}
 	if key == nil {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	claims, err := jwt.ParseString(token.Value(), jwt.WithKey(jwa.ES256(), key), jwt.WithValidate(true),
 		jwt.WithIssuer(c.config.Issuer), jwt.WithAudience(c.config.ClientID),
 		jwt.WithRequiredClaim("exp"), jwt.WithRequiredClaim("iat"), jwt.WithRequiredClaim("sub"), jwt.WithRequiredClaim("jti"))
 	if err != nil {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
 	var kind, memberID string
 	_ = claims.Get("typ", &kind)
@@ -66,9 +71,13 @@ func (c *AuthClient) authenticate(ctx context.Context, bearer string) (secret.St
 	subject, _ := claims.Subject()
 	jwtID, _ := claims.JwtID()
 	if subject == "" || memberID == "" || jwtID == "" || (kind != "agent" && kind != "user") {
-		return "", "", invalid
+		return "", subjectIdentity{}, invalid
 	}
-	return token, memberID, nil
+	identity := subjectIdentity{MemberID: memberID}
+	if kind == "user" {
+		identity.UserID = subject
+	}
+	return token, identity, nil
 }
 
 func (c *AuthClient) signingKey(ctx context.Context, kid string) (*ecdsa.PublicKey, error) {

@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/plystra/auth/examples/invoice-saas"
 	"github.com/plystra/auth/internal/approval"
@@ -54,8 +55,9 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 	principal := httptest.NewServer(scenario.Principal)
 	t.Cleanup(principal.Close)
 	var authUnavailable atomic.Bool
+	var auditUnavailable atomic.Bool
 	auth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if authUnavailable.Load() {
+		if authUnavailable.Load() || (r.URL.Path == "/server/v1/audit/events" && auditUnavailable.Load()) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
@@ -74,6 +76,16 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 		t.Fatal(err)
 	}
 	t.Cleanup(store.Close)
+	if err := store.StartAudit(ctx, client); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		stop, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := store.StopAudit(stop); err != nil {
+			t.Error(err)
+		}
+	})
 	business := httptest.NewServer((&invoicesaas.API{Store: store, Auth: client}).Handler())
 	t.Cleanup(business.Close)
 	var parentToken struct {
@@ -158,6 +170,9 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 		"mfa_code": scenario.MFACode(), "operation": "approvals.approve", "request": map[string]string{"approval_id": item.ID},
 	}))
 	mvpData[json.RawMessage](t, mvpJSON(t, scenario.Principal, http.MethodPost, "/v1/approvals/"+item.ID+"/approve", scenario.UserToken, nil))
+	// A central audit outage must not lose a committed business event. The
+	// SaaS keeps the event in its own transaction, then River resumes delivery.
+	auditUnavailable.Store(true)
 	results := make(chan *httptest.ResponseRecorder, 4)
 	var concurrent sync.WaitGroup
 	for range 4 {
@@ -182,6 +197,23 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 	if allowed != 1 {
 		t.Fatalf("one human approval executed %d SaaS operations", allowed)
 	}
+	queued, err := store.AuditStatus(ctx, "", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	queuedSuccess := 0
+	for _, event := range queued {
+		if event.InvoiceID == "inv_approve" && event.Outcome == "success" {
+			queuedSuccess++
+			if event.State != "pending" || event.AuditID != "" {
+				t.Fatal("unavailable central audit was treated as a confirmed delivery")
+			}
+		}
+	}
+	if queuedSuccess != 1 {
+		t.Fatal("successful business commit did not durably enqueue exactly one audit")
+	}
+	auditUnavailable.Store(false)
 	if replay := request(http.MethodPost, "/invoices/inv_approve/approve", parentToken.AccessToken, `{"expected_version":1}`); replay.Code != http.StatusForbidden {
 		t.Fatal("SaaS replay reused a consumed approval")
 	}
@@ -209,6 +241,32 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 		if matched != 1 {
 			t.Fatalf("SaaS %s audit matched its approved request %d times among %d records", action, matched, len(events))
 		}
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		events := mvpData[[]audit.Event](t, mvpJSON(t, scenario.Principal, http.MethodGet,
+			"/v1/spaces/"+scenario.SpaceID+"/audit-logs?"+url.Values{"member_id": {parentID}, "action": {"invoice.approve"}}.Encode(), scenario.UserToken, nil))
+		matched := 0
+		for _, event := range events {
+			if event.ResourceID == "inv_approve" && event.Outcome == "success" {
+				matched++
+				var metadata struct {
+					SubjectSource string `json:"subject_source"`
+				}
+				if json.Unmarshal(event.Metadata, &metadata) != nil || event.MemberID != parentID || event.ResourceGroupID != projectID || event.RequestID != "req_mvp_invoice" ||
+					len(event.OwnerChain) != 1 || event.OwnerChain[0].MemberID != scenario.UserMemberID ||
+					metadata.SubjectSource != "application_assertion" || event.DecisionID != "" {
+					t.Fatal("reported SaaS success lost its resource, identity, owner chain or provenance")
+				}
+			}
+		}
+		if matched == 1 {
+			break
+		}
+		if matched > 1 || time.Now().After(deadline) {
+			t.Fatalf("SaaS audit delivery matched %d successful business events", matched)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 	return func() {
 		t.Helper()

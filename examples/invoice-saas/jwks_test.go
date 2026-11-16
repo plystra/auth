@@ -87,7 +87,7 @@ func TestSaaSJWTRejectsInvalidIdentity(t *testing.T) {
 		claims := exampleClaims()
 		claims.Type = kind
 		token := signExample(t, signer, claims)
-		if _, member, err := client.authenticate(context.Background(), "Bearer "+token); err != nil || member != claims.MemberID {
+		if _, member, err := client.authenticate(context.Background(), "Bearer "+token); err != nil || member.MemberID != claims.MemberID || (kind == "user" && member.UserID != claims.Subject) {
 			t.Fatalf("valid %s token rejected: %v", kind, err)
 		}
 	}
