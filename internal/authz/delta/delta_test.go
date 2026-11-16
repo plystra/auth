@@ -33,6 +33,7 @@ func TestEvaluatePermissionCoverageAcrossScopeKinds(t *testing.T) {
 		{"space does not cover Space tree", permission(SpaceOnly, "spc_root"), permission(SpaceTree, "spc_root"), true},
 		{"space covers group subtree inside it", permission(SpaceOnly, "spc_root"), permission(GroupTree, "grp_root"), false},
 		{"group tree covers child group", permission(GroupTree, "grp_root"), permission(GroupOnly, "grp_child"), false},
+		{"group tree excludes another Space's group", permission(GroupTree, "grp_root"), permission(GroupTree, "grp_other"), true},
 		{"group does not cover child group", permission(GroupOnly, "grp_root"), permission(GroupOnly, "grp_child"), true},
 		{"global covers self", permission(Global, ""), permission(Self, ""), false},
 		{"self does not cover Space", permission(Self, ""), permission(SpaceOnly, "spc_root"), true},

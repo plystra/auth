@@ -270,6 +270,21 @@ func (q *Queries) GetGroupInSpace(ctx context.Context, arg GetGroupInSpaceParams
 	return i, err
 }
 
+const getGroupSpaceForAuthorization = `-- name: GetGroupSpaceForAuthorization :one
+SELECT space_id FROM groups WHERE id = $1
+`
+
+type GetGroupSpaceForAuthorizationParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) GetGroupSpaceForAuthorization(ctx context.Context, arg GetGroupSpaceForAuthorizationParams) (string, error) {
+	row := q.db.QueryRow(ctx, getGroupSpaceForAuthorization, arg.ID)
+	var space_id string
+	err := row.Scan(&space_id)
+	return space_id, err
+}
+
 const getPermissionByKey = `-- name: GetPermissionByKey :one
 SELECT id, key, description, status, delegable, principal_kinds, agent_approval, created_at FROM permissions WHERE key=$1
 `

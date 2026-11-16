@@ -126,6 +126,9 @@ SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
 FROM groups
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: GetGroupSpaceForAuthorization :one
+SELECT space_id FROM groups WHERE id = sqlc.arg(id);
+
 -- name: GetPermissionByKey :one
 SELECT id, key, description, status, delegable, principal_kinds, agent_approval, created_at FROM permissions WHERE key=sqlc.arg(key);
 

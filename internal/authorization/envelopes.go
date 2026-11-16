@@ -39,7 +39,14 @@ func (f *envelopeFacts) permitsAssignment(ctx context.Context, row db.ListMember
 		}
 	}
 	if row.AnchorGroupID.Valid {
-		return f.group(ctx, row.AnchorGroupID.String, row.SpaceID, row.PermissionKey)
+		anchorSpace, err := f.q.GetGroupSpaceForAuthorization(ctx, db.GetGroupSpaceForAuthorizationParams{ID: row.AnchorGroupID.String})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return f.group(ctx, row.AnchorGroupID.String, anchorSpace, row.PermissionKey)
 	}
 	return true, nil
 }

@@ -460,6 +460,7 @@ type Grant struct {
 	GranteeMemberID string   `json:"grantee_member_id"`
 	Scope           string   `json:"scope"`
 	AnchorSpaceID   string   `json:"anchor_space_id,omitempty"`
+	AnchorGroupID   string   `json:"anchor_group_id,omitempty"`
 	GrantedBy       string   `json:"granted_by"`
 }
 
@@ -1536,7 +1537,14 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 			if mode == inlineGrantAgentOwner && agent.Source.String == "oauth" {
 				return apierr.New("VALIDATION_FAILED", "OAuth Agent grants can only be changed through consent")
 			}
-			if mode == inlineGrantOAuthConsent || (agent.OwnerMemberID.Valid && agent.OwnerMemberID.String == actorMemberID) {
+			ownerSystemRight := agent.OwnerMemberID.Valid && agent.OwnerMemberID.String == actorMemberID
+			if mode == inlineGrantAgentOwner && ownerSystemRight {
+				ownerSystemRight, err = ownerGrantSystemRightTx(ctx, q, actorMemberID, agent.CreatedByUserID.String)
+				if err != nil {
+					return err
+				}
+			}
+			if mode == inlineGrantOAuthConsent || ownerSystemRight {
 				if agent.Status != "active" || agent.GroupStatus != "active" {
 					return apierr.New("OWNER_INACTIVE", "the Agent or its group is not active")
 				}

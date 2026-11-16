@@ -161,8 +161,17 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 				return err
 			}
 		}
-		if permission.Scope.Kind == delta.SpaceOnly || permission.Scope.Kind == delta.SpaceTree {
+		switch permission.Scope.Kind {
+		case delta.SpaceOnly, delta.SpaceTree:
 			if err := addCoverageSpaceTx(ctx, q, permission.Scope.Anchor, &graph); err != nil {
+				return err
+			}
+		case delta.GroupOnly, delta.GroupTree:
+			anchorSpace, err := q.GetGroupSpaceForAuthorization(ctx, db.GetGroupSpaceForAuthorizationParams{ID: permission.Scope.Anchor})
+			if err != nil {
+				return err
+			}
+			if err := addCoverageGroupTx(ctx, q, permission.Scope.Anchor, anchorSpace, &graph); err != nil {
 				return err
 			}
 		}
@@ -211,6 +220,15 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 		}
 		if permission.Scope.Kind == delta.SpaceOnly || permission.Scope.Kind == delta.SpaceTree {
 			mode, err = envelopes.grantMode(ctx, delta.Node{Kind: delta.Space, ID: permission.Scope.Anchor}, permission.Scope.Anchor, permission.Key, catalog.Delegable)
+			if err != nil {
+				return err
+			}
+			if mode < 2 {
+				uncovered = append(uncovered, permission)
+				continue
+			}
+		} else if permission.Scope.Kind == delta.GroupOnly || permission.Scope.Kind == delta.GroupTree {
+			mode, err = envelopes.grantMode(ctx, delta.Node{Kind: delta.Group, ID: permission.Scope.Anchor}, graph.GroupSpace[permission.Scope.Anchor], permission.Key, catalog.Delegable)
 			if err != nil {
 				return err
 			}
@@ -391,6 +409,10 @@ func (s *Service) filterAgentOwnerPermissionsTx(ctx context.Context, q *db.Queri
 			}
 		case delta.GroupOnly, delta.GroupTree:
 			request.ResourceGroup = permission.Scope.Anchor
+			request.ResourceSpace, err = q.GetGroupSpaceForAuthorization(ctx, db.GetGroupSpaceForAuthorizationParams{ID: permission.Scope.Anchor})
+			if err != nil {
+				return nil, err
+			}
 		}
 		decision, err := s.CheckTx(ctx, q, request)
 		if err != nil {

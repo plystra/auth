@@ -165,6 +165,9 @@
       "AgentGrantInputBody": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
           "anchor_space_id": {
             "type": "string"
           },
@@ -1480,6 +1483,9 @@
       "Grant": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
           "anchor_space_id": {
             "type": "string"
           },

@@ -1254,6 +1254,21 @@ func (q *Queries) GetGroupMember(ctx context.Context, arg GetGroupMemberParams) 
 	return i, err
 }
 
+const getGroupSpaceForAuthorization = `-- name: GetGroupSpaceForAuthorization :one
+SELECT space_id FROM groups WHERE id = $1
+`
+
+type GetGroupSpaceForAuthorizationParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) GetGroupSpaceForAuthorization(ctx context.Context, arg GetGroupSpaceForAuthorizationParams) (string, error) {
+	row := q.db.QueryRow(ctx, getGroupSpaceForAuthorization, arg.ID)
+	var space_id string
+	err := row.Scan(&space_id)
+	return space_id, err
+}
+
 const getIdempotencyKey = `-- name: GetIdempotencyKey :one
 SELECT id, scope_hash, method, path, idempotency_key, request_hash, state,
        status_code, response_headers, response_body, created_at, updated_at, expires_at

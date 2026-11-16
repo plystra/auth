@@ -36,6 +36,7 @@ type agentGrantInput struct {
 		Permissions   []string `json:"permissions"`
 		Scope         string   `json:"scope,omitempty"`
 		AnchorSpaceID string   `json:"anchor_space_id,omitempty"`
+		AnchorGroupID string   `json:"anchor_group_id,omitempty"`
 	}
 }
 
@@ -155,7 +156,7 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 }
 
 func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
-	actorID, _, ctx, err := a.currentMember(ctx, in.Authorization)
+	actorID, userID, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +174,16 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if !canManage {
 		return nil, apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
 	}
-	grant, err := a.Authorization.ReplaceAgentGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	ctx = authorization.WithAgentGrantUser(ctx, actorID, userID)
+	var grant authorization.Grant
+	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
+		if in.Body.AnchorSpaceID != "" {
+			return nil, apierr.New("VALIDATION_FAILED", "a group grant cannot also specify anchor_space_id")
+		}
+		grant, err = a.Authorization.ReplaceAgentGroupGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorGroupID)
+	} else {
+		grant, err = a.Authorization.ReplaceAgentGrants(ctx, actorID, target.SpaceID, target.ID, in.Body.Permissions, in.Body.Scope, in.Body.AnchorSpaceID)
+	}
 	if err != nil {
 		return nil, err
 	}

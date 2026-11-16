@@ -99,11 +99,41 @@ func (s *Service) coverGrantDeltaTx(ctx context.Context, q *db.Queries, before d
 	if err != nil {
 		return err
 	}
-	change, err := delta.Evaluate(before, after, delta.Graph{})
+	graph, err := grantDeltaGraphTx(ctx, q, before, after)
+	if err != nil {
+		return err
+	}
+	change, err := delta.Evaluate(before, after, graph)
 	if err != nil {
 		return err
 	}
 	return s.coverPositiveGrantDeltaTx(ctx, q, change, actorMemberID, memberID, principalKind, spaceID)
+}
+
+func grantDeltaGraphTx(ctx context.Context, q *db.Queries, snapshots ...delta.Snapshot) (delta.Graph, error) {
+	graph := delta.Graph{SpaceParent: map[string]string{}, GroupParent: map[string]string{}, GroupSpace: map[string]string{}}
+	for _, snapshot := range snapshots {
+		for _, permission := range snapshot.Permissions {
+			switch permission.Scope.Kind {
+			case delta.SpaceOnly, delta.SpaceTree:
+				if err := addCoverageSpaceTx(ctx, q, permission.Scope.Anchor, &graph); err != nil {
+					return delta.Graph{}, err
+				}
+			case delta.GroupOnly, delta.GroupTree:
+				if _, loaded := graph.GroupSpace[permission.Scope.Anchor]; loaded {
+					continue
+				}
+				spaceID, err := q.GetGroupSpaceForAuthorization(ctx, db.GetGroupSpaceForAuthorizationParams{ID: permission.Scope.Anchor})
+				if err != nil {
+					return delta.Graph{}, err
+				}
+				if err := addCoverageGroupTx(ctx, q, permission.Scope.Anchor, spaceID, &graph); err != nil {
+					return delta.Graph{}, err
+				}
+			}
+		}
+	}
+	return graph, nil
 }
 
 func (s *Service) grantAuthoritySnapshotTx(ctx context.Context, q *db.Queries, memberID, spaceID, principalKind string) (delta.Snapshot, error) {

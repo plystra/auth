@@ -317,8 +317,11 @@ func (g Graph) spaceAncestor(ancestor, descendant string) (bool, error) {
 
 func (g Graph) groupAncestor(ancestor, descendant string) (bool, error) {
 	spaceID, ok := g.GroupSpace[descendant]
-	if !ok || spaceID == "" || g.GroupSpace[ancestor] != spaceID {
-		return false, errors.New("group hierarchy crosses or lacks a Space")
+	if !ok || spaceID == "" || g.GroupSpace[ancestor] == "" {
+		return false, errors.New("group hierarchy lacks a Space")
+	}
+	if g.GroupSpace[ancestor] != spaceID {
+		return false, nil
 	}
 	seen := map[string]struct{}{}
 	for current := descendant; current != ""; current = g.GroupParent[current] {
