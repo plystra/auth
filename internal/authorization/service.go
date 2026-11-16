@@ -200,9 +200,14 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	if err != nil {
 		return engine.Decision{}, 0, err
 	}
+	var principalKinds []string
+	if err := json.Unmarshal(permission.PrincipalKinds, &principalKinds); err != nil {
+		return engine.Decision{}, 0, err
+	}
 	request := engine.Request{
 		MemberID:               in.MemberID,
 		PrincipalType:          member.Type,
+		PrincipalKinds:         principalKinds,
 		Permission:             in.Permission,
 		ResourceSpace:          in.ResourceSpace,
 		ResourceSpaceAncestors: spaceAncestors,

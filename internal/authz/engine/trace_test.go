@@ -13,13 +13,13 @@ func TestTraceStopsAtEvaluatedAssignmentFailure(t *testing.T) {
 		change     func(*Request)
 		steps      []string
 	}{
-		{"allow", "allowed", func(*Request) {}, []string{"subject_input", "permission", "principal_kind", "envelope", "scope"}},
+		{"allow", "allowed", func(*Request) {}, []string{"subject_input", "principal_kind", "permission", "envelope", "scope"}},
 		{"missing", "INVALID_SUBJECT", func(r *Request) { r.MemberID = "" }, []string{"subject"}},
 		{"credential", "TOKEN_SCOPE_EXCLUDED", func(r *Request) { r.TokenScopes = []string{} }, []string{"subject_input", "token_scope"}},
-		{"permission", "NO_MATCHING_PERMISSION", func(r *Request) { r.Assignments = nil }, []string{"subject_input", "permission"}},
-		{"principal", "PRINCIPAL_KIND_NOT_ALLOWED", func(r *Request) { r.Assignments[0].PrincipalKinds = []string{"application"} }, []string{"subject_input", "permission", "principal_kind"}},
-		{"envelope", "ENVELOPE_EXCLUDED", func(r *Request) { r.Assignments[0].EnvelopeEnforced = true }, []string{"subject_input", "permission", "principal_kind", "envelope"}},
-		{"scope", "SCOPE_OUT_OF_BOUNDS", func(r *Request) { r.ResourceSpace = "spc_hidden" }, []string{"subject_input", "permission", "principal_kind", "envelope", "scope"}},
+		{"permission", "NO_MATCHING_PERMISSION", func(r *Request) { r.Assignments = nil }, []string{"subject_input", "principal_kind", "permission"}},
+		{"principal", "PRINCIPAL_KIND_NOT_ALLOWED", func(r *Request) { r.PrincipalKinds = []string{"application"} }, []string{"subject_input", "principal_kind"}},
+		{"envelope", "ENVELOPE_EXCLUDED", func(r *Request) { r.Assignments[0].EnvelopeEnforced = true }, []string{"subject_input", "principal_kind", "permission", "envelope"}},
+		{"scope", "SCOPE_OUT_OF_BOUNDS", func(r *Request) { r.ResourceSpace = "spc_hidden" }, []string{"subject_input", "principal_kind", "permission", "envelope", "scope"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := Request{MemberID: "mem_private", PrincipalType: "human", Permission: "document:read", ResourceSpace: "spc_private",

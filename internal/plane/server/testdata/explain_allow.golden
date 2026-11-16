@@ -33,14 +33,14 @@
       "detail": "subject identity and permission are present"
     },
     {
-      "step": "permission",
-      "result": "pass",
-      "detail": "a subject assignment includes the permission"
-    },
-    {
       "step": "principal_kind",
       "result": "pass",
       "detail": "the permission allows this principal type"
+    },
+    {
+      "step": "permission",
+      "result": "pass",
+      "detail": "a subject assignment includes the permission"
     },
     {
       "step": "envelope",

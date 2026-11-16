@@ -21,8 +21,10 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 		{"catalog_missing", "UNKNOWN_PERMISSION", "catalog"},
 		{"catalog_disabled", "PERMISSION_DISABLED", "catalog"},
 		{"principal_kind", "PRINCIPAL_KIND_NOT_ALLOWED", "principal_kind"},
+		{"principal_without_grants", "PRINCIPAL_KIND_NOT_ALLOWED", "principal_kind"},
 		{"envelope", "ENVELOPE_EXCLUDED", "envelope"},
 		{"scope", "SCOPE_OUT_OF_BOUNDS", "scope"},
+		{"closest_scope", "SCOPE_OUT_OF_BOUNDS", "scope"},
 		{"resource_group", "RESOURCE_GROUP_NOT_FOUND", "resource_group"},
 		{"key_scope", "KEY_SCOPE_EXCLUDED", "application"},
 		{"installation", "APPLICATION_NOT_INSTALLED", "application"},
@@ -62,8 +64,13 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 				body.Action = "missing:read"
 			case "catalog_disabled":
 				statement = `UPDATE permissions SET status = 'disabled' WHERE key = 'self:read'`
-			case "principal_kind":
+			case "principal_kind", "principal_without_grants":
 				statement = `UPDATE permissions SET principal_kinds = '["application"]'::jsonb WHERE key = 'self:read'`
+				if scenario.name == "principal_without_grants" {
+					if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
 			case "envelope":
 				// A local envelope excluding only the business permission leaves
 				// the installation's check/explain authority intact.
@@ -75,6 +82,23 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 				}
 			case "scope":
 				statement = `UPDATE authorization_grants SET scope = 'self', anchor_space_id = NULL WHERE grantee_member_id = $1`
+			case "closest_scope":
+				if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ('grp_explain_excluded', $1, 'Excluded'), ('grp_explain_outside', $1, 'Outside')`, spaceID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Pool.Exec(ctx, `INSERT INTO group_envelopes (group_id) VALUES ('grp_explain_excluded')`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := st.Pool.Exec(ctx, `
+					INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_group_id, granted_by) VALUES
+					('grt_explain_excluded', $1, '["self:read"]'::jsonb, $2, 'group', 'grp_explain_excluded', $2),
+					('grt_explain_outside', $1, '["self:read"]'::jsonb, $2, 'group', 'grp_explain_outside', $2)
+				`, spaceID, owner.ID); err != nil {
+					t.Fatal(err)
+				}
 			case "resource_group":
 				body.Resource.GroupID = "grp_private_missing"
 			case "key_scope":
@@ -136,6 +160,9 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 				}
 				if scenario.fail == "catalog" && len(explain.Trace) != 2 {
 					t.Fatal("early catalog failure included unevaluated subject steps")
+				}
+				if scenario.code == "PRINCIPAL_KIND_NOT_ALLOWED" && slices.ContainsFunc(explain.Trace, func(step ExplainStep) bool { return step.Step == "permission" }) {
+					t.Fatal("catalog principal-kind restriction was checked after grant matching")
 				}
 			} else {
 				for _, name := range []string{"application", "catalog", "subject", "subject_space", "resource_space", "permission", "principal_kind", "envelope", "scope"} {

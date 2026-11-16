@@ -18,7 +18,7 @@ type Assignment struct {
 	Scope                 Scope
 	Envelope              []string
 	EnvelopeEnforced      bool
-	PrincipalKinds        []string
+	PrincipalKinds        []string // Authority projection metadata; Check uses Request.PrincipalKinds.
 	AgentApprovalRequired bool
 }
 type Scope struct {
@@ -38,6 +38,9 @@ type Request struct {
 	Assignments            []Assignment
 	Owner                  *Request
 	ApprovalValid          bool
+	// PrincipalKinds is the requested permission's directory policy, independent
+	// of grants. Nil uses the directory default; an explicit empty list denies all.
+	PrincipalKinds []string
 	// TokenScopes can only constrain persisted authority. Nil is unrestricted;
 	// a non-nil empty list represents a credential with no usable permissions.
 	TokenScopes []string
@@ -64,9 +67,11 @@ func Check(in Request) Decision {
 	if in.TokenScopes != nil {
 		trace = append(trace, Passed("token_scope", "the delegated token scope includes the permission"))
 	}
+	if in.PrincipalKinds != nil && !contains(in.PrincipalKinds, in.PrincipalType) {
+		return Reject("PRINCIPAL_KIND_NOT_ALLOWED", trace...)
+	}
+	trace = append(trace, Passed("principal_kind", "the permission allows this principal type"))
 	matches := []Assignment{}
-	sawPermission := false
-	sawPrincipalKind := false
 	sawEnvelope := false
 	sawScope := false
 	for _, a := range in.Assignments {
@@ -74,11 +79,6 @@ func Check(in Request) Decision {
 			continue
 		}
 		if !contains(a.Permissions, in.Permission) {
-			continue
-		}
-		sawPermission = true
-		if in.PrincipalType != "" && len(a.PrincipalKinds) > 0 && !contains(a.PrincipalKinds, in.PrincipalType) {
-			sawPrincipalKind = true
 			continue
 		}
 		if (a.EnvelopeEnforced || len(a.Envelope) > 0) && !contains(a.Envelope, in.Permission) {
@@ -93,15 +93,13 @@ func Check(in Request) Decision {
 	}
 	if len(matches) == 0 {
 		code := "NO_MATCHING_PERMISSION"
+		// A candidate reaching scope has already passed the envelope. Report
+		// that closer failure even when another candidate failed earlier.
 		switch {
-		case sawPrincipalKind:
-			code = "PRINCIPAL_KIND_NOT_ALLOWED"
-		case sawEnvelope:
-			code = "ENVELOPE_EXCLUDED"
 		case sawScope:
 			code = "SCOPE_OUT_OF_BOUNDS"
-		case !sawPermission:
-			code = "NO_MATCHING_PERMISSION"
+		case sawEnvelope:
+			code = "ENVELOPE_EXCLUDED"
 		}
 		trace = append(trace, assignmentTrace(code)...)
 		return Reject(code, trace...)
@@ -114,6 +112,7 @@ func Check(in Request) Decision {
 		}
 		ownerRequest := *in.Owner
 		ownerRequest.SkipApproval = true
+		ownerRequest.PrincipalKinds = in.PrincipalKinds
 		owner := Check(ownerRequest)
 		for _, step := range owner.Trace {
 			step.Step = "owner." + step.Step
@@ -144,7 +143,6 @@ func assignmentTrace(failure string) []TraceStep {
 	var trace []TraceStep
 	for _, condition := range []struct{ step, code, detail string }{
 		{"permission", "NO_MATCHING_PERMISSION", "a subject assignment includes the permission"},
-		{"principal_kind", "PRINCIPAL_KIND_NOT_ALLOWED", "the permission allows this principal type"},
 		{"envelope", "ENVELOPE_EXCLUDED", "the permission is included in the assignment's effective envelope"},
 		{"scope", "SCOPE_OUT_OF_BOUNDS", "the assignment scope covers the resource"},
 	} {

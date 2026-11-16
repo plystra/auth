@@ -108,8 +108,9 @@ func TestCheckRejectsAnExplicitlyEmptyEffectiveEnvelope(t *testing.T) {
 func TestAgentApprovalAndPrincipalKind(t *testing.T) {
 	request := Request{
 		MemberID: "mem_agent", PrincipalType: "agent", Permission: "billing:write", ResourceSpace: "spc_1",
-		Assignments: []Assignment{{MemberID: "mem_agent", Permissions: []string{"billing:write"}, PrincipalKinds: []string{"agent"}, AgentApprovalRequired: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
-		Owner:       &Request{MemberID: "mem_owner", Permission: "billing:write", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_owner", Permissions: []string{"billing:write"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}},
+		PrincipalKinds: []string{"human", "agent"},
+		Assignments:    []Assignment{{MemberID: "mem_agent", Permissions: []string{"billing:write"}, AgentApprovalRequired: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+		Owner:          &Request{MemberID: "mem_owner", PrincipalType: "human", Permission: "billing:write", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_owner", Permissions: []string{"billing:write"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}},
 	}
 	if got := Check(request); got.Code != "APPROVAL_REQUIRED" {
 		t.Fatalf("expected approval requirement: %+v", got)
@@ -284,7 +285,7 @@ func TestCheckTableCoversEveryScopeAndDecisionReason(t *testing.T) {
 		{name: "space tree", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_child", ResourceSpaceAncestors: []string{"spc_root"}, Assignments: []Assignment{grant("document:read", Scope{Kind: "space_tree", Anchor: "spc_root"})}}, want: Allow, code: "allowed"},
 		{name: "global", in: Request{MemberID: "mem_1", Permission: "audit:read", ResourceSpace: "spc_any", Assignments: []Assignment{grant("audit:read", Scope{Kind: "global"})}}, want: Allow, code: "allowed"},
 		{name: "unknown permission", in: Request{MemberID: "mem_1", Permission: "missing:read", ResourceSpace: "spc_1"}, want: Deny, code: "NO_MATCHING_PERMISSION"},
-		{name: "principal kind", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, PrincipalKinds: []string{"human"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}}, want: Deny, code: "PRINCIPAL_KIND_NOT_ALLOWED"},
+		{name: "principal kind", in: Request{MemberID: "mem_1", PrincipalType: "agent", PrincipalKinds: []string{"human"}, Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}}, want: Deny, code: "PRINCIPAL_KIND_NOT_ALLOWED"},
 		{name: "envelope", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{{MemberID: "mem_1", Permissions: []string{"document:read"}, EnvelopeEnforced: true, Scope: Scope{Kind: "space", Anchor: "spc_1"}}}}, want: Deny, code: "ENVELOPE_EXCLUDED"},
 		{name: "scope", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_2", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}}, want: Deny, code: "SCOPE_OUT_OF_BOUNDS"},
 		{name: "owner inactive", in: Request{MemberID: "mem_1", PrincipalType: "agent", Permission: "document:read", ResourceSpace: "spc_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "space", Anchor: "spc_1"})}}, want: Deny, code: "OWNER_INACTIVE"},
