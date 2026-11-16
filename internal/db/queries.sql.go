@@ -2970,6 +2970,41 @@ func (q *Queries) MarkAgentCredentialUsed(ctx context.Context, arg MarkAgentCred
 	return q.db.Exec(ctx, markAgentCredentialUsed, arg.ID)
 }
 
+const memberApplicationIsActive = `-- name: MemberApplicationIsActive :one
+WITH RECURSIVE owners AS (
+    SELECT m.id, m.type, m.source, m.oauth_client_id, m.home_group_id, ARRAY[m.id] AS path
+    FROM members m WHERE m.id = $1
+    UNION ALL
+    SELECT m.id, m.type, m.source, m.oauth_client_id, m.home_group_id, child.path || m.id
+    FROM owners child
+    JOIN groups g ON g.id = child.home_group_id AND g.kind = 'agents'
+    JOIN members m ON m.id = g.owner_member_id
+    WHERE child.type = 'agent' AND cardinality(child.path) < 64 AND NOT (m.id = ANY(child.path))
+)
+SELECT EXISTS (SELECT 1 FROM owners) AND NOT EXISTS (
+    SELECT 1 FROM owners m WHERE
+        (m.type = 'agent' AND m.source = 'oauth' AND NOT EXISTS (
+            SELECT 1 FROM applications a WHERE a.client_id = m.oauth_client_id
+              AND a.status = 'active' AND (a.visibility = 'private' OR a.review_status = 'approved')
+        ))
+        OR (m.type = 'application' AND EXISTS (
+            SELECT 1 FROM application_installations i JOIN applications a ON a.id = i.application_id
+            WHERE i.member_id = m.id AND a.status <> 'active'
+        ))
+) AS active
+`
+
+type MemberApplicationIsActiveParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) MemberApplicationIsActive(ctx context.Context, arg MemberApplicationIsActiveParams) (pgtype.Bool, error) {
+	row := q.db.QueryRow(ctx, memberApplicationIsActive, arg.MemberID)
+	var active pgtype.Bool
+	err := row.Scan(&active)
+	return active, err
+}
+
 const removeAgentGroupSubtree = `-- name: RemoveAgentGroupSubtree :exec
 WITH RECURSIVE tree AS (
     SELECT groups.id FROM groups WHERE groups.id = $1

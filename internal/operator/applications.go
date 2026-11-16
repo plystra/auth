@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/member"
 )
 
 type PublicApplicationReview struct {
@@ -137,6 +139,74 @@ func (s *Service) RejectPublicApplication(ctx context.Context, raw, applicationI
 			return apierr.New("CONFLICT", "application review changed")
 		}
 		return audit.Write(ctx, q, "operator_session", current.UserID, "ops.application.reject", applicationID, "success")
+	})
+}
+
+// SuspendApplication stops both the OAuth client's delegated identities and
+// the application's installation identities across every customer Space.
+func (s *Service) SuspendApplication(ctx context.Context, raw, applicationID string, digest []byte) error {
+	if len(digest) != sha256.Size {
+		return apierr.New("STEP_UP_REQUIRED", "Verify MFA for this application suspension.")
+	}
+	return s.Run(ctx, raw, "ops.applications.suspend", "ops:applications:manage", digest, func(q *db.Queries, current Session) error {
+		app, err := q.LockApplicationForUpdate(ctx, db.LockApplicationForUpdateParams{ApplicationID: applicationID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "application was not found")
+		}
+		if err != nil {
+			return err
+		}
+		// Consent and installation creation hold the application lock; child
+		// creation holds every owner. Read descendants only after acquiring all
+		// root chains so a concurrent creation cannot escape this transaction.
+		targets, err := q.ListApplicationSuspensionMembers(ctx, db.ListApplicationSuspensionMembersParams{ApplicationID: app.ID, ClientID: nullable(app.ClientID)})
+		if err != nil {
+			return err
+		}
+		memberIDs := make([]string, len(targets))
+		for i, target := range targets {
+			memberIDs[i] = target.ID
+		}
+		if err := member.LockChainsTx(ctx, q, memberIDs...); err != nil {
+			return err
+		}
+		if err := q.SuspendApplicationGlobally(ctx, db.SuspendApplicationGloballyParams{ApplicationID: app.ID}); err != nil {
+			return err
+		}
+		spaces := map[string]struct{}{}
+		for _, target := range targets {
+			action := "ops.application.agent.stop"
+			if target.Type == "application" {
+				if err := q.SuspendApplicationMember(ctx, db.SuspendApplicationMemberParams{MemberID: target.ID}); err != nil {
+					return err
+				}
+				if err := member.SuspendOwnedAgentsTx(ctx, q, target.ID); err != nil {
+					return err
+				}
+				action = "ops.application.installation.suspend"
+			} else if err := member.SetAgentSubtreeStatusTx(ctx, q, target.ID, "suspended"); err != nil {
+				return err
+			}
+			spaces[target.SpaceID] = struct{}{}
+			if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+				ActorType: "operator_session", ActorID: current.UserID, UserID: current.UserID,
+				Action: action, Outcome: "success", MemberID: target.ID, ApplicationID: app.ID,
+				Metadata: map[string]string{"client_id": app.ClientID},
+			}); err != nil {
+				return err
+			}
+		}
+		spaceIDs := make([]string, 0, len(spaces))
+		for id := range spaces {
+			spaceIDs = append(spaceIDs, id)
+		}
+		slices.Sort(spaceIDs)
+		for _, id := range spaceIDs {
+			if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: id}); err != nil {
+				return err
+			}
+		}
+		return audit.Write(ctx, q, "operator_session", current.UserID, "ops.application.suspend", app.ID, "success")
 	})
 }
 

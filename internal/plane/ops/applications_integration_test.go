@@ -168,6 +168,43 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 	if err := st.Pool.QueryRow(ctx, `SELECT review_status, manifest_permissions::text FROM applications WHERE id = 'app_public_audit'`).Scan(&pendingStatus, &effectiveManifest); err != nil || pendingStatus != "pending" || effectiveManifest != "[]" {
 		t.Fatalf("failed review persisted status=%q manifest=%q error=%v", pendingStatus, effectiveManifest, err)
 	}
+	t.Run("GlobalSuspensionRequiresCapabilityAndRequestBoundMFA", func(t *testing.T) {
+		path := "/ops/v1/applications/app_public_review/suspend"
+		value := map[string]any{"application_id": "app_public_review"}
+		for _, test := range []struct {
+			token  string
+			status int
+		}{{reviewerToken, http.StatusForbidden}, {"ply_ag_wrong_plane", http.StatusUnauthorized}} {
+			got := request(http.MethodPost, path, test.token, "")
+			if got.Code != test.status {
+				t.Fatalf("suspension without valid operations step-up status=%d", got.Code)
+			}
+		}
+		seedPublicReviewStepUp(t, st, unrelatedSession, "ops.applications.suspend", value)
+		if got := request(http.MethodPost, path, unrelatedToken, ""); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "PERMISSION_DENIED") {
+			t.Fatalf("suspension without capability status=%d", got.Code)
+		}
+		seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.suspend", map[string]string{"application_id": "app_public_reject"})
+		if got := request(http.MethodPost, path, reviewerToken, ""); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "STEP_UP_REQUIRED") {
+			t.Fatalf("suspension reused a different target's MFA status=%d", got.Code)
+		}
+		seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.suspend", map[string]string{"application_id": "app_missing"})
+		if got := request(http.MethodPost, "/ops/v1/applications/app_missing/suspend", reviewerToken, ""); got.Code != http.StatusNotFound {
+			t.Fatalf("missing application suspension status=%d", got.Code)
+		}
+		stepUpReview("ops.applications.suspend", value)
+		if got := request(http.MethodPost, path, reviewerToken, ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"accepted":true`) {
+			t.Fatalf("single operator suspension status=%d", got.Code)
+		}
+		if got := request(http.MethodPost, path, reviewerToken, ""); got.Code != http.StatusForbidden || !strings.Contains(got.Body.String(), "STEP_UP_REQUIRED") {
+			t.Fatalf("suspension reused consumed MFA status=%d", got.Code)
+		}
+		var stopped, other string
+		if err := st.Pool.QueryRow(ctx, `SELECT a.status, b.status FROM applications a CROSS JOIN applications b
+			WHERE a.id = 'app_public_review' AND b.id = 'app_public_reject'`).Scan(&stopped, &other); err != nil || stopped != "suspended" || other != "active" {
+			t.Fatalf("global suspension status=%s other=%s error=%v", stopped, other, err)
+		}
+	})
 }
 
 func seedPublicReviewStepUp(t *testing.T, st *store.Store, sessionID, operation string, value any) {

@@ -1014,6 +1014,11 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 				return err
 			}
 		} else {
+			if status == "active" {
+				if err := member.RequireActiveApplicationTx(ctx, q, memberID); err != nil {
+					return err
+				}
+			}
 			if target.Type == "agent" && target.Status == "removed" {
 				return apierr.New("CONFLICT", "a tombstoned Agent cannot be resumed")
 			}

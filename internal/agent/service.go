@@ -421,6 +421,9 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 			return apierr.New("CONFLICT", "agent is not active")
 		}
 		if row.Status != "active" {
+			if err := member.RequireActiveApplicationTx(ctx, q, memberID); err != nil {
+				return err
+			}
 			if row.Status != "suspended" || actorUserID == "" || (row.CreatedByUserID.Valid && row.CreatedByUserID.String == actorUserID) {
 				return apierr.New("CONFLICT", "agent is not active")
 			}

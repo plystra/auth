@@ -1078,4 +1078,78 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if staleRefresh.Code != http.StatusBadRequest || !strings.Contains(staleRefresh.Body.String(), "invalid_grant") {
 		t.Fatalf("OAuth refresh after installation suspension = %d %s", staleRefresh.Code, staleRefresh.Body.String())
 	}
+	t.Run("GlobalOAuthClientSuspension", func(t *testing.T) {
+		resumePath := "/v1/spaces/" + customer.spaceID + "/installations/" + installationResult.Data.ID + "/resume"
+		mvpData[application.Installation](t, mvpJSON(t, principalHandler, http.MethodPost, resumePath, customer.token, nil))
+		observer := newMVPObserver(t, database.AppURL, signer, key, sessions.Settings)
+		check := map[string]any{
+			"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",
+			"resource": map[string]string{"type": "invoice", "id": "inv_client_stop", "space_id": customer.spaceID},
+		}
+		for _, surface := range []http.Handler{serverHandler, observer} {
+			decision := mvpData[server.CheckDecision](t, mvpJSON(t, surface, http.MethodPost, "/server/v1/authz/check", keyResult.Data.Secret, check))
+			if decision.Decision != "allow" {
+				t.Fatalf("active OAuth client decision=%s code=%s", decision.Decision, decision.DenyCode)
+			}
+		}
+		pendingRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
+		pendingResponse := httptest.NewRecorder()
+		principalHandler.ServeHTTP(pendingResponse, pendingRequest)
+		var pending struct {
+			RequestID string `json:"request_id"`
+		}
+		if pendingResponse.Code != http.StatusOK || json.Unmarshal(pendingResponse.Body.Bytes(), &pending) != nil || pending.RequestID == "" {
+			t.Fatal("could not prepare an authorization request before global suspension")
+		}
+		var issuedCode struct {
+			RedirectTo string `json:"redirect_to"`
+		}
+		consented := consent(customer.token, pending.RequestID, customer.memberID)
+		if consented.Code != http.StatusOK || json.Unmarshal(consented.Body.Bytes(), &issuedCode) != nil {
+			t.Fatal("could not issue an authorization code before global suspension")
+		}
+		callback, err := url.Parse(issuedCode.RedirectTo)
+		if err != nil || callback.Query().Get("code") == "" {
+			t.Fatal("authorization omitted the pending code")
+		}
+		step := map[string]any{
+			"mfa_code": nextTOTP(secretValue), "operation": "ops.applications.suspend",
+			"request": map[string]string{"application_id": appResult.Data.ID},
+		}
+		mvpData[struct{ Accepted bool }](t, mvpJSON(t, handler, http.MethodPost, "/ops/v1/auth/step-up", loginResult.Data.AccessToken, step))
+		mvpData[struct{ Accepted bool }](t, mvpJSON(t, handler, http.MethodPost, "/ops/v1/applications/"+appResult.Data.ID+"/suspend", loginResult.Data.AccessToken, nil))
+		for _, surface := range []http.Handler{serverHandler, observer} {
+			for path, body := range map[string]any{
+				"/server/v1/authz/check":       check,
+				"/server/v1/tokens/introspect": map[string]string{"token": oauthToken.AccessToken},
+				"/server/v1/key":               nil,
+			} {
+				method := http.MethodPost
+				if body == nil {
+					method = http.MethodGet
+				}
+				got := mvpJSON(t, surface, method, path, keyResult.Data.Secret, body)
+				if got.Code != http.StatusUnauthorized {
+					t.Fatalf("stopped application credential at %s status=%d", path, got.Code)
+				}
+			}
+		}
+		if got := mvpToken(t, principalHandler, refreshForm); got.Code != http.StatusUnauthorized || !strings.Contains(got.Body.String(), "invalid_client") {
+			t.Fatalf("globally stopped client refreshed OAuth credential status=%d", got.Code)
+		}
+		codeForm := url.Values{
+			"grant_type": {"authorization_code"}, "client_id": {appResult.Data.ClientID},
+			"code": {callback.Query().Get("code")}, "redirect_uri": {"https://saas.example.test/callback"},
+			"code_verifier": {form.Get("code_verifier")}, "resource": {appResult.Data.ClientID},
+		}
+		if got := mvpToken(t, principalHandler, codeForm); got.Code != http.StatusUnauthorized || !strings.Contains(got.Body.String(), "invalid_client") {
+			t.Fatalf("globally stopped client exchanged an existing code status=%d", got.Code)
+		}
+		authorizationRequest := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
+		stoppedAuthorization := httptest.NewRecorder()
+		principalHandler.ServeHTTP(stoppedAuthorization, authorizationRequest)
+		if stoppedAuthorization.Code != http.StatusBadRequest || !strings.Contains(stoppedAuthorization.Body.String(), "invalid_request") {
+			t.Fatalf("globally stopped client began consent status=%d", stoppedAuthorization.Code)
+		}
+	})
 }

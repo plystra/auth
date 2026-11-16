@@ -601,6 +601,7 @@
               "ops.permissions.create",
               "ops.applications.approve",
               "ops.applications.reject",
+              "ops.applications.suspend",
               "ops.users.suspend",
               "ops.users.sign_out_all",
               "ops.users.require_password_reset"
@@ -761,6 +762,51 @@
           }
         },
         "summary": "ops.applications.reject"
+      }
+    },
+    "/ops/v1/applications/{id}/suspend": {
+      "post": {
+        "operationId": "ops.applications.suspend",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "ops.applications.suspend"
       }
     },
     "/ops/v1/auth/sign-in": {

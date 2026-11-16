@@ -416,7 +416,7 @@ func (s *Service) Validate(ctx context.Context, raw string) error {
 
 func (s *Service) StepUp(ctx context.Context, raw, code, operation string, digest []byte) error {
 	switch operation {
-	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.permissions.create", "ops.applications.approve", "ops.applications.reject", "ops.users.suspend", "ops.users.sign_out_all", "ops.users.require_password_reset":
+	case "ops.settings.update", "ops.operators.create", "ops.operators.update", "ops.operators.disable", "ops.permissions.create", "ops.applications.approve", "ops.applications.reject", "ops.applications.suspend", "ops.users.suspend", "ops.users.sign_out_all", "ops.users.require_password_reset":
 	default:
 		return s.failure(ctx, "", "ops.auth.step_up", apierr.New("VALIDATION_FAILED", "An implemented operation and its request digest are required."))
 	}

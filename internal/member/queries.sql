@@ -160,5 +160,28 @@ FOR UPDATE;
 -- name: SetMemberStatus :exec
 UPDATE members SET status = sqlc.arg(status) WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: MemberApplicationIsActive :one
+WITH RECURSIVE owners AS (
+    SELECT m.id, m.type, m.source, m.oauth_client_id, m.home_group_id, ARRAY[m.id] AS path
+    FROM members m WHERE m.id = sqlc.arg(member_id)
+    UNION ALL
+    SELECT m.id, m.type, m.source, m.oauth_client_id, m.home_group_id, child.path || m.id
+    FROM owners child
+    JOIN groups g ON g.id = child.home_group_id AND g.kind = 'agents'
+    JOIN members m ON m.id = g.owner_member_id
+    WHERE child.type = 'agent' AND cardinality(child.path) < 64 AND NOT (m.id = ANY(child.path))
+)
+SELECT EXISTS (SELECT 1 FROM owners) AND NOT EXISTS (
+    SELECT 1 FROM owners m WHERE
+        (m.type = 'agent' AND m.source = 'oauth' AND NOT EXISTS (
+            SELECT 1 FROM applications a WHERE a.client_id = m.oauth_client_id
+              AND a.status = 'active' AND (a.visibility = 'private' OR a.review_status = 'approved')
+        ))
+        OR (m.type = 'application' AND EXISTS (
+            SELECT 1 FROM application_installations i JOIN applications a ON a.id = i.application_id
+            WHERE i.member_id = m.id AND a.status <> 'active'
+        ))
+) AS active;
+
 -- name: SetMemberBindingPolicy :exec
 UPDATE members SET binding_policy = sqlc.arg(binding_policy) WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);

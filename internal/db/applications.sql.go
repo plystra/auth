@@ -850,6 +850,50 @@ func (q *Queries) ListApplicationInstallationsInSpace(ctx context.Context, arg L
 	return items, nil
 }
 
+const listApplicationSuspensionMembers = `-- name: ListApplicationSuspensionMembers :many
+SELECT m.id, m.space_id, m.type
+FROM members m
+WHERE m.status <> 'removed' AND (
+    (m.type = 'application' AND EXISTS (
+        SELECT 1 FROM application_installations i
+        WHERE i.application_id = $1 AND i.member_id = m.id
+    ))
+    OR (m.type = 'agent' AND m.source = 'oauth' AND m.oauth_client_id = $2)
+)
+ORDER BY m.id
+`
+
+type ListApplicationSuspensionMembersParams struct {
+	ApplicationID string      `json:"application_id"`
+	ClientID      pgtype.Text `json:"client_id"`
+}
+
+type ListApplicationSuspensionMembersRow struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+	Type    string `json:"type"`
+}
+
+func (q *Queries) ListApplicationSuspensionMembers(ctx context.Context, arg ListApplicationSuspensionMembersParams) ([]ListApplicationSuspensionMembersRow, error) {
+	rows, err := q.db.Query(ctx, listApplicationSuspensionMembers, arg.ApplicationID, arg.ClientID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListApplicationSuspensionMembersRow{}
+	for rows.Next() {
+		var i ListApplicationSuspensionMembersRow
+		if err := rows.Scan(&i.ID, &i.SpaceID, &i.Type); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCurrentInstallationSpaces = `-- name: ListCurrentInstallationSpaces :many
 SELECT DISTINCT space_id FROM application_installations
 WHERE application_id = $1 AND status <> 'uninstalled'
@@ -1626,6 +1670,34 @@ func (q *Queries) SetInstallationMemberStatus(ctx context.Context, arg SetInstal
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const suspendApplicationGlobally = `-- name: SuspendApplicationGlobally :exec
+UPDATE applications SET status = 'suspended'
+WHERE id = $1
+`
+
+type SuspendApplicationGloballyParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+func (q *Queries) SuspendApplicationGlobally(ctx context.Context, arg SuspendApplicationGloballyParams) error {
+	_, err := q.db.Exec(ctx, suspendApplicationGlobally, arg.ApplicationID)
+	return err
+}
+
+const suspendApplicationMember = `-- name: SuspendApplicationMember :exec
+UPDATE members SET status = 'suspended', version = version + 1
+WHERE id = $1 AND type = 'application' AND status = 'active'
+`
+
+type SuspendApplicationMemberParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) SuspendApplicationMember(ctx context.Context, arg SuspendApplicationMemberParams) error {
+	_, err := q.db.Exec(ctx, suspendApplicationMember, arg.MemberID)
+	return err
 }
 
 const touchAPIKey = `-- name: TouchAPIKey :exec

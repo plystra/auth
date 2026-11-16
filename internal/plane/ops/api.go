@@ -45,7 +45,7 @@ type StepUpInput struct {
 	Authorization string `header:"Authorization"`
 	Body          struct {
 		Code      secret.String   `json:"mfa_code" minLength:"6" maxLength:"6"`
-		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.permissions.create,ops.applications.approve,ops.applications.reject,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
+		Operation string          `json:"operation" enum:"ops.settings.update,ops.operators.create,ops.operators.update,ops.operators.disable,ops.permissions.create,ops.applications.approve,ops.applications.reject,ops.applications.suspend,ops.users.suspend,ops.users.sign_out_all,ops.users.require_password_reset"`
 		Request   json.RawMessage `json:"request" minLength:"2"`
 	}
 }
@@ -148,6 +148,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("ops.applications.list", "GET", "/ops/v1/applications", route.Ops, "ops:applications:manage", []route.Subject{route.Human}), a.listPublicApplications)
 	route.Register(api, route.NewSpec("ops.applications.approve", "POST", "/ops/v1/applications/{id}/approve", route.Ops, "ops:applications:manage", []route.Subject{route.Human}, route.WithStepUp()), a.approvePublicApplication)
 	route.Register(api, route.NewSpec("ops.applications.reject", "POST", "/ops/v1/applications/{id}/reject", route.Ops, "ops:applications:manage", []route.Subject{route.Human}, route.WithStepUp()), a.rejectPublicApplication)
+	route.Register(api, route.NewSpec("ops.applications.suspend", "POST", "/ops/v1/applications/{id}/suspend", route.Ops, "ops:applications:manage", []route.Subject{route.Human}, route.WithStepUp()), a.suspendApplication)
 	route.Register(api, route.NewSpec("ops.operators.list", "GET", "/ops/v1/operators", route.Ops, "ops:operators:read", []route.Subject{route.Human}), a.listOperators)
 	route.Register(api, route.NewSpec("ops.operators.create", "POST", "/ops/v1/operators", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.createOperator)
 	route.Register(api, route.NewSpec("ops.operators.update", "PATCH", "/ops/v1/operators/{id}", route.Ops, "ops:operators:manage", []route.Subject{route.Human}, route.WithStepUp()), a.updateOperator)
@@ -230,6 +231,21 @@ func (a *API) rejectPublicApplication(ctx context.Context, in *UserActionInput) 
 	}
 	return accepted(), nil
 }
+func (a *API) suspendApplication(ctx context.Context, in *UserActionInput) (*AcceptedOutput, error) {
+	token, err := bearer(in.Authorization)
+	if err != nil {
+		return nil, err
+	}
+	digest, err := canonicalDigestValue(map[string]any{"application_id": in.ID})
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Operators.SuspendApplication(ctx, token, in.ID, digest); err != nil {
+		return nil, err
+	}
+	return accepted(), nil
+}
+
 func (a *API) signIn(ctx context.Context, in *SignInInput) (*SignInOutput, error) {
 	s, err := a.Operators.SignIn(ctx, in.Body.Email, in.Body.Password.Value(), in.Body.MFACode.Value(), requestinfo.Get(ctx).IP, in.UserAgent)
 	if err != nil {
