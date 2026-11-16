@@ -3,3 +3,33 @@
 //   sqlc v1.31.1
 
 package db
+
+import (
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+type AuditLog struct {
+	ID              string             `json:"id"`
+	OccurredAt      pgtype.Timestamptz `json:"occurred_at"`
+	ActorType       string             `json:"actor_type"`
+	ActorID         pgtype.Text        `json:"actor_id"`
+	Action          string             `json:"action"`
+	ResourceType    pgtype.Text        `json:"resource_type"`
+	ResourceID      pgtype.Text        `json:"resource_id"`
+	Outcome         string             `json:"outcome"`
+	RequestID       pgtype.Text        `json:"request_id"`
+	Metadata        []byte             `json:"metadata"`
+	Plane           string             `json:"plane"`
+	CredentialType  string             `json:"credential_type"`
+	SpaceID         pgtype.Text        `json:"space_id"`
+	ResourceGroupID pgtype.Text        `json:"resource_group_id"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	MemberType      pgtype.Text        `json:"member_type"`
+	UserID          pgtype.Text        `json:"user_id"`
+	ApplicationID   pgtype.Text        `json:"application_id"`
+	OwnerChain      []byte             `json:"owner_chain"`
+	DecisionID      pgtype.Text        `json:"decision_id"`
+	DenyCode        pgtype.Text        `json:"deny_code"`
+	PermissionKey   pgtype.Text        `json:"permission_key"`
+	PolicyVersion   pgtype.Int8        `json:"policy_version"`
+}

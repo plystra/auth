@@ -156,6 +156,32 @@ func (q *Queries) GetAuditMemberChain(ctx context.Context, arg GetAuditMemberCha
 	return items, nil
 }
 
+const getSpaceAuditCursor = `-- name: GetSpaceAuditCursor :one
+SELECT occurred_at FROM audit_logs
+WHERE id = $1 AND space_id = $2
+  AND ((resource_group_id IS NULL AND $3::boolean)
+       OR resource_group_id = ANY($4::text[]))
+`
+
+type GetSpaceAuditCursorParams struct {
+	ID                 string      `json:"id"`
+	SpaceID            pgtype.Text `json:"space_id"`
+	IncludeSpaceEvents bool        `json:"include_space_events"`
+	VisibleGroupIds    []string    `json:"visible_group_ids"`
+}
+
+func (q *Queries) GetSpaceAuditCursor(ctx context.Context, arg GetSpaceAuditCursorParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getSpaceAuditCursor,
+		arg.ID,
+		arg.SpaceID,
+		arg.IncludeSpaceEvents,
+		arg.VisibleGroupIds,
+	)
+	var occurred_at pgtype.Timestamptz
+	err := row.Scan(&occurred_at)
+	return occurred_at, err
+}
+
 const listAudit = `-- name: ListAudit :many
 SELECT id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata FROM audit_logs ORDER BY occurred_at DESC LIMIT $2 OFFSET $1
 `
@@ -198,6 +224,122 @@ func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]ListAud
 			&i.Outcome,
 			&i.RequestID,
 			&i.Metadata,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditGroups = `-- name: ListAuditGroups :many
+SELECT id FROM groups
+WHERE space_id = $1
+  AND ($2::text IS NULL OR id = $2)
+ORDER BY id
+`
+
+type ListAuditGroupsParams struct {
+	SpaceID string      `json:"space_id"`
+	GroupID pgtype.Text `json:"group_id"`
+}
+
+func (q *Queries) ListAuditGroups(ctx context.Context, arg ListAuditGroupsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listAuditGroups, arg.SpaceID, arg.GroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSpaceAudit = `-- name: ListSpaceAudit :many
+SELECT id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata, plane, credential_type, space_id, resource_group_id, member_id, member_type, user_id, application_id, owner_chain, decision_id, deny_code, permission_key, policy_version FROM audit_logs
+WHERE space_id = $1
+  AND ((resource_group_id IS NULL AND $2::boolean)
+       OR resource_group_id = ANY($3::text[]))
+  AND ($4::timestamptz IS NULL
+       OR (occurred_at, id) < ($4::timestamptz, $5::text))
+  AND ($6::text IS NULL OR action = $6)
+  AND ($7::text IS NULL OR decision_id = $7)
+  AND ($8::text IS NULL OR request_id = $8)
+  AND ($9::text IS NULL OR member_id = $9
+       OR owner_chain @> jsonb_build_array(jsonb_build_object('member_id', $9::text)))
+ORDER BY occurred_at DESC, id DESC
+LIMIT $10
+`
+
+type ListSpaceAuditParams struct {
+	SpaceID            pgtype.Text        `json:"space_id"`
+	IncludeSpaceEvents bool               `json:"include_space_events"`
+	VisibleGroupIds    []string           `json:"visible_group_ids"`
+	CursorAt           pgtype.Timestamptz `json:"cursor_at"`
+	CursorID           pgtype.Text        `json:"cursor_id"`
+	Action             pgtype.Text        `json:"action"`
+	DecisionID         pgtype.Text        `json:"decision_id"`
+	RequestID          pgtype.Text        `json:"request_id"`
+	MemberID           pgtype.Text        `json:"member_id"`
+	LimitCount         int32              `json:"limit_count"`
+}
+
+func (q *Queries) ListSpaceAudit(ctx context.Context, arg ListSpaceAuditParams) ([]AuditLog, error) {
+	rows, err := q.db.Query(ctx, listSpaceAudit,
+		arg.SpaceID,
+		arg.IncludeSpaceEvents,
+		arg.VisibleGroupIds,
+		arg.CursorAt,
+		arg.CursorID,
+		arg.Action,
+		arg.DecisionID,
+		arg.RequestID,
+		arg.MemberID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AuditLog{}
+	for rows.Next() {
+		var i AuditLog
+		if err := rows.Scan(
+			&i.ID,
+			&i.OccurredAt,
+			&i.ActorType,
+			&i.ActorID,
+			&i.Action,
+			&i.ResourceType,
+			&i.ResourceID,
+			&i.Outcome,
+			&i.RequestID,
+			&i.Metadata,
+			&i.Plane,
+			&i.CredentialType,
+			&i.SpaceID,
+			&i.ResourceGroupID,
+			&i.MemberID,
+			&i.MemberType,
+			&i.UserID,
+			&i.ApplicationID,
+			&i.OwnerChain,
+			&i.DecisionID,
+			&i.DenyCode,
+			&i.PermissionKey,
+			&i.PolicyVersion,
 		); err != nil {
 			return nil, err
 		}

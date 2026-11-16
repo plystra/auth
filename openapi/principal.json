@@ -332,6 +332,27 @@
         ],
         "type": "object"
       },
+      "AuditLogsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Event"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthBody": {
         "additionalProperties": false,
         "properties": {
@@ -1278,6 +1299,99 @@
         ],
         "type": "object"
       },
+      "Event": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "actor_type": {
+            "type": "string"
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "credential_type": {
+            "type": "string"
+          },
+          "decision_id": {
+            "type": "string"
+          },
+          "deny_code": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "member_type": {
+            "type": "string"
+          },
+          "metadata": {},
+          "occurred_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "owner_chain": {
+            "items": {
+              "$ref": "#/components/schemas/MemberSnapshot"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "permission_key": {
+            "type": "string"
+          },
+          "plane": {
+            "type": "string"
+          },
+          "policy_version": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "resource_group_id": {
+            "type": "string"
+          },
+          "resource_id": {
+            "type": "string"
+          },
+          "resource_type": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_at",
+          "plane",
+          "credential_type",
+          "actor_type",
+          "action",
+          "outcome",
+          "space_id",
+          "owner_chain",
+          "metadata"
+        ],
+        "type": "object"
+      },
       "FactorCreateOutputBody": {
         "additionalProperties": false,
         "properties": {
@@ -1837,6 +1951,26 @@
         },
         "required": [
           "binding_policy"
+        ],
+        "type": "object"
+      },
+      "MemberSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "member_id": {
+            "type": "string"
+          },
+          "member_type": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "member_id",
+          "member_type",
+          "space_id"
         ],
         "type": "object"
       },
@@ -4585,6 +4719,117 @@
           }
         },
         "summary": "assignment_rights.revoke"
+      }
+    },
+    "/v1/spaces/{id}/audit-logs": {
+      "get": {
+        "operationId": "audit_logs.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "group_id",
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "member_id",
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "decision_id",
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "request_id",
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "action",
+            "schema": {
+              "maxLength": 128,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditLogsOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "audit_logs.list"
       }
     },
     "/v1/spaces/{id}/children": {

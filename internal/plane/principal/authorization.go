@@ -206,6 +206,7 @@ type createdSpaceData struct {
 func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("spaces.create", "POST", "/v1/spaces", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.createSpace)
 	route.Register(api, route.NewSpec("spaces.get", "GET", "/v1/spaces/{id}", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.getSpace)
+	route.Register(api, route.NewSpec("audit_logs.list", "GET", "/v1/spaces/{id}/audit-logs", route.Principal, "auth.audit:read", []route.Subject{route.HumanAgent}), a.listAuditLogs)
 	route.Register(api, route.NewSpec("spaces.children", "GET", "/v1/spaces/{id}/children", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listChildren)
 	route.Register(api, route.NewSpec("members.list", "GET", "/v1/spaces/{id}/members", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listMembers)
 	route.Register(api, route.NewSpec("members.create", "POST", "/v1/spaces/{id}/members", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createMember)

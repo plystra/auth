@@ -34,3 +34,30 @@ VALUES (
 
 -- name: ListAudit :many
 SELECT id, occurred_at, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata FROM audit_logs ORDER BY occurred_at DESC LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
+
+-- name: ListAuditGroups :many
+SELECT id FROM groups
+WHERE space_id = sqlc.arg(space_id)
+  AND (sqlc.narg(group_id)::text IS NULL OR id = sqlc.narg(group_id))
+ORDER BY id;
+
+-- name: GetSpaceAuditCursor :one
+SELECT occurred_at FROM audit_logs
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+  AND ((resource_group_id IS NULL AND sqlc.arg(include_space_events)::boolean)
+       OR resource_group_id = ANY(sqlc.arg(visible_group_ids)::text[]));
+
+-- name: ListSpaceAudit :many
+SELECT * FROM audit_logs
+WHERE space_id = sqlc.arg(space_id)
+  AND ((resource_group_id IS NULL AND sqlc.arg(include_space_events)::boolean)
+       OR resource_group_id = ANY(sqlc.arg(visible_group_ids)::text[]))
+  AND (sqlc.narg(cursor_at)::timestamptz IS NULL
+       OR (occurred_at, id) < (sqlc.narg(cursor_at)::timestamptz, sqlc.narg(cursor_id)::text))
+  AND (sqlc.narg(action)::text IS NULL OR action = sqlc.narg(action))
+  AND (sqlc.narg(decision_id)::text IS NULL OR decision_id = sqlc.narg(decision_id))
+  AND (sqlc.narg(request_id)::text IS NULL OR request_id = sqlc.narg(request_id))
+  AND (sqlc.narg(member_id)::text IS NULL OR member_id = sqlc.narg(member_id)
+       OR owner_chain @> jsonb_build_array(jsonb_build_object('member_id', sqlc.narg(member_id)::text)))
+ORDER BY occurred_at DESC, id DESC
+LIMIT sqlc.arg(limit_count);

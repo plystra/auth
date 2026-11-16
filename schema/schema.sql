@@ -1595,3 +1595,8 @@ ALTER TABLE audit_logs
 CREATE INDEX audit_logs_space_cursor_idx ON audit_logs(space_id, occurred_at DESC, id DESC);
 CREATE INDEX audit_logs_member_cursor_idx ON audit_logs(member_id, occurred_at DESC, id DESC);
 CREATE INDEX audit_logs_decision_idx ON audit_logs(decision_id) WHERE decision_id IS NOT NULL;
+
+
+-- Audit queries correlate a member with events from its delegated descendants.
+-- Snapshots remain immutable; this index does not reconstruct historical chains.
+CREATE INDEX audit_logs_owner_chain_idx ON audit_logs USING gin(owner_chain jsonb_path_ops);

@@ -29,14 +29,14 @@ type AuthorizationDecision struct {
 	Asserted      bool
 }
 
-type ownerSnapshot struct {
+type MemberSnapshot struct {
 	MemberID   string `json:"member_id"`
 	MemberType string `json:"member_type"`
 	SpaceID    string `json:"space_id"`
 }
 
 func WriteAuthorizationDecision(ctx context.Context, q *db.Queries, in AuthorizationDecision) error {
-	owners := make([]ownerSnapshot, 0)
+	owners := make([]MemberSnapshot, 0)
 	memberType := ""
 	complete := false
 	if in.MemberID != "" {
@@ -47,7 +47,7 @@ func WriteAuthorizationDecision(ctx context.Context, q *db.Queries, in Authoriza
 		if len(chain) > 0 {
 			memberType = chain[0].MemberType
 			for _, row := range chain[1:] {
-				owners = append(owners, ownerSnapshot{MemberID: row.ID, MemberType: row.MemberType, SpaceID: row.SpaceID})
+				owners = append(owners, MemberSnapshot{MemberID: row.ID, MemberType: row.MemberType, SpaceID: row.SpaceID})
 			}
 			complete = chain[len(chain)-1].MemberType != "agent"
 		} else {
