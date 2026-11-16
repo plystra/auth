@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +20,7 @@ import (
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/factor"
@@ -211,6 +214,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	authz.StepUp = sessions
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{key}}
 	agents := &agent.Service{Store: st, HMACKeys: [][]byte{key}}
+	approvals := &approval.Service{Store: st, Authorization: authz, StepUp: sessions}
 	validator := credential.Validator{
 		Principal: credential.PrincipalParser{Sessions: sessions},
 		Server:    credential.ServerParser{Applications: apps},
@@ -222,7 +226,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		return validator.Validate(ctx, plane, raw)
 	}
 	principalMux := http.NewServeMux()
-	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps}).Register(
+	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps, Agents: agents, Approvals: approvals}).Register(
 		humago.New(principalMux, route.HumaConfig("MVP onboarding principal", "1.0.0")))
 	(protocol.HTTP{Issuer: "https://auth.example.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authz}).Register(principalMux)
 	principalHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, nil, st, validateCredential, nil, nil)
@@ -563,7 +567,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatal("unrestricted key creation omitted its one-time secret")
 	}
 	serverMux := http.NewServeMux()
-	(&server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authz, Sessions: sessions}).Register(
+	(&server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authz, Sessions: sessions, Agents: agents, Approvals: approvals}).Register(
 		humago.New(serverMux, route.HumaConfig("MVP onboarding server", "1.0.0")))
 	serverHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Server, serverMux, nil, st, validateCredential, nil, nil)
 	check := func(keySecret, subjectMemberID, spaceID, action string) *httptest.ResponseRecorder {
@@ -597,13 +601,23 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if denied := principalRequest("/v1/spaces", keyResult.Data.Secret, `{"name":"Wrong plane","slug":"wrong-plane"}`); denied.Code != http.StatusUnauthorized || !strings.Contains(denied.Body.String(), "CREDENTIAL_PLANE_MISMATCH") {
 		t.Fatalf("server key on principal plane = %d %s", denied.Code, denied.Body.String())
 	}
+	approvalGrantBody, err := json.Marshal(map[string]any{
+		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"invoice:approve"},
+		"scope": "space", "anchor_space_id": customer.spaceID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if granted := principalRequest("/v1/spaces/"+customer.spaceID+"/grants", customer.token, string(approvalGrantBody)); granted.Code != http.StatusOK {
+		t.Fatalf("customer approval permission = %d %s", granted.Code, granted.Body.String())
+	}
 	verifier := "mvp-onboarding-pkce-verifier-123456789"
 	challenge := sha256.Sum256([]byte(verifier))
 	authorizeQuery := url.Values{
 		"response_type":         {"code"},
 		"client_id":             {appResult.Data.ClientID},
 		"redirect_uri":          {"https://saas.example.test/callback"},
-		"scope":                 {"invoice:read"},
+		"scope":                 {"invoice:read invoice:approve"},
 		"resource":              {appResult.Data.ClientID},
 		"state":                 {"mvp-state"},
 		"nonce":                 {"mvp-nonce"},
@@ -628,7 +642,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatal(err)
 	}
 	consent := func(token, requestID, memberID string) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(map[string]any{"request_id": requestID, "decision": "approve", "member_id": memberID, "permissions": []string{"invoice:read"}})
+		body, _ := json.Marshal(map[string]any{"request_id": requestID, "decision": "approve", "member_id": memberID, "permissions": []string{"invoice:read", "invoice:approve"}})
 		request := httptest.NewRequest(http.MethodPost, "/oauth/authorize", bytes.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -697,6 +711,122 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil || oauthAgent.ID != claims.Subject {
 		t.Fatalf("customer OAuth Agent identity = %+v err=%v", oauthAgent, err)
 	}
+	t.Run("OAuthAgentBusinessApproval", func(t *testing.T) {
+		serverPost := func(path string, body any) *httptest.ResponseRecorder {
+			t.Helper()
+			encoded, err := json.Marshal(body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(encoded))
+			request.Header.Set("Authorization", "Bearer "+keyResult.Data.Secret)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			serverHandler.ServeHTTP(response, request)
+			return response
+		}
+		getInbox := func(token string) *httptest.ResponseRecorder {
+			request := httptest.NewRequest(http.MethodGet, "/v1/approvals", nil)
+			request.Header.Set("Authorization", "Bearer "+token)
+			response := httptest.NewRecorder()
+			principalHandler.ServeHTTP(response, request)
+			return response
+		}
+		body := map[string]any{
+			"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:approve",
+			"resource": map[string]string{"type": "invoice", "id": "inv_approval", "space_id": customer.spaceID},
+		}
+		if denied := serverPost("/server/v1/authz/check", body); denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), "APPROVAL_REQUIRED") {
+			t.Fatalf("high-risk OAuth action without approval = %d %s", denied.Code, denied.Body.String())
+		}
+		digest := sha256.Sum256([]byte(`{"invoice_id":"inv_approval","operation":"approve"}`))
+		created := serverPost("/server/v1/approvals", map[string]any{
+			"subject": body["subject"], "action": body["action"], "resource": body["resource"],
+			"request_digest": hex.EncodeToString(digest[:]), "reason": "Approve the customer invoice",
+		})
+		if created.Code != http.StatusOK {
+			t.Fatalf("OAuth business approval creation = %d %s", created.Code, created.Body.String())
+		}
+		var approvalBody struct {
+			Data approval.Request `json:"data"`
+		}
+		if err := json.Unmarshal(created.Body.Bytes(), &approvalBody); err != nil || approvalBody.Data.ID == "" {
+			t.Fatal("business approval creation omitted the request ID")
+		}
+		if pending := serverPost("/server/v1/authz/check", body); pending.Code != http.StatusOK || !strings.Contains(pending.Body.String(), "APPROVAL_PENDING") {
+			t.Fatalf("pending OAuth approval = %d %s", pending.Code, pending.Body.String())
+		}
+		var inbox struct {
+			Data []approval.InboxRequest `json:"data"`
+		}
+		response := getInbox(customer.token)
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &inbox) != nil || len(inbox.Data) != 1 {
+			t.Fatalf("customer approval inbox = %d %s", response.Code, response.Body.String())
+		}
+		item := inbox.Data[0]
+		if item.ID != approvalBody.Data.ID || item.RequestDigest != hex.EncodeToString(digest[:]) || item.Reason != "Approve the customer invoice" || item.Resource.ID != "inv_approval" || len(item.DelegationChain) != 2 || item.DelegationChain[0].ID != oauthAgent.ID || item.DelegationChain[0].Source != "oauth" || item.DelegationChain[0].OAuthClientID != appResult.Data.ClientID || item.DelegationChain[1].ID != customer.memberID {
+			t.Fatal("approval inbox omitted the request or its OAuth delegation context")
+		}
+		other := getInbox(publisher.token)
+		if other.Code != http.StatusOK || strings.Contains(other.Body.String(), item.ID) || strings.Contains(other.Body.String(), oauthAgent.ID) {
+			t.Fatal("publisher could see the customer's approval context")
+		}
+		approvePath := "/v1/approvals/" + item.ID + "/approve"
+		if denied := principalRequest(approvePath, customer.token, ""); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "STEP_UP_REQUIRED") {
+			t.Fatalf("approval without step-up = %d %s", denied.Code, denied.Body.String())
+		}
+		if denied := principalRequest(approvePath, publisher.token, ""); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "PERMISSION_DENIED") {
+			t.Fatalf("approval by another user = %d %s", denied.Code, denied.Body.String())
+		}
+		step, err := json.Marshal(map[string]any{
+			"mfa_code": nextTOTP(customerFactorResult.Data.Secret), "operation": "approvals.approve", "request": map[string]string{"approval_id": item.ID},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stepped := principalRequest("/v1/auth/step-up", customer.token, string(step)); stepped.Code != http.StatusOK {
+			t.Fatalf("customer approval step-up = %d %s", stepped.Code, stepped.Body.String())
+		}
+		if approved := principalRequest(approvePath, customer.token, ""); approved.Code != http.StatusOK || !strings.Contains(approved.Body.String(), `"status":"approved"`) {
+			t.Fatalf("customer approval = %d %s", approved.Code, approved.Body.String())
+		}
+		wrongTarget := serverPost("/server/v1/authz/check", map[string]any{
+			"subject": body["subject"], "action": body["action"],
+			"resource": map[string]string{"type": "invoice", "id": "inv_other", "space_id": customer.spaceID},
+		})
+		if wrongTarget.Code != http.StatusOK || !strings.Contains(wrongTarget.Body.String(), "APPROVAL_REQUIRED") {
+			t.Fatalf("approval applied to another resource = %d %s", wrongTarget.Code, wrongTarget.Body.String())
+		}
+		const attempts = 4
+		responses := make(chan *httptest.ResponseRecorder, attempts)
+		var requests sync.WaitGroup
+		for range attempts {
+			requests.Go(func() { responses <- serverPost("/server/v1/authz/check", body) })
+		}
+		requests.Wait()
+		close(responses)
+		allowed := 0
+		for response := range responses {
+			if response.Code != http.StatusOK {
+				t.Fatalf("concurrent approval check status = %d", response.Code)
+			}
+			if strings.Contains(response.Body.String(), `"decision":"allow"`) {
+				allowed++
+			} else if !strings.Contains(response.Body.String(), "APPROVAL_REQUIRED") {
+				t.Fatalf("unexpected concurrent approval decision = %s", response.Body.String())
+			}
+		}
+		if allowed != 1 {
+			t.Fatalf("approval allowed %d concurrent requests, want one", allowed)
+		}
+		if replayed := serverPost("/server/v1/authz/check", body); replayed.Code != http.StatusOK || !strings.Contains(replayed.Body.String(), "APPROVAL_REQUIRED") {
+			t.Fatalf("replayed approval = %d %s", replayed.Code, replayed.Body.String())
+		}
+		var consumedAudits int
+		if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'approval.consume' AND resource_id = $1`, item.ID).Scan(&consumedAudits); err != nil || consumedAudits != 1 {
+			t.Fatalf("approval consumption audits = %d, error = %v", consumedAudits, err)
+		}
+	})
 	repeatQuery, err := url.ParseQuery(authorizeQuery.Encode())
 	if err != nil {
 		t.Fatal(err)
