@@ -879,6 +879,85 @@ func (q *Queries) ListCurrentInstallationSpaces(ctx context.Context, arg ListCur
 	return items, nil
 }
 
+const listKeyInstallations = `-- name: ListKeyInstallations :many
+WITH RECURSIVE allowed_spaces AS (
+    SELECT s.id, COALESCE((r.value->>'include_descendants')::boolean, false) AS include_descendants
+    FROM jsonb_array_elements($2::jsonb) AS r(value)
+    JOIN spaces s ON s.id = r.value->>'space_id' AND s.status = 'active'
+    UNION
+    SELECT child.id, parent.include_descendants
+    FROM spaces child JOIN allowed_spaces parent ON child.parent_id = parent.id
+    WHERE child.status = 'active' AND parent.include_descendants
+)
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope,
+       i.approved_permissions, i.status, i.created_at, a.name AS application_name
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+JOIN spaces s ON s.id = i.space_id
+WHERE i.application_id = $1
+  AND i.status = 'active' AND a.status = 'active' AND m.status = 'active' AND s.status = 'active'
+  AND (a.visibility <> 'public' OR a.review_status = 'approved')
+  AND ($2::jsonb = '[]'::jsonb OR i.space_id IN (SELECT id FROM allowed_spaces))
+  AND i.id > $3::text
+ORDER BY i.id
+LIMIT $4
+`
+
+type ListKeyInstallationsParams struct {
+	ApplicationID string `json:"application_id"`
+	RestrictTo    []byte `json:"restrict_to"`
+	AfterID       string `json:"after_id"`
+	LimitCount    int32  `json:"limit_count"`
+}
+
+type ListKeyInstallationsRow struct {
+	ID                  string             `json:"id"`
+	ApplicationID       string             `json:"application_id"`
+	SpaceID             string             `json:"space_id"`
+	MemberID            string             `json:"member_id"`
+	Scope               string             `json:"scope"`
+	ApprovedPermissions []byte             `json:"approved_permissions"`
+	Status              string             `json:"status"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	ApplicationName     string             `json:"application_name"`
+}
+
+func (q *Queries) ListKeyInstallations(ctx context.Context, arg ListKeyInstallationsParams) ([]ListKeyInstallationsRow, error) {
+	rows, err := q.db.Query(ctx, listKeyInstallations,
+		arg.ApplicationID,
+		arg.RestrictTo,
+		arg.AfterID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListKeyInstallationsRow{}
+	for rows.Next() {
+		var i ListKeyInstallationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.ApplicationID,
+			&i.SpaceID,
+			&i.MemberID,
+			&i.Scope,
+			&i.ApprovedPermissions,
+			&i.Status,
+			&i.CreatedAt,
+			&i.ApplicationName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listManagedAPIKeys = `-- name: ListManagedAPIKeys :many
 SELECT id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
        last_used_at, revoked_at, created_at, allow_subject_assertion

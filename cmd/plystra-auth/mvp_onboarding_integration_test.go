@@ -574,6 +574,47 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	(&server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authz, Sessions: sessions, Agents: agents, Approvals: approvals}).Register(
 		humago.New(serverMux, route.HumaConfig("MVP onboarding server", "1.0.0")))
 	serverHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Server, serverMux, nil, st, validateCredential, nil, nil)
+	t.Run("ServerKeyDiscovery", func(t *testing.T) {
+		get := func(path string) *httptest.ResponseRecorder {
+			t.Helper()
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Header.Set("Authorization", "Bearer "+keyResult.Data.Secret)
+			response := httptest.NewRecorder()
+			serverHandler.ServeHTTP(response, req)
+			if response.Code != http.StatusOK || response.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("SaaS discovery %s = %d %s", path, response.Code, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), keyResult.Data.Secret) || strings.Contains(response.Body.String(), "secret_hash") {
+				t.Fatal("SaaS discovery leaked key material")
+			}
+			return response
+		}
+		var identity struct {
+			Data struct {
+				ID            string                       `json:"id"`
+				ApplicationID string                       `json:"application_id"`
+				SpaceID       string                       `json:"space_id"`
+				RestrictTo    []application.KeyRestriction `json:"restrict_to"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(get("/server/v1/key").Body.Bytes(), &identity); err != nil {
+			t.Fatal(err)
+		}
+		if identity.Data.ID != keyResult.Data.Key.ID || identity.Data.ApplicationID != appResult.Data.ID || identity.Data.SpaceID != publisher.spaceID ||
+			len(identity.Data.RestrictTo) != 1 || identity.Data.RestrictTo[0].SpaceID != customer.spaceID {
+			t.Fatalf("SaaS server key identified the wrong publisher or customer: %+v", identity.Data)
+		}
+		var installations struct {
+			Data       []application.Installation `json:"data"`
+			NextCursor string                     `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(get("/server/v1/installations?limit=1").Body.Bytes(), &installations); err != nil {
+			t.Fatal(err)
+		}
+		if len(installations.Data) != 1 || installations.Data[0].ID != installationResult.Data.ID || installations.Data[0].SpaceID != customer.spaceID || installations.NextCursor != "" {
+			t.Fatalf("SaaS discovery omitted its customer installation: %+v", installations)
+		}
+	})
 	check := func(keySecret, subjectMemberID, spaceID, action string) *httptest.ResponseRecorder {
 		t.Helper()
 		body, err := json.Marshal(map[string]any{

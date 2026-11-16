@@ -267,6 +267,57 @@
         ],
         "type": "object"
       },
+      "Installation": {
+        "additionalProperties": false,
+        "properties": {
+          "application_id": {
+            "type": "string"
+          },
+          "application_name": {
+            "type": "string"
+          },
+          "approved_permissions": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "application_id",
+          "application_name",
+          "space_id",
+          "member_id",
+          "scope",
+          "approved_permissions",
+          "status",
+          "created_at"
+        ],
+        "type": "object"
+      },
       "IntrospectIdentity": {
         "additionalProperties": false,
         "properties": {
@@ -331,6 +382,131 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "KeyIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_subject_assertion": {
+            "type": "boolean"
+          },
+          "allowed_ip_cidrs": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "application_id": {
+            "type": "string"
+          },
+          "client_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string"
+          },
+          "restrict_to": {
+            "items": {
+              "$ref": "#/components/schemas/KeyRestriction"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "application_id",
+          "client_id",
+          "space_id",
+          "name",
+          "prefix",
+          "grants",
+          "restrict_to",
+          "allowed_ip_cidrs",
+          "allow_subject_assertion",
+          "expires_at",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "KeyIdentityOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/KeyIdentity"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "KeyInstallationsOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "items": {
+              "$ref": "#/components/schemas/Installation"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "KeyRestriction": {
+        "additionalProperties": false,
+        "properties": {
+          "include_descendants": {
+            "type": "boolean"
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id",
+          "include_descendants"
         ],
         "type": "object"
       },
@@ -627,6 +803,115 @@
           }
         },
         "summary": "authz.explain"
+      }
+    },
+    "/server/v1/installations": {
+      "get": {
+        "operationId": "installations.list",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "cursor",
+            "schema": {
+              "maxLength": 512,
+              "type": "string"
+            }
+          },
+          {
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "default": 50,
+              "format": "int64",
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyInstallationsOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "installations.list"
+      }
+    },
+    "/server/v1/key": {
+      "get": {
+        "operationId": "key.whoami",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyIdentityOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "key.whoami"
       }
     },
     "/server/v1/tokens/introspect": {

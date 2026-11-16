@@ -165,6 +165,30 @@ ORDER BY i.created_at, i.id;
 -- name: GetInstallationTargetSpace :one
 SELECT space_id FROM application_installations WHERE id = sqlc.arg(installation_id);
 
+-- name: ListKeyInstallations :many
+WITH RECURSIVE allowed_spaces AS (
+    SELECT s.id, COALESCE((r.value->>'include_descendants')::boolean, false) AS include_descendants
+    FROM jsonb_array_elements(sqlc.arg(restrict_to)::jsonb) AS r(value)
+    JOIN spaces s ON s.id = r.value->>'space_id' AND s.status = 'active'
+    UNION
+    SELECT child.id, parent.include_descendants
+    FROM spaces child JOIN allowed_spaces parent ON child.parent_id = parent.id
+    WHERE child.status = 'active' AND parent.include_descendants
+)
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope,
+       i.approved_permissions, i.status, i.created_at, a.name AS application_name
+FROM application_installations i
+JOIN applications a ON a.id = i.application_id
+JOIN members m ON m.id = i.member_id
+JOIN spaces s ON s.id = i.space_id
+WHERE i.application_id = sqlc.arg(application_id)
+  AND i.status = 'active' AND a.status = 'active' AND m.status = 'active' AND s.status = 'active'
+  AND (a.visibility <> 'public' OR a.review_status = 'approved')
+  AND (sqlc.arg(restrict_to)::jsonb = '[]'::jsonb OR i.space_id IN (SELECT id FROM allowed_spaces))
+  AND i.id > sqlc.arg(after_id)::text
+ORDER BY i.id
+LIMIT sqlc.arg(limit_count);
+
 -- name: LockInstallationForLifecycle :one
 SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
        i.approved_permissions, i.status, i.created_at,

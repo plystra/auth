@@ -190,6 +190,9 @@ type resolvedSubject struct {
 }
 
 func (a *API) Register(api huma.API) {
+	// Discovery requires key authentication in the handlers, but no member permission.
+	route.Register(api, route.NewSpec("key.whoami", "GET", "/server/v1/key", route.Server, "", []route.Subject{route.Public}), a.whoami)
+	route.Register(api, route.NewSpec("installations.list", "GET", "/server/v1/installations", route.Server, "", []route.Subject{route.Public}), a.listKeyInstallations)
 	route.Register(api, route.NewSpec("authz.check", "POST", "/server/v1/authz/check", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.check)
 	route.Register(api, route.NewSpec("authz.batch_check", "POST", "/server/v1/authz/batch-check", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(256*1024)), a.batchCheck)
 	route.Register(api, route.NewSpec("authz.explain", "POST", "/server/v1/authz/explain", route.Server, "auth.authz:explain", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.explain)

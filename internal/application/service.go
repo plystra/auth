@@ -253,6 +253,10 @@ type Key struct {
 	ApplicationID         string
 	ClientID              string
 	SpaceID               string
+	Name                  string
+	Prefix                string
+	ExpiresAt             time.Time
+	CreatedAt             time.Time
 	Scopes                []string
 	RestrictTo            []KeyRestriction
 	AllowedIPCIDRs        []string
@@ -348,7 +352,9 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 			return Key{}, apierr.New("UNAVAILABLE", "API key installation scope is invalid")
 		}
 	}
-	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID, Scopes: scopes, RestrictTo: restrictions, AllowedIPCIDRs: allowedIPCIDRs, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
+	return Key{ID: row.ID, ApplicationID: row.ApplicationID, ClientID: row.ClientID, SpaceID: row.SpaceID,
+		Name: row.Name, Prefix: row.Prefix, ExpiresAt: row.ExpiresAt.Time, CreatedAt: row.CreatedAt.Time,
+		Scopes: scopes, RestrictTo: restrictions, AllowedIPCIDRs: allowedIPCIDRs, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
 }
 
 // ResolveKeyInstallation finds the application member whose current authority
