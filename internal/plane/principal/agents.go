@@ -87,7 +87,7 @@ func (a *API) registerAgentRoutes(api huma.API) {
 }
 
 func (a *API) listAgents(ctx context.Context, in *agentsListInput) (*agentsListOutput, error) {
-	member, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	member, _, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func (a *API) listAgents(ctx context.Context, in *agentsListInput) (*agentsListO
 }
 
 func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOutput, error) {
-	member, userID, err := a.authorizeCurrentMember(ctx, in.Authorization, "auth.agents:create")
+	member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "auth.agents:create")
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +131,7 @@ func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOu
 }
 
 func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecretOutput, error) {
-	memberID, userID, err := a.currentMember(ctx, in.Authorization)
+	memberID, userID, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 }
 
 func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
-	actorID, _, err := a.currentMember(ctx, in.Authorization)
+	actorID, _, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 }
 
 func (a *API) stopAgent(ctx context.Context, in *agentPathInput) (*agentAcceptedOutput, error) {
-	memberID, _, err := a.currentMember(ctx, in.Authorization)
+	memberID, _, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +200,7 @@ func (a *API) stopAgent(ctx context.Context, in *agentPathInput) (*agentAccepted
 }
 
 func (a *API) deleteAgent(ctx context.Context, in *agentPathInput) (*agentAcceptedOutput, error) {
-	memberID, _, err := a.currentMember(ctx, in.Authorization)
+	memberID, _, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -251,23 +251,23 @@ func (a *API) authorizeAgentAction(ctx context.Context, actorID, targetID, permi
 	return nil
 }
 
-func (a *API) currentMember(ctx context.Context, authorization string) (string, string, error) {
-	parts := strings.Fields(authorization)
+func (a *API) currentMember(ctx context.Context, authorizationHeader string) (string, string, context.Context, error) {
+	parts := strings.Fields(authorizationHeader)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return "", "", apierr.New("UNAUTHENTICATED", "a bearer access token is required")
+		return "", "", ctx, apierr.New("UNAUTHENTICATED", "a bearer access token is required")
 	}
 	claims, active, err := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
 	if err != nil {
-		return "", "", err
+		return "", "", ctx, err
 	}
 	if !active {
-		return "", "", apierr.New("UNAUTHENTICATED", "the access token is invalid")
+		return "", "", ctx, apierr.New("UNAUTHENTICATED", "the access token is invalid")
 	}
 	if claims.Type == "agent" {
-		return claims.Subject, "", nil
+		return claims.Subject, "", authorization.WithTokenScopes(ctx, claims.Subject, claims.Scopes), nil
 	}
 	if a.Authorization == nil {
-		return "", "", apierr.New("UNAVAILABLE", "authorization is unavailable")
+		return "", "", ctx, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	spaceID := claims.SpaceID
 	if spaceID == "" {
@@ -276,44 +276,44 @@ func (a *API) currentMember(ctx context.Context, authorization string) (string, 
 	if claims.MemberID != "" {
 		member, err := a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
 		if err != nil {
-			return "", "", err
+			return "", "", ctx, err
 		}
 		bound, bindErr := a.Authorization.UserBoundToMember(ctx, claims.Subject, member.ID)
 		if bindErr != nil {
-			return "", "", bindErr
+			return "", "", ctx, bindErr
 		}
 		if !bound {
-			return "", "", apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
+			return "", "", ctx, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
 		}
-		return member.ID, claims.Subject, nil
+		return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 	}
 	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 	if err != nil {
-		return "", "", err
+		return "", "", ctx, err
 	}
-	return member.ID, claims.Subject, nil
+	return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 }
 
-func (a *API) authorizeCurrentMember(ctx context.Context, authorizationHeader, permission string) (authorization.Member, string, error) {
-	memberID, userID, err := a.currentMember(ctx, authorizationHeader)
+func (a *API) authorizeCurrentMember(ctx context.Context, authorizationHeader, permission string) (authorization.Member, string, context.Context, error) {
+	memberID, userID, ctx, err := a.currentMember(ctx, authorizationHeader)
 	if err != nil {
-		return authorization.Member{}, "", err
+		return authorization.Member{}, "", ctx, err
 	}
 	if a.Authorization == nil {
-		return authorization.Member{}, "", apierr.New("UNAVAILABLE", "authorization is unavailable")
+		return authorization.Member{}, "", ctx, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	member, err := a.Authorization.GetMemberAnySpace(ctx, memberID)
 	if err != nil {
-		return authorization.Member{}, "", err
+		return authorization.Member{}, "", ctx, err
 	}
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: member.ID, Permission: permission, ResourceSpace: member.SpaceID, ResourceOwner: member.ID,
 	})
 	if err != nil {
-		return authorization.Member{}, "", err
+		return authorization.Member{}, "", ctx, err
 	}
 	if decision.Effect != engine.Allow {
-		return authorization.Member{}, "", &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+		return authorization.Member{}, "", ctx, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 	}
-	return member, userID, nil
+	return member, userID, ctx, nil
 }

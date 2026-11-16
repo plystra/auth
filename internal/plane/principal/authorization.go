@@ -242,7 +242,7 @@ func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authoriza
 	if currentSpace == "" && claims.MemberID == "" && claims.Type != "agent" {
 		currentSpace = account.DefaultSpaceID
 	}
-	actor, err := a.actorForSpaceSelf(ctx, in.Authorization, currentSpace, "self:read")
+	actor, ctx, err := a.actorForSpaceSelf(ctx, in.Authorization, currentSpace, "self:read")
 	if err != nil {
 		return nil, err
 	}
@@ -267,7 +267,7 @@ func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authoriza
 }
 
 func (a *API) getSpace(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[authorization.Space], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
 	if err != nil {
 		return nil, err
 	}
@@ -284,7 +284,7 @@ func (a *API) getSpace(ctx context.Context, in *spacePathInput) (*authorizationD
 }
 
 func (a *API) listChildren(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Space], error) {
-	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
+	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
 		return nil, err
 	}
 	children, err := a.Authorization.ListChildren(ctx, in.ID)
@@ -297,7 +297,7 @@ func (a *API) listChildren(ctx context.Context, in *spacePathInput) (*authorizat
 }
 
 func (a *API) listMembers(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Member], error) {
-	_, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
+	_, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (a *API) listMembers(ctx context.Context, in *spacePathInput) (*authorizati
 }
 
 func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authorizationDataOutput[authorization.Member], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,7 @@ func (a *API) removeMember(ctx context.Context, in *memberPathInput) (*authoriza
 }
 
 func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status string) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:manage", in.MemberID)
+	actor, ctx, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:manage", in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +371,7 @@ func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status s
 }
 
 func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[[]authorization.Binding], error) {
-	if _, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:read", in.MemberID); err != nil {
+	if _, _, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:read", in.MemberID); err != nil {
 		return nil, err
 	}
 	if _, err := a.Authorization.GetMember(ctx, in.MemberID, in.ID); err != nil {
@@ -428,7 +428,7 @@ func acceptedResponse() *authorizationDataOutput[acceptedData] {
 }
 
 func (a *API) addGroupMember(ctx context.Context, in *groupMemberPathInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +439,7 @@ func (a *API) addGroupMember(ctx context.Context, in *groupMemberPathInput) (*au
 }
 
 func (a *API) moveGroup(ctx context.Context, in *groupMoveInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -450,7 +450,7 @@ func (a *API) moveGroup(ctx context.Context, in *groupMoveInput) (*authorization
 }
 
 func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Role], error) {
-	_, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	_, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -464,7 +464,7 @@ func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorization
 }
 
 func (a *API) createRole(ctx context.Context, in *createRoleInput) (*authorizationDataOutput[authorization.Role], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +478,7 @@ func (a *API) createRole(ctx context.Context, in *createRoleInput) (*authorizati
 }
 
 func (a *API) updateRole(ctx context.Context, in *updateRoleInput) (*authorizationDataOutput[authorization.Role], error) {
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -501,7 +501,7 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 	if in.Body.Grantee.GroupID != "" || in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
 		return nil, apierr.New("UNAVAILABLE", "group grants are not yet available")
 	}
-	actor, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.Grantee.MemberID)
+	actor, ctx, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.Grantee.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -523,7 +523,7 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 	// Revoke resolves the grant and its grantee inside the same transaction as
 	// the authorization check. Do not pre-authorize against the whole Space,
 	// because a group-scoped grant must be checked against its target group.
-	actor, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+	actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +536,7 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 }
 
 func (a *API) listAssignmentRights(ctx context.Context, in *assignmentRightsInput) (*authorizationDataOutput[[]authorization.AssignmentRight], error) {
-	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage"); err != nil {
+	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage"); err != nil {
 		return nil, err
 	}
 	var err error
@@ -559,7 +559,7 @@ func (a *API) createAssignmentRight(ctx context.Context, in *createAssignmentRig
 	if in.Body.AnchorGroupID == "" && in.Body.AnchorSpaceID != "" {
 		resourceSpace = in.Body.AnchorSpaceID
 	}
-	actor, err := a.actorForNode(ctx, in.Authorization, resourceSpace, resourceGroup, "auth.assign_rights:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, resourceSpace, resourceGroup, "auth.assign_rights:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -577,7 +577,7 @@ func (a *API) createAssignmentRight(ctx context.Context, in *createAssignmentRig
 }
 
 func (a *API) revokeAssignmentRight(ctx context.Context, in *assignmentRightPathInput) (*authorizationDataOutput[acceptedData], error) {
-	actor, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+	actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +593,7 @@ func (a *API) revokeAssignmentRight(ctx context.Context, in *assignmentRightPath
 
 func (a *API) createGroup(ctx context.Context, in *createGroupInput) (*authorizationDataOutput[authorization.Group], error) {
 	parentGroupID := strings.TrimSpace(in.Body.ParentGroupID)
-	actor, err := a.actorForNode(ctx, in.Authorization, in.ID, parentGroupID, "auth.groups:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, parentGroupID, "auth.groups:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -615,7 +615,7 @@ func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (
 	var err error
 	inviterUserID := ""
 	if memberID == "" {
-		actor, err = a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
+		actor, ctx, err = a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:manage")
 	} else {
 		var claims security.Claims
 		claims, err = a.authenticatePrincipal(ctx, in.Authorization)
@@ -624,7 +624,7 @@ func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (
 		}
 		if err == nil {
 			inviterUserID = claims.Subject
-			actor, err = a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", memberID)
+			actor, ctx, err = a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.bindings:manage", memberID)
 		}
 		if err == nil {
 			ctx, err = a.principalStepUpContext(ctx, in.Authorization, "invitations.create", map[string]any{
@@ -646,7 +646,7 @@ func (a *API) createInvitation(ctx context.Context, in *createInvitationInput) (
 	return out, nil
 }
 
-func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
+func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, context.Context, error) {
 	return a.actorForSpaceTarget(ctx, authorizationHeader, spaceID, permission, "")
 }
 
@@ -663,6 +663,7 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
+	ctx = authorization.WithTokenScopes(ctx, member.ID, claims.Scopes)
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup,
 	})
@@ -701,43 +702,44 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	}
 }
 
-func (a *API) actorForSpaceSelf(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, error) {
+func (a *API) actorForSpaceSelf(ctx context.Context, authorizationHeader, spaceID, permission string) (authorization.Member, context.Context, error) {
 	return a.actorForSpaceTargetWithSelf(ctx, authorizationHeader, spaceID, permission, "", true)
 }
 
-func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string) (authorization.Member, error) {
+func (a *API) actorForSpaceTarget(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string) (authorization.Member, context.Context, error) {
 	return a.actorForSpaceTargetWithSelf(ctx, authorizationHeader, spaceID, permission, targetMemberID, false)
 }
 
-func (a *API) actorForNode(ctx context.Context, authorizationHeader, spaceID, groupID, permission string) (authorization.Member, error) {
-	member, err := a.resolvePrincipalMember(ctx, authorizationHeader, spaceID)
+func (a *API) actorForNode(ctx context.Context, authorizationHeader, spaceID, groupID, permission string) (authorization.Member, context.Context, error) {
+	member, ctx, err := a.resolvePrincipalMember(ctx, authorizationHeader, spaceID)
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID})
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
 	if decision.Effect != engine.Allow {
-		return authorization.Member{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+		return authorization.Member{}, ctx, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 	}
-	return member, nil
+	return member, ctx, nil
 }
 
-func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string, self bool) (authorization.Member, error) {
+func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string, self bool) (authorization.Member, context.Context, error) {
 	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
 	member, err := a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
+	ctx = authorization.WithTokenScopes(ctx, member.ID, claims.Scopes)
 	resourceGroup := ""
 	if targetMemberID != "" {
 		resourceGroup, err = a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
 		if err != nil {
-			return authorization.Member{}, err
+			return authorization.Member{}, ctx, err
 		}
 	}
 	resourceOwner := ""
@@ -746,20 +748,24 @@ func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHead
 	}
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup, ResourceOwner: resourceOwner})
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
 	if decision.Effect != engine.Allow {
-		return authorization.Member{}, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
+		return authorization.Member{}, ctx, &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 	}
-	return member, nil
+	return member, ctx, nil
 }
 
-func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, spaceID string) (authorization.Member, error) {
+func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, spaceID string) (authorization.Member, context.Context, error) {
 	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
 	if err != nil {
-		return authorization.Member{}, err
+		return authorization.Member{}, ctx, err
 	}
-	return a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
+	member, err := a.resolvePrincipalMemberClaims(ctx, claims, spaceID)
+	if err != nil {
+		return authorization.Member{}, ctx, err
+	}
+	return member, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 }
 
 func (a *API) resolvePrincipalMemberClaims(ctx context.Context, claims security.Claims, spaceID string) (authorization.Member, error) {

@@ -38,6 +38,9 @@ type Request struct {
 	Assignments            []Assignment
 	Owner                  *Request
 	ApprovalValid          bool
+	// TokenScopes can only constrain persisted authority. Nil is unrestricted;
+	// a non-nil empty list represents a credential with no usable permissions.
+	TokenScopes []string
 	// SkipApproval is used only while evaluating an Agent's owner envelope.
 	// Approval belongs to the acting Agent request and must not make an
 	// otherwise valid owner permission disappear from the envelope.
@@ -53,6 +56,9 @@ type Decision struct {
 func Check(in Request) Decision {
 	if in.MemberID == "" || in.Permission == "" {
 		return Decision{Effect: Deny, Code: "invalid_subject", Trace: []string{"missing subject or permission"}}
+	}
+	if in.TokenScopes != nil && !contains(in.TokenScopes, in.Permission) {
+		return Decision{Effect: Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}
 	}
 	matches := []Assignment{}
 	sawPermission := false

@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+func TestTokenScopeOnlyRestrictsCurrentAuthority(t *testing.T) {
+	request := Request{
+		MemberID: "mem_reader", Permission: "document:read", ResourceSpace: "spc_1",
+		Assignments: []Assignment{{MemberID: "mem_reader", Permissions: []string{"document:read"}, Scope: Scope{Kind: "space", Anchor: "spc_1"}}},
+	}
+	for _, tc := range []struct {
+		name   string
+		scopes []string
+		want   Effect
+	}{
+		{"unrestricted", nil, Allow},
+		{"included", []string{"document:read"}, Allow},
+		{"excluded", []string{"document:write"}, Deny},
+		{"empty", []string{}, Deny},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request.TokenScopes = tc.scopes
+			got := Check(request)
+			if got.Effect != tc.want || got.Effect == Deny && got.Code != "TOKEN_SCOPE_EXCLUDED" {
+				t.Fatalf("credential constraint = %+v, want %s", got, tc.want)
+			}
+		})
+	}
+	request.TokenScopes = []string{"document:read"}
+	request.Assignments = nil
+	if got := Check(request); got.Effect != Deny || got.Code != "NO_MATCHING_PERMISSION" {
+		t.Fatalf("token scope created authority without a grant: %+v", got)
+	}
+}
+
 func TestCheckRespectsGrantScopeAndDefaultDeny(t *testing.T) {
 	tests := []struct {
 		name    string

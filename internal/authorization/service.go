@@ -66,6 +66,7 @@ type CheckRequest struct {
 	ResourceSpace string
 	ResourceGroup string
 	ResourceOwner string
+	TokenScopes   []string
 	approved      bool
 }
 
@@ -108,6 +109,7 @@ func (s *Service) initializeCache() {
 }
 
 func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckRequest, depth int, useCache bool) (engine.Decision, int64, error) {
+	in.TokenScopes = tokenScopesFor(ctx, in.MemberID, in.TokenScopes)
 	if strings.TrimSpace(in.MemberID) == "" || strings.TrimSpace(in.Permission) == "" {
 		return engine.Decision{Effect: engine.Deny, Code: "INVALID_SUBJECT"}, 0, nil
 	}
@@ -202,6 +204,7 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 		ResourceOwner:          in.ResourceOwner,
 		Assignments:            assignments,
 		ApprovalValid:          in.approved,
+		TokenScopes:            in.TokenScopes,
 	}
 	// Only CheckBusiness can set ApprovalValid after finding a persisted approval.
 	// Callers cannot assert approval as a request fact.

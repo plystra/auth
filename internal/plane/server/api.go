@@ -331,16 +331,10 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	}
 	memberID := resolved.ID
 	permission := strings.TrimSpace(body.Action)
-	if len(resolved.Scopes) > 0 && !contains(resolved.Scopes, permission) {
-		policyVersion, versionErr := a.Authorization.PolicyVersion(ctx, spaceID)
-		if versionErr != nil {
-			return authorizationEvaluation{}, versionErr
-		}
-		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID, userID: resolved.UserID}, nil
-	}
 	check := authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
 		ResourceGroup: body.Resource.GroupID, ResourceOwner: body.Resource.OwnerMemberID,
+		TokenScopes: resolved.Scopes,
 	}
 	var decision engine.Decision
 	var policyVersion int64

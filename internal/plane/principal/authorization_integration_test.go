@@ -606,7 +606,7 @@ func TestCurrentMemberUsesSelectedBindingWhenUserHasMultipleMembers(t *testing.T
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: &agent.Service{Store: authz.Store}}
-	memberID, userID, err := api.currentMember(ctx, "Bearer "+tokens.AccessToken)
+	memberID, userID, ctx, err := api.currentMember(ctx, "Bearer "+tokens.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -906,7 +906,7 @@ func TestNestedInactiveAgentOwnerReturnsOwnerInactiveAtManagementEndpoint(t *tes
 		t.Fatalf("authz.check decision = %+v, want OWNER_INACTIVE", decision)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
-	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
 		t.Fatal("child Agent with inactive ancestor used management endpoint")
 	} else {
 		assertPrincipalError(t, err, "OWNER_INACTIVE")
@@ -921,7 +921,7 @@ func TestManagementEndpointRejectsPermissionExcludedBySpaceEnvelope(t *testing.T
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
-	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
 		t.Fatalf("baseline management permission = %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO space_envelopes (space_id) VALUES ($1)`, spaceID); err != nil {
@@ -965,10 +965,10 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Agents: agents}
-	if _, err := api.actorForSpace(ctx, "Bearer "+humanTokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+humanTokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
 		t.Fatalf("human management decision = %v", err)
 	}
-	if _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err != nil {
 		t.Fatalf("Agent H/A management endpoint was denied: %v", err)
 	}
 	for _, token := range []string{humanTokens.AccessToken, agentTokens.AccessToken} {
@@ -983,7 +983,7 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
 		t.Fatal("Agent retained a permission after its owner's grant was revoked")
 	} else {
 		assertPrincipalError(t, err, "OWNER_ENVELOPE_EXCLUDED")
@@ -991,7 +991,7 @@ func TestAgentManagementUsesOwnerEnvelopeAndSupportsHAEndpoints(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE members SET status = 'suspended' WHERE id = $1`, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+agentTokens.AccessToken, spaceID, "auth.members:manage"); err == nil {
 		t.Fatal("Agent with inactive owner was allowed by a management endpoint")
 	} else {
 		assertPrincipalError(t, err, "OWNER_INACTIVE")
@@ -1103,7 +1103,7 @@ func TestAgentManagementRequiresVerifiedApprovalFact(t *testing.T) {
 		t.Fatalf("unapproved Agent decision = %+v, want APPROVAL_REQUIRED", decision)
 	}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer}
-	if _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.bindings:manage"); err == nil {
+	if _, _, err := api.actorForSpace(ctx, "Bearer "+tokens.AccessToken, spaceID, "auth.bindings:manage"); err == nil {
 		t.Fatal("Agent governance operation ignored the missing approval")
 	} else {
 		assertPrincipalError(t, err, decision.Code)

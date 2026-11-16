@@ -72,6 +72,15 @@ func authorizationCacheKey(in CheckRequest, catalogVersion int64, spaceVersions 
 	b.WriteString(in.ResourceGroup)
 	b.WriteByte(0)
 	b.WriteString(in.ResourceOwner)
+	b.WriteString("\x00token_scopes:")
+	if in.TokenScopes == nil {
+		b.WriteString("unrestricted")
+	} else {
+		for _, key := range uniqueSorted(in.TokenScopes) {
+			b.WriteString(strconv.Quote(key))
+			b.WriteByte(',')
+		}
+	}
 	b.WriteString("\x00catalog:")
 	b.WriteString(strconv.FormatInt(catalogVersion, 10))
 	b.WriteString("\x00spaces:")

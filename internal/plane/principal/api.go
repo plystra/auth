@@ -568,7 +568,7 @@ func (a *API) me(ctx context.Context, in *BearerInput) (*MeOutput, error) {
 	if !active {
 		return nil, apierr.New("UNAUTHENTICATED", "A user access token is required.")
 	}
-	if _, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read"); err != nil {
+	if _, _, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read"); err != nil {
 		return nil, err
 	}
 	out := &MeOutput{}
@@ -651,7 +651,7 @@ func (a *API) meMembers(ctx context.Context, in *MembersInput) (*MembersOutput, 
 }
 
 func (a *API) removeCurrentMember(ctx context.Context, in *BearerInput) (*GenericOutput, error) {
-	member, userID, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
 	if err != nil {
 		return nil, err
 	}
@@ -676,7 +676,7 @@ func (a *API) removeCurrentMember(ctx context.Context, in *BearerInput) (*Generi
 }
 
 func (a *API) mePermissions(ctx context.Context, in *BearerInput) (*PermissionsOutput, error) {
-	member, _, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	member, _, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
 	if err != nil {
 		return nil, err
 	}

@@ -103,26 +103,26 @@ func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("applications.keys.revoke", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/revoke", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.revokeApplicationKey)
 }
 
-func (a *API) applicationKeyActor(ctx context.Context, authorizationHeader, applicationID string) (string, error) {
+func (a *API) applicationKeyActor(ctx context.Context, authorizationHeader, applicationID string) (string, context.Context, error) {
 	if a.Applications == nil {
-		return "", apierr.New("UNAVAILABLE", "application key management is unavailable")
+		return "", ctx, apierr.New("UNAVAILABLE", "application key management is unavailable")
 	}
 	if _, err := a.authenticatePrincipal(ctx, authorizationHeader); err != nil {
-		return "", err
+		return "", ctx, err
 	}
 	spaceID, err := a.Applications.ApplicationSpace(ctx, applicationID)
 	if err != nil {
-		return "", err
+		return "", ctx, err
 	}
-	actor, err := a.actorForSpace(ctx, authorizationHeader, spaceID, "auth.applications:manage")
+	actor, ctx, err := a.actorForSpace(ctx, authorizationHeader, spaceID, "auth.applications:manage")
 	if err != nil {
-		return "", err
+		return "", ctx, err
 	}
-	return actor.ID, nil
+	return actor.ID, ctx, nil
 }
 
 func (a *API) listApplicationKeys(ctx context.Context, in *applicationKeyPathInput) (*authorizationDataOutput[[]application.ManagedKey], error) {
-	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +136,7 @@ func (a *API) listApplicationKeys(ctx context.Context, in *applicationKeyPathInp
 }
 
 func (a *API) createApplicationKey(ctx context.Context, in *createApplicationKeyInput) (*authorizationDataOutput[applicationKeyCreation], error) {
-	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func (a *API) createApplicationKey(ctx context.Context, in *createApplicationKey
 }
 
 func (a *API) rotateApplicationKey(ctx context.Context, in *rotateApplicationKeyInput) (*authorizationDataOutput[applicationKeyCreation], error) {
-	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
 	if err != nil {
 		return nil, err
 	}
@@ -185,7 +185,7 @@ func (a *API) rotateApplicationKey(ctx context.Context, in *rotateApplicationKey
 }
 
 func (a *API) revokeApplicationKey(ctx context.Context, in *revokeApplicationKeyInput) (*authorizationDataOutput[application.ManagedKey], error) {
-	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +202,7 @@ func (a *API) listInstallations(ctx context.Context, in *applicationsPathInput) 
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application installations are unavailable")
 	}
-	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
+	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
 		return nil, err
 	}
 	items, err := a.Applications.ListInstallations(ctx, in.ID)
@@ -225,7 +225,7 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	if scope != "space" && scope != "space_tree" {
 		return nil, apierr.New("VALIDATION_FAILED", "installation scope is invalid")
 	}
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -258,7 +258,7 @@ func (a *API) approveInstallation(ctx context.Context, in *installationLifecycle
 	if spaceID != in.ID {
 		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
 	}
-	actor, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +297,7 @@ func (a *API) changeInstallationStatus(ctx context.Context, in *installationLife
 	if spaceID != in.ID {
 		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
 	}
-	actor, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -314,7 +314,7 @@ func (a *API) listApplications(ctx context.Context, in *applicationsPathInput) (
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application listing is unavailable")
 	}
-	if _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage"); err != nil {
+	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage"); err != nil {
 		return nil, err
 	}
 	items, err := a.Applications.ListPublished(ctx, in.ID)
@@ -330,7 +330,7 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application registration is unavailable")
 	}
-	actor, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +358,7 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 }
 
 func (a *API) updateApplication(ctx context.Context, in *updateApplicationInput) (*authorizationDataOutput[application.PublishedApplication], error) {
-	actorID, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
 	if err != nil {
 		return nil, err
 	}
