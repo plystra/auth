@@ -18,6 +18,7 @@ import (
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
@@ -148,6 +149,9 @@ func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, i
 	}
 	var out Agent
 	err := func() error {
+		if err := member.LockChainsTx(ctx, q, in.OwnerMemberID); err != nil {
+			return err
+		}
 		owner, err := q.GetMemberForAgentOwner(ctx, db.GetMemberForAgentOwnerParams{MemberID: in.OwnerMemberID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -206,7 +210,11 @@ func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, i
 		if err := audit.Write(ctx, q, "member", in.OwnerMemberID, "agent.create", member.ID, "success"); err != nil {
 			return err
 		}
-		out = Agent{ID: member.ID, SpaceID: member.SpaceID, Name: member.Name, Type: member.Type, Status: member.Status, HomeGroupID: member.HomeGroupID.String, CreatedByMember: member.CreatedByMemberID.String, Source: member.Source.String, ExpiresAt: member.ExpiresAt.Time, Version: member.Version}
+		version, err := q.GetMemberVersion(ctx, db.GetMemberVersionParams{MemberID: member.ID})
+		if err != nil {
+			return err
+		}
+		out = Agent{ID: member.ID, SpaceID: member.SpaceID, Name: member.Name, Type: member.Type, Status: member.Status, HomeGroupID: member.HomeGroupID.String, CreatedByMember: member.CreatedByMemberID.String, Source: member.Source.String, ExpiresAt: member.ExpiresAt.Time, Version: version}
 		if member.OauthClientID.Valid {
 			out.OAuthClientID = member.OauthClientID.String
 		}
@@ -386,6 +394,9 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 	var expires time.Time
 	takeover := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := member.LockChainsTx(ctx, q, ownerMemberID, memberID); err != nil {
+			return err
+		}
 		row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 		if err != nil {
 			return apierr.New("NOT_FOUND", "agent was not found")
@@ -473,6 +484,9 @@ func (s *Service) CreateOAuthRefreshCredential(ctx context.Context, memberID str
 	}
 	family := ids.New[ids.RefreshFamilyID]("rtf")
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+			return err
+		}
 		member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("NOT_FOUND", "agent was not found")
@@ -536,22 +550,12 @@ func (s *Service) rotateOAuthRefresh(ctx context.Context, raw, clientID string) 
 	var out Credential
 	replayed := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		var row db.LockOAuthRefreshCredentialByHashRow
-		found := false
-		for _, candidate := range s.credentialHMACKeys() {
-			mac := hmac.New(sha256.New, candidate)
-			_, _ = mac.Write([]byte(raw))
-			row, err = q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: mac.Sum(nil)})
-			if err == nil {
-				found = true
-				break
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-		}
-		if !found {
+		row, err := s.lockOAuthRefreshCredentialTx(ctx, q, raw)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("invalid_grant", "OAuth refresh token is invalid")
+		}
+		if err != nil {
+			return err
 		}
 		if clientID != "" && row.OauthClientID.String != clientID {
 			return apierr.New("invalid_client", "OAuth client authentication failed")
@@ -638,23 +642,14 @@ func (s *Service) RevokeOAuthRefreshToken(ctx context.Context, raw string) (bool
 	}
 	found := false
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		var row db.LockOAuthRefreshCredentialByHashRow
-		for _, key := range s.credentialHMACKeys() {
-			mac := hmac.New(sha256.New, key)
-			_, _ = mac.Write([]byte(raw))
-			candidate, err := q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: mac.Sum(nil)})
-			if err == nil {
-				row = candidate
-				found = true
-				break
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-		}
-		if !found {
+		row, err := s.lockOAuthRefreshCredentialTx(ctx, q, raw)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
+		if err != nil {
+			return err
+		}
+		found = true
 		if row.FamilyID.Valid {
 			if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: row.FamilyID}); err != nil {
 				return err
@@ -663,6 +658,27 @@ func (s *Service) RevokeOAuthRefreshToken(ctx context.Context, raw string) (bool
 		return s.revokeOAuthTx(ctx, q, row.MemberID)
 	})
 	return found, err
+}
+
+func (s *Service) lockOAuthRefreshCredentialTx(ctx context.Context, q *db.Queries, raw string) (db.LockOAuthRefreshCredentialByHashRow, error) {
+	for _, key := range s.credentialHMACKeys() {
+		mac := hmac.New(sha256.New, key)
+		_, _ = mac.Write([]byte(raw))
+		hash := mac.Sum(nil)
+		memberID, err := q.FindOAuthRefreshCredentialMember(ctx, db.FindOAuthRefreshCredentialMemberParams{SecretHash: hash})
+		if errors.Is(err, pgx.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return db.LockOAuthRefreshCredentialByHashRow{}, err
+		}
+		// Match creation and subtree revocation: members precede credentials.
+		if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+			return db.LockOAuthRefreshCredentialByHashRow{}, err
+		}
+		return q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: hash})
+	}
+	return db.LockOAuthRefreshCredentialByHashRow{}, pgx.ErrNoRows
 }
 
 // RevokeOAuth stops an OAuth Agent and every delegated descendant in one
@@ -675,6 +691,9 @@ func (s *Service) RevokeOAuth(ctx context.Context, memberID string) error {
 }
 
 func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID string) error {
+	if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+		return err
+	}
 	row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -685,50 +704,22 @@ func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID str
 	if !row.Source.Valid || row.Source.String != "oauth" {
 		return nil
 	}
-	if err := q.StopAgentMember(ctx, db.StopAgentMemberParams{MemberID: memberID}); err != nil {
+	if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, "suspended"); err != nil {
 		return err
-	}
-	if err := q.RevokeAgentCredentials(ctx, db.RevokeAgentCredentialsParams{MemberID: memberID}); err != nil {
-		return err
-	}
-	if group, groupErr := q.GetAgentsGroupByOwner(ctx, db.GetAgentsGroupByOwnerParams{OwnerMemberID: pgtype.Text{String: memberID, Valid: true}}); groupErr == nil {
-		if err := q.StopAgentSubtree(ctx, db.StopAgentSubtreeParams{GroupID: group.ID}); err != nil {
-			return err
-		}
-		if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: group.ID}); err != nil {
-			return err
-		}
-	} else if !errors.Is(groupErr, pgx.ErrNoRows) {
-		return groupErr
 	}
 	return audit.Write(ctx, q, "member", memberID, "agent.oauth.revoke", memberID, "success")
 }
 
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {
-	return s.mutate(ctx, ownerMemberID, memberID, "stop", func(q *db.Queries, groupID string) error {
-		return q.StopAgentSubtree(ctx, db.StopAgentSubtreeParams{GroupID: groupID})
-	})
+	return s.mutate(ctx, ownerMemberID, memberID, "stop", "suspended")
 }
 
 func (s *Service) Delete(ctx context.Context, ownerMemberID, memberID string) error {
-	return s.mutate(ctx, ownerMemberID, memberID, "delete", func(q *db.Queries, groupID string) error {
-		if err := q.DeleteAgentSubtree(ctx, db.DeleteAgentSubtreeParams{GroupID: groupID}); err != nil {
-			return err
-		}
-		if err := q.RevokeAgentGrantsInGroupSubtree(ctx, db.RevokeAgentGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
-			return err
-		}
-		if err := q.RevokeGroupGrantsInGroupSubtree(ctx, db.RevokeGroupGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
-			return err
-		}
-		return q.RemoveAgentGroupSubtree(ctx, db.RemoveAgentGroupSubtreeParams{GroupID: groupID})
-	})
+	return s.mutate(ctx, ownerMemberID, memberID, "delete", "removed")
 }
 
-// ExpireAgents turns every expired active Agent into a tombstone. Each root is
-// handled in one transaction with its descendant members, groups, credentials,
-// and audit event so an interrupted cleanup cannot leave a partially live
-// delegation subtree.
+// ExpireAgents tombstones expired Agents and their descendants together with
+// groups, credentials, and audit events in one transaction.
 func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 	count := 0
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -736,37 +727,31 @@ func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 		if err != nil {
 			return err
 		}
+		rootIDs := make([]string, len(roots))
+		for i, root := range roots {
+			rootIDs[i] = root.ID
+		}
+		if err := member.LockChainsTx(ctx, q, rootIDs...); err != nil {
+			return err
+		}
 		for _, root := range roots {
-			member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: root.ID})
+			ag, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: root.ID})
 			if errors.Is(err, pgx.ErrNoRows) {
 				continue
 			}
 			if err != nil {
 				return err
 			}
-			if member.Status != "active" || !member.ExpiresAt.Valid || member.ExpiresAt.Time.After(time.Now().UTC()) {
+			if ag.Status != "active" || !ag.ExpiresAt.Valid || ag.ExpiresAt.Time.After(time.Now().UTC()) {
 				continue
 			}
-			if !member.HomeGroupID.Valid {
+			if !ag.HomeGroupID.Valid {
 				return apierr.New("OWNER_INACTIVE", "expired Agent has no home group")
 			}
-			groupID := member.HomeGroupID.String
-			if err := q.DeleteAgentSubtree(ctx, db.DeleteAgentSubtreeParams{GroupID: groupID}); err != nil {
+			if err := member.SetAgentSubtreeStatusTx(ctx, q, ag.ID, "removed"); err != nil {
 				return err
 			}
-			if err := q.RevokeAgentGrantsInGroupSubtree(ctx, db.RevokeAgentGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
-				return err
-			}
-			if err := q.RevokeGroupGrantsInGroupSubtree(ctx, db.RevokeGroupGrantsInGroupSubtreeParams{GroupID: groupID}); err != nil {
-				return err
-			}
-			if err := q.RemoveAgentGroupSubtree(ctx, db.RemoveAgentGroupSubtreeParams{GroupID: groupID}); err != nil {
-				return err
-			}
-			if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: groupID}); err != nil {
-				return err
-			}
-			if err := audit.Write(ctx, q, "system", "", "agent.expire", member.ID, "success"); err != nil {
+			if err := audit.Write(ctx, q, "system", "", "agent.expire", ag.ID, "success"); err != nil {
 				return err
 			}
 			count++
@@ -776,8 +761,11 @@ func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 	return count, err
 }
 
-func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action string, fn func(*db.Queries, string) error) error {
+func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, status string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := member.LockChainsTx(ctx, q, ownerMemberID, memberID); err != nil {
+			return err
+		}
 		row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -793,10 +781,7 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action st
 		if !row.HomeGroupID.Valid {
 			return apierr.New("CONFLICT", "agent home group is missing")
 		}
-		if err := fn(q, row.HomeGroupID.String); err != nil {
-			return err
-		}
-		if err := q.RevokeAgentCredentialsInGroupSubtree(ctx, db.RevokeAgentCredentialsInGroupSubtreeParams{GroupID: row.HomeGroupID.String}); err != nil {
+		if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, status); err != nil {
 			return err
 		}
 		return audit.Write(ctx, q, "member", ownerMemberID, "agent."+action, memberID, "success")

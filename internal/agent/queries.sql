@@ -154,6 +154,10 @@ JOIN members m ON m.id = c.member_id
 WHERE c.secret_hash = sqlc.arg(secret_hash) AND c.kind = 'oauth_refresh'
 FOR UPDATE;
 
+-- name: FindOAuthRefreshCredentialMember :one
+SELECT member_id FROM agent_credentials
+WHERE secret_hash = sqlc.arg(secret_hash) AND kind = 'oauth_refresh';
+
 -- name: MarkAgentCredentialUsed :execresult
 UPDATE agent_credentials
 SET last_used_at = now()
@@ -248,8 +252,7 @@ WHERE m.type = 'agent'
   AND m.status = 'active'
   AND m.expires_at IS NOT NULL
   AND m.expires_at <= now()
-ORDER BY m.expires_at, m.id
-FOR UPDATE OF m;
+ORDER BY m.id;
 
 -- name: CanManageAgent :one
 WITH RECURSIVE agent_groups AS (

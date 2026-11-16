@@ -19,6 +19,7 @@ import (
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
@@ -1000,14 +1001,24 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.members:manage", spaceID, memberID); err != nil {
 			return err
 		}
-		if _, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID}); err != nil {
+		target, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return apierr.New("NOT_FOUND", "member was not found in this Space")
 			}
 			return err
 		}
-		if err := q.SetMemberStatus(ctx, db.SetMemberStatusParams{ID: memberID, SpaceID: spaceID, Status: status}); err != nil {
-			return err
+		if target.Type == "agent" && status != "active" {
+			if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, status); err != nil {
+				return err
+			}
+		} else {
+			if target.Type == "agent" && target.Status == "removed" {
+				return apierr.New("CONFLICT", "a tombstoned Agent cannot be resumed")
+			}
+			if err := q.SetMemberStatus(ctx, db.SetMemberStatusParams{ID: memberID, SpaceID: spaceID, Status: status}); err != nil {
+				return err
+			}
 		}
 		bindings, err := q.ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: memberID})
 		if err != nil {
@@ -1792,48 +1803,7 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 // every persisted Agent owner in their chains, in a deterministic order.
 // Authorization facts and the mutation then observe one stable member state.
 func lockAuthorizationMembersTx(ctx context.Context, q *db.Queries, memberIDs ...string) error {
-	ids := make(map[string]struct{}, len(memberIDs))
-	pending := make([]string, 0, len(memberIDs))
-	for _, id := range memberIDs {
-		if strings.TrimSpace(id) == "" {
-			continue
-		}
-		if _, ok := ids[id]; !ok {
-			ids[id] = struct{}{}
-			pending = append(pending, id)
-		}
-	}
-	for len(pending) > 0 {
-		id := pending[0]
-		pending = pending[1:]
-		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: id})
-		if errors.Is(err, pgx.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
-			continue
-		}
-		ownerID := agent.OwnerMemberID.String
-		if _, ok := ids[ownerID]; ok {
-			continue
-		}
-		ids[ownerID] = struct{}{}
-		pending = append(pending, ownerID)
-	}
-	ordered := make([]string, 0, len(ids))
-	for id := range ids {
-		ordered = append(ordered, id)
-	}
-	sort.Strings(ordered)
-	for _, id := range ordered {
-		if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: id}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-	}
-	return nil
+	return member.LockChainsTx(ctx, q, memberIDs...)
 }
 
 // lockAuthorizationNodesTx establishes the lock order used by every

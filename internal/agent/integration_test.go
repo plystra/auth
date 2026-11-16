@@ -409,16 +409,15 @@ func TestAgentStopAndDeleteRevokeCredentialsAcrossSubtreeAndKeepTombstones(t *te
 	if _, err := agents.AuthenticateKey(ctx, childKey); err == nil {
 		t.Fatal("deleting an agent left a child credential usable")
 	}
-	var removedGroups int
-	if err := st.Pool.QueryRow(ctx, `
-		SELECT count(*) FROM groups g
-		JOIN members m ON m.home_group_id = g.id
-		WHERE m.id IN ($1, $2) AND g.status = 'removed'
-	`, deleteParent.ID, deleteChild.ID).Scan(&removedGroups); err != nil {
+	var parentGroupStatus, descendantGroupStatus string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM groups WHERE id = $1`, deleteParent.HomeGroupID).Scan(&parentGroupStatus); err != nil {
 		t.Fatal(err)
 	}
-	if removedGroups != 2 {
-		t.Fatalf("removed agent groups = %d, want 2", removedGroups)
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM groups WHERE id = $1`, deleteChild.HomeGroupID).Scan(&descendantGroupStatus); err != nil {
+		t.Fatal(err)
+	}
+	if parentGroupStatus != "active" || descendantGroupStatus != "removed" {
+		t.Fatalf("containing group=%s, owned descendant group=%s", parentGroupStatus, descendantGroupStatus)
 	}
 }
 
@@ -511,12 +510,23 @@ func TestExpiredAgentCleanupRollsBackWhenAuditFails(t *testing.T) {
 
 func TestAgentStatusMutationRollsBackWhenAuditFails(t *testing.T) {
 	ctx := context.Background()
-	st, _, owner, _ := newAgentFixture(t)
+	st, _, owner, spaceID := newAgentFixture(t)
 	agents := &Service{Store: st}
 	ag, key, err := agents.Create(ctx, CreateInput{OwnerMemberID: owner.ID, Name: "audit-rollback-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
+	child, childKey, err := agents.Create(ctx, CreateInput{OwnerMemberID: ag.ID, Name: "audit-rollback-child", ExpiresAt: ag.ExpiresAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants
+		(id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_rollback_agent', $1, '["self:read"]'::jsonb, $2, 'space', $1, $3)`, spaceID, child.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	parentVersion, childVersion := readAgentVersion(t, st, ag.ID), readAgentVersion(t, st, child.ID)
+	spaceVersion := readSpacePolicyVersion(t, st, spaceID)
 	if _, err := st.Pool.Exec(ctx, `
 		CREATE FUNCTION reject_agent_audit_insert() RETURNS trigger LANGUAGE plpgsql AS $$
 		BEGIN RAISE EXCEPTION 'agent audit insert rejected by test'; END;
@@ -526,12 +536,31 @@ func TestAgentStatusMutationRollsBackWhenAuditFails(t *testing.T) {
 	`); err != nil {
 		t.Fatal(err)
 	}
-	if err := agents.Stop(ctx, owner.ID, ag.ID); err == nil {
-		t.Fatal("agent stop succeeded despite audit failure")
-	}
-	assertMemberStatus(t, st, ag.ID, "active")
-	if _, err := agents.AuthenticateKey(ctx, key); err != nil {
-		t.Fatalf("agent credential became unusable after audit failure: %v", err)
+	for _, mutate := range []func(context.Context, string, string) error{agents.Stop, agents.Delete} {
+		if err := mutate(ctx, owner.ID, ag.ID); err == nil {
+			t.Fatal("Agent mutation succeeded despite audit failure")
+		}
+		assertMemberStatus(t, st, ag.ID, "active")
+		assertMemberStatus(t, st, child.ID, "active")
+		for _, credential := range []string{key, childKey} {
+			if _, err := agents.AuthenticateKey(ctx, credential); err != nil {
+				t.Fatalf("Agent credential became unusable after audit failure: %v", err)
+			}
+		}
+		if readAgentVersion(t, st, ag.ID) != parentVersion || readAgentVersion(t, st, child.ID) != childVersion || readSpacePolicyVersion(t, st, spaceID) != spaceVersion {
+			t.Fatal("failed Agent mutation changed policy versions")
+		}
+		var groupStatus string
+		var revoked bool
+		if err := st.Pool.QueryRow(ctx, `SELECT status FROM groups WHERE id = $1`, child.HomeGroupID).Scan(&groupStatus); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.Pool.QueryRow(ctx, `SELECT revoked_at IS NOT NULL FROM authorization_grants WHERE id = 'grt_rollback_agent'`).Scan(&revoked); err != nil {
+			t.Fatal(err)
+		}
+		if groupStatus != "active" || revoked {
+			t.Fatal("failed Agent mutation left a removed group or revoked grant")
+		}
 	}
 }
 

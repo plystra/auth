@@ -336,6 +336,22 @@ func (q *Queries) DeleteAgentSubtree(ctx context.Context, arg DeleteAgentSubtree
 	return err
 }
 
+const findOAuthRefreshCredentialMember = `-- name: FindOAuthRefreshCredentialMember :one
+SELECT member_id FROM agent_credentials
+WHERE secret_hash = $1 AND kind = 'oauth_refresh'
+`
+
+type FindOAuthRefreshCredentialMemberParams struct {
+	SecretHash []byte `json:"secret_hash"`
+}
+
+func (q *Queries) FindOAuthRefreshCredentialMember(ctx context.Context, arg FindOAuthRefreshCredentialMemberParams) (string, error) {
+	row := q.db.QueryRow(ctx, findOAuthRefreshCredentialMember, arg.SecretHash)
+	var member_id string
+	err := row.Scan(&member_id)
+	return member_id, err
+}
+
 const getAgentCredentialByPrefix = `-- name: GetAgentCredentialByPrefix :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
@@ -741,8 +757,7 @@ WHERE m.type = 'agent'
   AND m.status = 'active'
   AND m.expires_at IS NOT NULL
   AND m.expires_at <= now()
-ORDER BY m.expires_at, m.id
-FOR UPDATE OF m
+ORDER BY m.id
 `
 
 type ListExpiredAgentRootsRow struct {

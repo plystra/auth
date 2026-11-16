@@ -449,6 +449,10 @@ func TestDeletedAgentIsGrantlessButRemainsResolvableForOwnerSelfScope(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: created.ID, Name: "tombstone-child", ExpiresAt: created.ExpiresAt})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO permissions (id, key, description)
 		VALUES ('prm_tombstone_self_scope', 'resource:tombstone-self', 'Tombstone self scope test permission')
@@ -467,10 +471,7 @@ func TestDeletedAgentIsGrantlessButRemainsResolvableForOwnerSelfScope(t *testing
 	`, spaceID, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	var agentGroupID string
-	if err := st.Pool.QueryRow(ctx, `SELECT home_group_id FROM members WHERE id = $1`, created.ID).Scan(&agentGroupID); err != nil {
-		t.Fatal(err)
-	}
+	agentGroupID := child.HomeGroupID
 	if _, err := st.Pool.Exec(ctx, `
 		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_group_id, scope, anchor_space_id, granted_by)
 		VALUES ('grt_tombstone_group', $1, '["resource:tombstone-self"]'::jsonb, $2, 'space', $1, $3)
