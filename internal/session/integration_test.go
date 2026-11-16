@@ -398,6 +398,97 @@ func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
 	assertInvalidAgentAccess(space.ID, "expired")
 }
 
+func TestAgentAccessTokenExpiryIsBoundedByDelegation(t *testing.T) {
+	ctx := context.Background()
+	database, err := sessionDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO users (id, email, email_normalized, password_hash, status)
+		VALUES ('usr_agent_expiry', 'agent-expiry@example.test', 'agent-expiry@example.test', 'test-password-hash', 'active')`); err != nil {
+		t.Fatal(err)
+	}
+	authz := &authorization.Service{Store: st}
+	space, owner, err := authz.CreateSpace(ctx, "usr_agent_expiry", "Agent Expiry Space", "agent-expiry-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agents := &agent.Service{Store: st}
+	now := time.Now().UTC().Truncate(time.Second)
+	parent, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "expiry-parent", ExpiresAt: now.Add(2 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: parent.ID, Name: "expiry-child", ExpiresAt: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := security.GenerateSigner("https://auth.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := &Service{Store: st, Signer: signer, Settings: func(context.Context) (Settings, error) {
+		return Settings{AccessTTL: 5 * time.Minute}, nil
+	}}
+	assertExpiry := func(tokens Tokens, err error, want time.Time) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		claims, err := signer.Verify(tokens.AccessToken, time.Now().UTC(), "app_expiry")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if claims.ExpiresAt != want.Unix() || tokens.ExpiresIn > int64(time.Until(want)/time.Second)+1 {
+			t.Fatalf("access expiry = %d, expires_in = %d; want bound %d", claims.ExpiresAt, tokens.ExpiresIn, want.Unix())
+		}
+	}
+	tokens, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, "app_expiry")
+	assertExpiry(tokens, err, child.ExpiresAt)
+	delegationExpiry := now.Add(40 * time.Second)
+	tokens, err = sessions.CreateAgentDelegatedAccess(ctx, child.ID, space.ID, "app_expiry", parent.ID, []string{"invoice:read"}, delegationExpiry.Unix())
+	assertExpiry(tokens, err, delegationExpiry)
+	assertOwnerInactive := func(reason string) {
+		t.Helper()
+		_, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, "app_expiry")
+		var public *apierr.Error
+		if !errors.As(err, &public) || public.Code != "OWNER_INACTIVE" {
+			t.Fatalf("%s: child access error = %v, want OWNER_INACTIVE", reason, err)
+		}
+	}
+	for _, inactive := range []struct {
+		name, query, id string
+	}{
+		{"suspended Agent owner", `UPDATE members SET status = $1 WHERE id = $2`, parent.ID},
+		{"suspended owner group", `UPDATE groups SET status = $1 WHERE id = $2`, parent.HomeGroupID},
+		{"suspended human owner", `UPDATE members SET status = $1 WHERE id = $2`, owner.ID},
+	} {
+		if _, err := st.Pool.Exec(ctx, inactive.query, "suspended", inactive.id); err != nil {
+			t.Fatal(err)
+		}
+		assertOwnerInactive(inactive.name)
+		if _, err := st.Pool.Exec(ctx, inactive.query, "active", inactive.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownerExpiry := now.Add(20 * time.Second)
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET expires_at = $1 WHERE id = $2`, ownerExpiry, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err = sessions.CreateAgentAccess(ctx, child.ID, space.ID, "app_expiry")
+	assertExpiry(tokens, err, ownerExpiry)
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET expires_at = now() - interval '1 second' WHERE id = $1`, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertOwnerInactive("expired Agent owner")
+}
+
 func hmacSHA256(key []byte, value string) []byte {
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write([]byte(value))
