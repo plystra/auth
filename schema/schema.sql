@@ -1574,6 +1574,8 @@ CREATE UNIQUE INDEX members_oauth_owner_client_unique
 -- Authorization identities are immutable event snapshots, not foreign keys:
 -- deleting credentials or tombstoning members must not erase audit evidence.
 -- Historical rows keep empty context; do not infer past identities from today.
+-- Resource locations are request facts and can be malformed in denied requests;
+-- only verified identity columns enforce typed ID prefixes.
 ALTER TABLE audit_logs
     ADD COLUMN plane text NOT NULL DEFAULT '',
     ADD COLUMN credential_type text NOT NULL DEFAULT '',
