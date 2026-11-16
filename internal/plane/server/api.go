@@ -198,6 +198,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("authz.explain", "POST", "/server/v1/authz/explain", route.Server, "auth.authz:explain", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.explain)
 	route.Register(api, route.NewSpec("tokens.introspect", "POST", "/server/v1/tokens/introspect", route.Server, "auth.tokens:introspect", []route.Subject{route.HumanAgent}), a.introspect)
 	route.Register(api, route.NewSpec("approvals.create", "POST", "/server/v1/approvals", route.Server, "auth.authz:check", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createApproval)
+	route.Register(api, route.NewSpec("audit.write", "POST", "/server/v1/audit/events", route.Server, "auth.audit:write", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.writeBusinessAudit)
 }
 
 func (a *API) createApproval(ctx context.Context, in *ApprovalCreateInput) (*ApprovalCreateOutput, error) {

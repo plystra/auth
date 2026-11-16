@@ -360,7 +360,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err := json.Unmarshal(createdFactor.Body.Bytes(), &factorResult); err != nil || factorResult.Data.Secret == "" {
 		t.Fatal("publisher factor enrollment omitted its one-time secret")
 	}
-	manifest := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "invoice:read", "invoice:approve"}
+	manifest := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "auth.audit:write", "invoice:read", "invoice:approve"}
 	appRequest := map[string]any{
 		"space_id": publisher.spaceID, "name": "Invoice SaaS", "visibility": "public",
 		"redirect_uris":        []string{"https://saas.example.test/callback"},
@@ -485,7 +485,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	}
 	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	restrictTo := []application.KeyRestriction{{SpaceID: customer.spaceID}}
-	keyScopes := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect"}
+	keyScopes := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "auth.audit:write"}
 	keyRequest := map[string]any{
 		"application_id": appResult.Data.ID, "name": "saas-server", "grants": keyScopes,
 		"restrict_to": restrictTo, "expires_at": expiresAt, "allow_subject_assertion": true,
@@ -521,11 +521,11 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatal("application key creation omitted its one-time secret")
 	}
 	overreach := map[string]any{
-		"name": "overreach", "grants": []string{"auth.audit:write"}, "expires_at": expiresAt,
+		"name": "overreach", "grants": []string{"auth.audit:read"}, "expires_at": expiresAt,
 	}
 	overreachStep, err := json.Marshal(map[string]any{
 		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.keys.create", "request": map[string]any{
-			"application_id": appResult.Data.ID, "name": "overreach", "grants": []string{"auth.audit:write"}, "expires_at": expiresAt,
+			"application_id": appResult.Data.ID, "name": "overreach", "grants": []string{"auth.audit:read"}, "expires_at": expiresAt,
 		},
 	})
 	if err != nil {
@@ -759,6 +759,44 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil || oauthAgent.ID != claims.Subject {
 		t.Fatalf("customer OAuth Agent identity = %+v err=%v", oauthAgent, err)
 	}
+	t.Run("BusinessAudit", func(t *testing.T) {
+		body, err := json.Marshal(map[string]any{
+			"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice.approve", "outcome": "deny",
+			"resource":       map[string]string{"type": "invoice", "id": "inv_business_report", "space_id": customer.spaceID},
+			"request_digest": strings.Repeat("ab", 32),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		post := func() *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodPost, "/server/v1/audit/events", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+keyResult.Data.Secret)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Idempotency-Key", "mvp-business-audit")
+			response := httptest.NewRecorder()
+			serverHandler.ServeHTTP(response, req)
+			return response
+		}
+		written := mvpData[audit.BusinessReceipt](t, post())
+		if replayed := mvpData[audit.BusinessReceipt](t, post()); replayed.ID != written.ID {
+			t.Fatal("public SaaS audit retry created another event")
+		}
+		query := "/v1/spaces/" + customer.spaceID + "/audit-logs?" + url.Values{
+			"member_id": {customer.memberID}, "action": {"invoice.approve"},
+		}.Encode()
+		response := mvpJSON(t, principalHandler, http.MethodGet, query, customer.token, nil)
+		events := mvpData[[]audit.Event](t, response)
+		if len(events) != 1 || events[0].ID != written.ID || events[0].MemberID != oauthAgent.ID ||
+			events[0].ApplicationID != appResult.Data.ID || len(events[0].OwnerChain) != 1 || events[0].OwnerChain[0].MemberID != customer.memberID ||
+			events[0].ResourceID != "inv_business_report" || !strings.Contains(string(events[0].Metadata), "application_reported") || events[0].DecisionID != "" {
+			t.Fatal("public SaaS business audit lost its provenance, resource or owner chain")
+		}
+		for _, credential := range []string{keyResult.Data.Secret, oauthToken.AccessToken, oauthToken.RefreshToken} {
+			if strings.Contains(response.Body.String(), credential) {
+				t.Fatal("public business audit leaked a credential")
+			}
+		}
+	})
 	t.Run("OAuthCredentialAuditContext", func(t *testing.T) {
 		customerClaims, active, err := sessions.Introspect(ctx, customer.token, security.DefaultApplicationAudience)
 		if err != nil || !active || customerClaims.Type != "user" {

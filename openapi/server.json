@@ -81,6 +81,105 @@
         ],
         "type": "object"
       },
+      "BusinessAuditInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.:-]{0,127}$",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "success",
+              "failure",
+              "deny"
+            ],
+            "type": "string"
+          },
+          "request_digest": {
+            "pattern": "^[a-fA-F0-9]{64}$",
+            "type": "string"
+          },
+          "resource": {
+            "$ref": "#/components/schemas/BusinessAuditResource"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/CheckSubject"
+          }
+        },
+        "required": [
+          "subject",
+          "action",
+          "resource",
+          "outcome"
+        ],
+        "type": "object"
+      },
+      "BusinessAuditOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/BusinessReceipt"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "BusinessAuditResource": {
+        "additionalProperties": false,
+        "properties": {
+          "group_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:/@-]{0,255}$",
+            "type": "string"
+          },
+          "owner_member_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "space_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
+          "type": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.:-]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "id"
+        ],
+        "type": "object"
+      },
+      "BusinessReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_at"
+        ],
+        "type": "object"
+      },
       "CheckBody": {
         "additionalProperties": false,
         "properties": {
@@ -662,6 +761,53 @@
           }
         },
         "summary": "approvals.create"
+      }
+    },
+    "/server/v1/audit/events": {
+      "post": {
+        "operationId": "audit.write",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BusinessAuditInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BusinessAuditOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "audit.write"
       }
     },
     "/server/v1/authz/batch-check": {

@@ -24,6 +24,9 @@ func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 		"PRINCIPAL_KIND_NOT_ALLOWED":  http.StatusForbidden,
 		"PERMISSION_DISABLED":         http.StatusForbidden,
 		"SCOPE_OUT_OF_BOUNDS":         http.StatusForbidden,
+		"KEY_SCOPE_EXCLUDED":          http.StatusForbidden,
+		"APPLICATION_NOT_INSTALLED":   http.StatusForbidden,
+		"RESOURCE_GROUP_NOT_FOUND":    http.StatusForbidden,
 		"AUTHORITY_DELTA_NOT_COVERED": http.StatusForbidden,
 		"SUBJECT_NOT_FOUND":           http.StatusNotFound,
 	}

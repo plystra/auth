@@ -272,11 +272,25 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	if s == nil || s.Store == nil || len(s.HMACKeys) == 0 {
 		return Key{}, apierr.New("UNAVAILABLE", "application API key authentication is unavailable")
 	}
+	var key Key
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		key, err = s.AuthenticateKeyTx(ctx, q, raw)
+		return err
+	})
+	return key, err
+}
+
+// AuthenticateKeyTx lets a credential check participate in the caller's write transaction.
+func (s *Service) AuthenticateKeyTx(ctx context.Context, q *db.Queries, raw string) (Key, error) {
+	if s == nil || len(s.HMACKeys) == 0 {
+		return Key{}, apierr.New("UNAVAILABLE", "application API key authentication is unavailable")
+	}
 	parts := strings.SplitN(raw, ".", 2)
 	if len(parts) != 2 || !strings.HasPrefix(parts[0], "ply_sk_") {
 		return Key{}, apierr.New("unauthorized", "application API key is required")
 	}
-	row, e := s.Store.Queries().GetAPIKeyByPrefix(ctx, db.GetAPIKeyByPrefixParams{Prefix: parts[0]})
+	row, e := q.GetAPIKeyByPrefix(ctx, db.GetAPIKeyByPrefixParams{Prefix: parts[0]})
 	if e != nil {
 		if errors.Is(e, pgx.ErrNoRows) {
 			return Key{}, apierr.New("unauthorized", "application API key is invalid")
@@ -293,7 +307,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 	}
 	if !valid && row.HashScheme == "hmac_sha256" {
 		for _, key := range s.HMACKeys {
-			valid, e = s.Store.Queries().ValidGraceAPIKeySecret(ctx, db.ValidGraceAPIKeySecretParams{
+			valid, e = q.ValidGraceAPIKeySecret(ctx, db.ValidGraceAPIKeySecretParams{
 				KeyID: row.ID, SecretHash: apiKeyHash(key, parts[1]),
 			})
 			if e != nil {
@@ -334,9 +348,7 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Key, error) 
 			return Key{}, apierr.New("unauthorized", "application API key is invalid")
 		}
 	}
-	if e = s.Store.InTx(ctx, func(q *db.Queries) error {
-		return q.TouchAPIKey(ctx, db.TouchAPIKeyParams{ID: row.ID})
-	}); e != nil {
+	if e = q.TouchAPIKey(ctx, db.TouchAPIKeyParams{ID: row.ID}); e != nil {
 		return Key{}, e
 	}
 	var scopes []string
@@ -364,7 +376,13 @@ func (s *Service) ResolveKeyInstallation(ctx context.Context, key Key, targetSpa
 	if s == nil || s.Store == nil {
 		return "", "", apierr.New("UNAVAILABLE", "application installations are unavailable")
 	}
-	ancestors, err := s.Store.Queries().ListActiveSpaceAncestorsForKey(ctx, db.ListActiveSpaceAncestorsForKeyParams{TargetSpaceID: targetSpaceID})
+	return s.ResolveKeyInstallationTx(ctx, s.Store.Queries(), key, targetSpaceID)
+}
+
+// ResolveKeyInstallationTx applies the same installation boundary using the
+// transaction supplied by a state-changing operation.
+func (s *Service) ResolveKeyInstallationTx(ctx context.Context, q *db.Queries, key Key, targetSpaceID string) (string, string, error) {
+	ancestors, err := q.ListActiveSpaceAncestorsForKey(ctx, db.ListActiveSpaceAncestorsForKeyParams{TargetSpaceID: targetSpaceID})
 	if err != nil {
 		return "", "", err
 	}
@@ -383,7 +401,7 @@ func (s *Service) ResolveKeyInstallation(ctx context.Context, key Key, targetSpa
 			return "", "KEY_SCOPE_EXCLUDED", nil
 		}
 	}
-	installation, err := s.Store.Queries().GetActiveApplicationInstallationForSpace(ctx, db.GetActiveApplicationInstallationForSpaceParams{
+	installation, err := q.GetActiveApplicationInstallationForSpace(ctx, db.GetActiveApplicationInstallationForSpaceParams{
 		ApplicationID: key.ApplicationID, TargetSpaceID: targetSpaceID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

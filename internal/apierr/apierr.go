@@ -47,6 +47,7 @@ func Status(code string) int {
 		"binding_revoked", "permission_disabled", "space_inactive", "resource_group_inactive",
 		"envelope_excluded", "no_matching_permission", "principal_kind_not_allowed",
 		"scope_out_of_bounds", "token_scope_excluded", "authority_delta_not_covered",
+		"key_scope_excluded", "application_not_installed", "resource_group_not_found",
 		"assign_right_required", "grant_exceeds_owner":
 		return http.StatusForbidden
 	case "not_found", "subject_not_found":

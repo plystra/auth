@@ -109,6 +109,68 @@ func (q *Queries) AppendAuthorizationDecisionAudit(ctx context.Context, arg Appe
 	return err
 }
 
+const appendBusinessEventAudit = `-- name: AppendBusinessEventAudit :one
+INSERT INTO audit_logs (
+    id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata,
+    plane, credential_type, space_id, resource_group_id, member_id, member_type, user_id,
+    application_id, owner_chain, permission_key
+)
+VALUES (
+    $1, 'application', $2, $3, $4,
+    $5, $6, $7, $8,
+    'server', 'application_api_key', $9, $10,
+    $11, $12, $13, $14,
+    $15, 'auth.audit:write'
+)
+RETURNING id, occurred_at
+`
+
+type AppendBusinessEventAuditParams struct {
+	ID              string      `json:"id"`
+	KeyID           pgtype.Text `json:"key_id"`
+	Action          string      `json:"action"`
+	ResourceType    pgtype.Text `json:"resource_type"`
+	ResourceID      pgtype.Text `json:"resource_id"`
+	Outcome         string      `json:"outcome"`
+	RequestID       pgtype.Text `json:"request_id"`
+	Metadata        []byte      `json:"metadata"`
+	SpaceID         pgtype.Text `json:"space_id"`
+	ResourceGroupID pgtype.Text `json:"resource_group_id"`
+	MemberID        pgtype.Text `json:"member_id"`
+	MemberType      pgtype.Text `json:"member_type"`
+	UserID          pgtype.Text `json:"user_id"`
+	ApplicationID   pgtype.Text `json:"application_id"`
+	OwnerChain      []byte      `json:"owner_chain"`
+}
+
+type AppendBusinessEventAuditRow struct {
+	ID         string             `json:"id"`
+	OccurredAt pgtype.Timestamptz `json:"occurred_at"`
+}
+
+func (q *Queries) AppendBusinessEventAudit(ctx context.Context, arg AppendBusinessEventAuditParams) (AppendBusinessEventAuditRow, error) {
+	row := q.db.QueryRow(ctx, appendBusinessEventAudit,
+		arg.ID,
+		arg.KeyID,
+		arg.Action,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.Outcome,
+		arg.RequestID,
+		arg.Metadata,
+		arg.SpaceID,
+		arg.ResourceGroupID,
+		arg.MemberID,
+		arg.MemberType,
+		arg.UserID,
+		arg.ApplicationID,
+		arg.OwnerChain,
+	)
+	var i AppendBusinessEventAuditRow
+	err := row.Scan(&i.ID, &i.OccurredAt)
+	return i, err
+}
+
 const appendSecurityEventAudit = `-- name: AppendSecurityEventAudit :exec
 INSERT INTO audit_logs (
     id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata,
