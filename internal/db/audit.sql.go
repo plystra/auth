@@ -12,20 +12,22 @@ import (
 )
 
 const appendAudit = `-- name: AppendAudit :exec
-INSERT INTO audit_logs (id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb))
+INSERT INTO audit_logs (id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata, plane, credential_type)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, '{}'::jsonb), $10, $11)
 `
 
 type AppendAuditParams struct {
-	ID           string      `json:"id"`
-	ActorType    string      `json:"actor_type"`
-	ActorID      pgtype.Text `json:"actor_id"`
-	Action       string      `json:"action"`
-	ResourceType pgtype.Text `json:"resource_type"`
-	ResourceID   pgtype.Text `json:"resource_id"`
-	Outcome      string      `json:"outcome"`
-	RequestID    pgtype.Text `json:"request_id"`
-	Metadata     interface{} `json:"metadata"`
+	ID             string      `json:"id"`
+	ActorType      string      `json:"actor_type"`
+	ActorID        pgtype.Text `json:"actor_id"`
+	Action         string      `json:"action"`
+	ResourceType   pgtype.Text `json:"resource_type"`
+	ResourceID     pgtype.Text `json:"resource_id"`
+	Outcome        string      `json:"outcome"`
+	RequestID      pgtype.Text `json:"request_id"`
+	Metadata       interface{} `json:"metadata"`
+	Plane          string      `json:"plane"`
+	CredentialType string      `json:"credential_type"`
 }
 
 func (q *Queries) AppendAudit(ctx context.Context, arg AppendAuditParams) error {
@@ -39,8 +41,119 @@ func (q *Queries) AppendAudit(ctx context.Context, arg AppendAuditParams) error 
 		arg.Outcome,
 		arg.RequestID,
 		arg.Metadata,
+		arg.Plane,
+		arg.CredentialType,
 	)
 	return err
+}
+
+const appendAuthorizationDecisionAudit = `-- name: AppendAuthorizationDecisionAudit :exec
+INSERT INTO audit_logs (
+    id, actor_type, actor_id, action, resource_type, resource_id, outcome, request_id, metadata,
+    plane, credential_type, space_id, resource_group_id, member_id, member_type, user_id,
+    application_id, owner_chain, decision_id, deny_code, permission_key, policy_version
+)
+VALUES (
+    $1, 'application', $2, $3, $4,
+    $5, 'deny', $6, $7,
+    $8, 'application', $9, $10,
+    $11, $12, $13, $14,
+    $15, $16, $17, $18, $19
+)
+`
+
+type AppendAuthorizationDecisionAuditParams struct {
+	ID              string      `json:"id"`
+	KeyID           pgtype.Text `json:"key_id"`
+	Action          string      `json:"action"`
+	ResourceType    pgtype.Text `json:"resource_type"`
+	ResourceID      pgtype.Text `json:"resource_id"`
+	RequestID       pgtype.Text `json:"request_id"`
+	Metadata        []byte      `json:"metadata"`
+	Plane           string      `json:"plane"`
+	SpaceID         pgtype.Text `json:"space_id"`
+	ResourceGroupID pgtype.Text `json:"resource_group_id"`
+	MemberID        pgtype.Text `json:"member_id"`
+	MemberType      pgtype.Text `json:"member_type"`
+	UserID          pgtype.Text `json:"user_id"`
+	ApplicationID   pgtype.Text `json:"application_id"`
+	OwnerChain      []byte      `json:"owner_chain"`
+	DecisionID      pgtype.Text `json:"decision_id"`
+	DenyCode        pgtype.Text `json:"deny_code"`
+	PermissionKey   pgtype.Text `json:"permission_key"`
+	PolicyVersion   pgtype.Int8 `json:"policy_version"`
+}
+
+func (q *Queries) AppendAuthorizationDecisionAudit(ctx context.Context, arg AppendAuthorizationDecisionAuditParams) error {
+	_, err := q.db.Exec(ctx, appendAuthorizationDecisionAudit,
+		arg.ID,
+		arg.KeyID,
+		arg.Action,
+		arg.ResourceType,
+		arg.ResourceID,
+		arg.RequestID,
+		arg.Metadata,
+		arg.Plane,
+		arg.SpaceID,
+		arg.ResourceGroupID,
+		arg.MemberID,
+		arg.MemberType,
+		arg.UserID,
+		arg.ApplicationID,
+		arg.OwnerChain,
+		arg.DecisionID,
+		arg.DenyCode,
+		arg.PermissionKey,
+		arg.PolicyVersion,
+	)
+	return err
+}
+
+const getAuditMemberChain = `-- name: GetAuditMemberChain :many
+WITH RECURSIVE chain AS (
+    SELECT m.id, m.space_id, m.type AS member_type, g.owner_member_id,
+           0 AS depth, ARRAY[m.id] AS visited
+    FROM members m LEFT JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+    WHERE m.id = $1
+    UNION ALL
+    SELECT m.id, m.space_id, m.type, g.owner_member_id,
+           c.depth + 1, c.visited || m.id
+    FROM chain c
+    JOIN members m ON m.id = c.owner_member_id AND m.space_id = c.space_id
+    LEFT JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+    WHERE c.member_type = 'agent' AND c.depth < 64 AND NOT m.id = ANY(c.visited)
+)
+SELECT id, space_id, member_type FROM chain ORDER BY depth
+`
+
+type GetAuditMemberChainParams struct {
+	MemberID string `json:"member_id"`
+}
+
+type GetAuditMemberChainRow struct {
+	ID         string `json:"id"`
+	SpaceID    string `json:"space_id"`
+	MemberType string `json:"member_type"`
+}
+
+func (q *Queries) GetAuditMemberChain(ctx context.Context, arg GetAuditMemberChainParams) ([]GetAuditMemberChainRow, error) {
+	rows, err := q.db.Query(ctx, getAuditMemberChain, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetAuditMemberChainRow{}
+	for rows.Next() {
+		var i GetAuditMemberChainRow
+		if err := rows.Scan(&i.ID, &i.SpaceID, &i.MemberType); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listAudit = `-- name: ListAudit :many
@@ -52,15 +165,28 @@ type ListAuditParams struct {
 	LimitCount  int32 `json:"limit_count"`
 }
 
-func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]AuditLog, error) {
+type ListAuditRow struct {
+	ID           string             `json:"id"`
+	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
+	ActorType    string             `json:"actor_type"`
+	ActorID      pgtype.Text        `json:"actor_id"`
+	Action       string             `json:"action"`
+	ResourceType pgtype.Text        `json:"resource_type"`
+	ResourceID   pgtype.Text        `json:"resource_id"`
+	Outcome      string             `json:"outcome"`
+	RequestID    pgtype.Text        `json:"request_id"`
+	Metadata     []byte             `json:"metadata"`
+}
+
+func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]ListAuditRow, error) {
 	rows, err := q.db.Query(ctx, listAudit, arg.OffsetCount, arg.LimitCount)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []AuditLog{}
+	items := []ListAuditRow{}
 	for rows.Next() {
-		var i AuditLog
+		var i ListAuditRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.OccurredAt,

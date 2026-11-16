@@ -3,20 +3,3 @@
 //   sqlc v1.31.1
 
 package db
-
-import (
-	"github.com/jackc/pgx/v5/pgtype"
-)
-
-type AuditLog struct {
-	ID           string             `json:"id"`
-	OccurredAt   pgtype.Timestamptz `json:"occurred_at"`
-	ActorType    string             `json:"actor_type"`
-	ActorID      pgtype.Text        `json:"actor_id"`
-	Action       string             `json:"action"`
-	ResourceType pgtype.Text        `json:"resource_type"`
-	ResourceID   pgtype.Text        `json:"resource_id"`
-	Outcome      string             `json:"outcome"`
-	RequestID    pgtype.Text        `json:"request_id"`
-	Metadata     []byte             `json:"metadata"`
-}

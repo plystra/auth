@@ -46,5 +46,6 @@ func writeWithMetadata(ctx context.Context, q *db.Queries, actorType, actorID, a
 		ActorID: pgtype.Text{String: actorID, Valid: actorID != ""},
 		Action:  action, ResourceID: pgtype.Text{String: target, Valid: target != ""},
 		Outcome: outcome, RequestID: pgtype.Text{String: info.ID, Valid: info.ID != ""}, Metadata: metadata,
+		Plane: info.Plane, CredentialType: actorType,
 	})
 }

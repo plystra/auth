@@ -178,6 +178,7 @@ type resolvedSubject struct {
 	ID      string
 	Type    string
 	SpaceID string
+	UserID  string
 	Scopes  []string
 }
 
@@ -264,9 +265,6 @@ func (a *API) explain(ctx context.Context, in *CheckInput) (*ExplainOutput, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := a.writeDenyAudit(ctx, key, in.Body, evaluation.decision, "authz.explain"); err != nil {
-		return nil, err
-	}
 	out := &ExplainOutput{}
 	out.Body.Data = ExplainDecision{
 		Decision:      string(evaluation.decision.Effect),
@@ -278,6 +276,9 @@ func (a *API) explain(ctx context.Context, in *CheckInput) (*ExplainOutput, erro
 	if evaluation.decision.Effect == engine.Deny {
 		out.Body.Data.DenyCode = evaluation.decision.Code
 	}
+	if err := a.writeDenyAudit(ctx, key, in.Body, evaluation, out.Body.Data.DecisionID, "authz.explain"); err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -286,7 +287,7 @@ func (a *API) checkWithKey(ctx context.Context, key application.Key, body CheckB
 	if err != nil {
 		return nil, err
 	}
-	return a.writeDecisionWithVersion(ctx, key, body, evaluation.memberID, evaluation.spaceID, evaluation.decision, evaluation.policyVersion)
+	return a.writeDecisionWithVersion(ctx, key, body, evaluation)
 }
 
 type authorizationEvaluation struct {
@@ -294,6 +295,7 @@ type authorizationEvaluation struct {
 	policyVersion int64
 	memberID      string
 	spaceID       string
+	userID        string
 }
 
 func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body CheckBody, requiredScope string, consumeApproval bool) (authorizationEvaluation, error) {
@@ -334,7 +336,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		if versionErr != nil {
 			return authorizationEvaluation{}, versionErr
 		}
-		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
+		return authorizationEvaluation{decision: engine.Decision{Effect: engine.Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID, userID: resolved.UserID}, nil
 	}
 	check := authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
@@ -350,7 +352,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	if err != nil {
 		return authorizationEvaluation{}, err
 	}
-	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID}, nil
+	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID, userID: resolved.UserID}, nil
 }
 
 func (a *API) keyOperationDecision(ctx context.Context, key application.Key, permission, spaceID string) (engine.Decision, int64, error) {
@@ -419,7 +421,7 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		if subject.MemberID != "" && subject.MemberID != member.ID {
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
 		}
-		return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID}, nil
+		return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID, UserID: claims.Subject}, nil
 	}
 	if subject.MemberID == "" {
 		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "subject.token is required")
@@ -440,31 +442,34 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
 		}
 	}
-	return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID}, nil
+	return resolvedSubject{ID: member.ID, Type: member.Kind, SpaceID: member.SpaceID, UserID: subject.UserID}, nil
 }
 
-func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key, body CheckBody, memberID, spaceID string, decision engine.Decision, policyVersion int64) (*CheckOutput, error) {
+func (a *API) writeDecisionWithVersion(ctx context.Context, key application.Key, body CheckBody, evaluation authorizationEvaluation) (*CheckOutput, error) {
 	out := &CheckOutput{}
-	out.Body.Data.Decision = string(decision.Effect)
+	out.Body.Data.Decision = string(evaluation.decision.Effect)
 	out.Body.Data.DecisionID = string(ids.New[ids.ID]("dec"))
-	out.Body.Data.PolicyVersion = strconv.FormatInt(policyVersion, 10)
-	if decision.Effect == engine.Deny {
-		out.Body.Data.DenyCode = decision.Code
+	out.Body.Data.PolicyVersion = strconv.FormatInt(evaluation.policyVersion, 10)
+	if evaluation.decision.Effect == engine.Deny {
+		out.Body.Data.DenyCode = evaluation.decision.Code
 	}
-	if err := a.writeDenyAudit(ctx, key, body, decision, "authz.check"); err != nil {
+	if err := a.writeDenyAudit(ctx, key, body, evaluation, out.Body.Data.DecisionID, "authz.check"); err != nil {
 		return nil, err
 	}
 	return out, nil
 }
 
-func (a *API) writeDenyAudit(ctx context.Context, key application.Key, body CheckBody, decision engine.Decision, action string) error {
-	if decision.Effect == engine.Deny && a.Applications != nil && a.Applications.Store != nil {
-		extra := map[string]string{}
-		if body.Subject.Token == "" {
-			extra["subject_source"] = "application_assertion"
-		}
+func (a *API) writeDenyAudit(ctx context.Context, key application.Key, body CheckBody, evaluation authorizationEvaluation, decisionID, action string) error {
+	if evaluation.decision.Effect == engine.Deny && a.Applications != nil && a.Applications.Store != nil {
 		return a.Applications.Store.InTx(ctx, func(q *db.Queries) error {
-			return audit.WriteWithMetadata(ctx, q, "application", key.ID, action, body.Resource.ID, "deny", extra)
+			return audit.WriteAuthorizationDecision(ctx, q, audit.AuthorizationDecision{
+				KeyID: key.ID, ApplicationID: key.ApplicationID, MemberID: evaluation.memberID,
+				UserID: evaluation.userID, SpaceID: evaluation.spaceID, GroupID: body.Resource.GroupID,
+				ResourceType: body.Resource.Type, ResourceID: body.Resource.ID,
+				Permission: strings.TrimSpace(body.Action), Action: action,
+				DecisionID: decisionID, DenyCode: evaluation.decision.Code, PolicyVersion: evaluation.policyVersion,
+				Asserted: body.Subject.Token == "",
+			})
 		})
 	}
 	return nil
