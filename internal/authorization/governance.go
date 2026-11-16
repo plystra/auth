@@ -58,11 +58,11 @@ func (s *Service) checkGovernanceTx(ctx context.Context, q *db.Queries, in Check
 		return decision, nil
 	}
 	if row.Status == "pending" && row.ExpiresAt.Time.After(time.Now().UTC()) {
-		decision.Code = "APPROVAL_PENDING"
+		decision = decision.WithApprovalStatus("APPROVAL_PENDING")
 		return decision, nil
 	}
 	if row.Status == "rejected" && row.ExpiresAt.Time.After(time.Now().UTC()) {
-		decision.Code = "APPROVAL_REJECTED"
+		decision = decision.WithApprovalStatus("APPROVAL_REJECTED")
 		return decision, nil
 	}
 	if row.Status != "approved" || !row.ApprovedExpiresAt.Valid || !row.ApprovedExpiresAt.Time.After(time.Now().UTC()) {

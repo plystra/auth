@@ -111,44 +111,48 @@ func (s *Service) initializeCache() {
 
 func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckRequest, depth int, useCache bool) (engine.Decision, int64, error) {
 	in.TokenScopes = tokenScopesFor(ctx, in.MemberID, in.TokenScopes)
+	var trace []engine.TraceStep
 	if strings.TrimSpace(in.MemberID) == "" || strings.TrimSpace(in.Permission) == "" {
-		return engine.Decision{Effect: engine.Deny, Code: "INVALID_SUBJECT"}, 0, nil
+		return engine.Reject("INVALID_SUBJECT", trace...), 0, nil
 	}
 	permission, permissionErr := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: in.Permission})
 	if errors.Is(permissionErr, pgx.ErrNoRows) {
-		return engine.Decision{Effect: engine.Deny, Code: "UNKNOWN_PERMISSION"}, 0, nil
+		return engine.Reject("UNKNOWN_PERMISSION", trace...), 0, nil
 	}
 	if permissionErr != nil {
 		return engine.Decision{}, 0, permissionErr
 	}
 	if permission.Status == "disabled" {
-		return engine.Decision{Effect: engine.Deny, Code: "PERMISSION_DISABLED"}, 0, nil
+		return engine.Reject("PERMISSION_DISABLED", trace...), 0, nil
 	}
+	trace = append(trace, engine.Passed("catalog", "permission is registered and not disabled"))
 	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: in.MemberID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
+		return engine.Reject("ACTOR_MEMBER_INACTIVE", trace...), 0, nil
 	}
 	if err != nil {
 		return engine.Decision{}, 0, err
 	}
 	if member.Status != "active" {
-		return engine.Decision{Effect: engine.Deny, Code: "ACTOR_MEMBER_INACTIVE"}, 0, nil
+		return engine.Reject("ACTOR_MEMBER_INACTIVE", trace...), 0, nil
 	}
+	trace = append(trace, engine.Passed("subject", "subject member is active"))
 	if member.Type == "agent" && depth >= s.maxDelegationDepth() {
-		return engine.Decision{Effect: engine.Deny, Code: "OWNER_INACTIVE"}, 0, nil
+		return engine.Reject("OWNER_INACTIVE", trace...), 0, nil
 	}
 	if _, err := spaceAncestorsQueries(ctx, q, member.SpaceID); err != nil {
 		if errors.Is(err, errSpaceInactive) {
-			return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, 0, nil
+			return engine.Reject("SPACE_INACTIVE", trace...), 0, nil
 		}
 		return engine.Decision{}, 0, err
 	}
+	trace = append(trace, engine.Passed("subject_space", "subject Space and ancestors are active"))
 	if in.ResourceSpace == "" {
 		in.ResourceSpace = member.SpaceID
 	}
 	space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: in.ResourceSpace})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, 0, nil
+		return engine.Reject("SPACE_INACTIVE", trace...), 0, nil
 	}
 	if err != nil {
 		return engine.Decision{}, 0, err
@@ -156,29 +160,31 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 	spaceAncestors, err := spaceAncestorsQueries(ctx, q, in.ResourceSpace)
 	if err != nil {
 		if errors.Is(err, errSpaceInactive) {
-			return engine.Decision{Effect: engine.Deny, Code: "SPACE_INACTIVE"}, space.PolicyVersion, nil
+			return engine.Reject("SPACE_INACTIVE", trace...), space.PolicyVersion, nil
 		}
 		return engine.Decision{}, 0, err
 	}
+	trace = append(trace, engine.Passed("resource_space", "resource Space and ancestors are active"))
 	var groupAncestors []string
 	if in.ResourceGroup != "" {
 		group, groupErr := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: in.ResourceGroup, SpaceID: in.ResourceSpace})
 		if errors.Is(groupErr, pgx.ErrNoRows) {
-			return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_NOT_FOUND"}, space.PolicyVersion, nil
+			return engine.Reject("RESOURCE_GROUP_NOT_FOUND", trace...), space.PolicyVersion, nil
 		}
 		if groupErr != nil {
 			return engine.Decision{}, 0, groupErr
 		}
 		if group.Status != "active" {
-			return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_INACTIVE"}, space.PolicyVersion, nil
+			return engine.Reject("RESOURCE_GROUP_INACTIVE", trace...), space.PolicyVersion, nil
 		}
 		groupAncestors, err = groupAncestorsQueries(ctx, q, in.ResourceGroup, in.ResourceSpace)
 		if err != nil {
 			if errors.Is(err, errGroupInactive) {
-				return engine.Decision{Effect: engine.Deny, Code: "RESOURCE_GROUP_INACTIVE"}, space.PolicyVersion, nil
+				return engine.Reject("RESOURCE_GROUP_INACTIVE", trace...), space.PolicyVersion, nil
 			}
 			return engine.Decision{}, 0, err
 		}
+		trace = append(trace, engine.Passed("resource_group", "resource group belongs to the resource Space and its ancestry is active"))
 	}
 	var cacheKey string
 	if useCache {
@@ -235,6 +241,7 @@ func (s *Service) checkQueries(ctx context.Context, q *db.Queries, in CheckReque
 		}
 	}
 	decision := engine.Check(request)
+	decision.Trace = append(trace, decision.Trace...)
 	if useCache {
 		s.cache.put(cacheKey, decision, space.PolicyVersion)
 	}

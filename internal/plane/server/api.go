@@ -323,6 +323,11 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		return authorizationEvaluation{}, err
 	}
 	if keyDecision.Effect != engine.Allow {
+		for i := range keyDecision.Trace {
+			if keyDecision.Trace[i].Step != "application" {
+				keyDecision.Trace[i].Step = "application." + keyDecision.Trace[i].Step
+			}
+		}
 		return authorizationEvaluation{decision: keyDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
 	}
 	if resolved.ID == "" {
@@ -337,6 +342,11 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 			return authorizationEvaluation{}, err
 		}
 		if subjectDecision.Effect != engine.Allow {
+			for i := range subjectDecision.Trace {
+				if subjectDecision.Trace[i].Step != "application" {
+					subjectDecision.Trace[i].Step = "application." + subjectDecision.Trace[i].Step
+				}
+			}
 			return authorizationEvaluation{decision: subjectDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
 		}
 	}
@@ -351,12 +361,15 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	var policyVersion int64
 	if consumeApproval {
 		decision, policyVersion, err = a.Authorization.CheckBusiness(ctx, check, body.Resource.Type, body.Resource.ID)
+	} else if requiredScope == "auth.authz:explain" {
+		decision, policyVersion, err = a.Authorization.ExplainBusiness(ctx, check, body.Resource.Type, body.Resource.ID)
 	} else {
 		decision, policyVersion, err = a.Authorization.Check(ctx, check)
 	}
 	if err != nil {
 		return authorizationEvaluation{}, err
 	}
+	decision.Trace = append([]engine.TraceStep{engine.Passed("application", "the application installation and API key authority cover the subject and resource")}, decision.Trace...)
 	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID, userID: resolved.UserID}, nil
 }
 
@@ -376,7 +389,7 @@ func (a *API) keyOperationDecision(ctx context.Context, key application.Key, per
 		if err != nil {
 			return engine.Decision{}, 0, err
 		}
-		return engine.Decision{Effect: engine.Deny, Code: denyCode}, version, nil
+		return engine.Reject(denyCode), version, nil
 	}
 	return a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
@@ -504,57 +517,11 @@ func explainSummary(action string, decision engine.Decision) string {
 }
 
 func explainTrace(decision engine.Decision) []ExplainStep {
-	if len(decision.Trace) == 0 {
-		return []ExplainStep{{Step: "authorization", Result: "fail", Detail: explainDenyDetail(decision.Code)}}
-	}
 	trace := make([]ExplainStep, 0, len(decision.Trace))
-	for i, detail := range decision.Trace {
-		result := "pass"
-		if decision.Effect == engine.Deny && i == len(decision.Trace)-1 {
-			result = "fail"
-		}
-		trace = append(trace, ExplainStep{Step: "authorization", Result: result, Detail: detail})
+	for _, step := range decision.Trace {
+		trace = append(trace, ExplainStep(step))
 	}
 	return trace
-}
-
-func explainDenyDetail(code string) string {
-	switch code {
-	case "INVALID_SUBJECT":
-		return "subject or permission is missing"
-	case "UNKNOWN_PERMISSION":
-		return "permission is not registered"
-	case "PERMISSION_DISABLED":
-		return "permission is disabled"
-	case "ACTOR_MEMBER_INACTIVE":
-		return "subject member is inactive"
-	case "PRINCIPAL_KIND_NOT_ALLOWED":
-		return "the permission does not allow this principal type"
-	case "ENVELOPE_EXCLUDED":
-		return "the permission is excluded by the effective envelope"
-	case "SCOPE_OUT_OF_BOUNDS":
-		return "the assignment scope does not cover the resource"
-	case "OWNER_INACTIVE":
-		return "owner chain contains an inactive member"
-	case "OWNER_ENVELOPE_EXCLUDED":
-		return "the owner effective envelope excludes the permission"
-	case "APPROVAL_REQUIRED":
-		return "human approval is required"
-	case "RESOURCE_GROUP_NOT_FOUND":
-		return "resource group was not found in the Space"
-	case "RESOURCE_GROUP_INACTIVE":
-		return "resource group is inactive"
-	case "SPACE_INACTIVE":
-		return "resource Space is inactive"
-	case "KEY_SCOPE_EXCLUDED":
-		return "the API key is outside the resource Space scope"
-	case "TOKEN_SCOPE_EXCLUDED":
-		return "the delegated token scope excludes the permission"
-	case "NO_MATCHING_PERMISSION":
-		return "no matching permission assignment was found"
-	default:
-		return "authorization denied"
-	}
 }
 
 func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectOutput, error) {

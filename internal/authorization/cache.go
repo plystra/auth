@@ -54,7 +54,7 @@ func (c *decisionCache) clear() {
 
 func cloneDecision(in engine.Decision) engine.Decision {
 	out := in
-	out.Trace = append([]string(nil), in.Trace...)
+	out.Trace = append([]engine.TraceStep(nil), in.Trace...)
 	return out
 }
 

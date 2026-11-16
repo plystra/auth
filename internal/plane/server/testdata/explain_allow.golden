@@ -3,19 +3,54 @@
   "summary": "self:read is allowed",
   "trace": [
     {
-      "step": "authorization",
+      "step": "application",
       "result": "pass",
-      "detail": "member matched"
+      "detail": "the application installation and API key authority cover the subject and resource"
     },
     {
-      "step": "authorization",
+      "step": "catalog",
       "result": "pass",
-      "detail": "permission matched"
+      "detail": "permission is registered and not disabled"
     },
     {
-      "step": "authorization",
+      "step": "subject",
       "result": "pass",
-      "detail": "scope matched"
+      "detail": "subject member is active"
+    },
+    {
+      "step": "subject_space",
+      "result": "pass",
+      "detail": "subject Space and ancestors are active"
+    },
+    {
+      "step": "resource_space",
+      "result": "pass",
+      "detail": "resource Space and ancestors are active"
+    },
+    {
+      "step": "subject_input",
+      "result": "pass",
+      "detail": "subject identity and permission are present"
+    },
+    {
+      "step": "permission",
+      "result": "pass",
+      "detail": "a subject assignment includes the permission"
+    },
+    {
+      "step": "principal_kind",
+      "result": "pass",
+      "detail": "the permission allows this principal type"
+    },
+    {
+      "step": "envelope",
+      "result": "pass",
+      "detail": "the permission is included in the assignment's effective envelope"
+    },
+    {
+      "step": "scope",
+      "result": "pass",
+      "detail": "the assignment scope covers the resource"
     }
   ]
 }

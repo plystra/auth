@@ -24,6 +24,9 @@ import (
 func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, key, sessions := newServerFixture(t)
+	if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET scopes = '["auth.authz:check", "auth.authz:explain"]'::jsonb`); err != nil {
+		t.Fatal(err)
+	}
 	agents := &agent.Service{Store: st}
 	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_server_actor", Name: "approval-server-agent", ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
@@ -50,6 +53,31 @@ func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 		return response
 	}
 	checkBody := fmt.Sprintf(`{"subject":{"member_id":%q},"action":"auth.bindings:manage","resource":{"type":"invoice","id":"inv_http_1","space_id":%q}}`, created.ID, spaceID)
+	explain := func(wantDecision, wantCode string) {
+		t.Helper()
+		result := request("/server/v1/authz/explain", checkBody)
+		if result.Code != http.StatusOK {
+			t.Fatalf("explain status = %d", result.Code)
+		}
+		var out struct {
+			Data ExplainDecision `json:"data"`
+		}
+		if err := json.Unmarshal(result.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.Data.Decision != wantDecision || out.Data.DenyCode != wantCode || len(out.Data.Trace) == 0 {
+			t.Fatalf("approval explain = %+v, want %s/%s", out.Data, wantDecision, wantCode)
+		}
+		last := out.Data.Trace[len(out.Data.Trace)-1]
+		wantResult := "fail"
+		if wantDecision == "allow" {
+			wantResult = "pass"
+		}
+		if last.Step != "approval" || last.Result != wantResult || wantCode != "" && !strings.Contains(out.Data.Summary, wantCode) {
+			t.Fatalf("approval trace and summary disagree: %+v", out.Data)
+		}
+	}
+	explain("deny", "APPROVAL_REQUIRED")
 	before := request("/server/v1/authz/check", checkBody)
 	if before.Code != http.StatusOK || !strings.Contains(before.Body.String(), "APPROVAL_REQUIRED") {
 		t.Fatalf("unapproved HTTP check = %d %s", before.Code, before.Body.String())
@@ -73,6 +101,7 @@ func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 	if pending.Code != http.StatusOK || !strings.Contains(pending.Body.String(), "APPROVAL_PENDING") {
 		t.Fatalf("pending HTTP check = %d %s", pending.Code, pending.Body.String())
 	}
+	explain("deny", "APPROVAL_PENDING")
 	tokens, err := sessions.CreateForMember(ctx, "usr_server_actor", owner.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +121,13 @@ func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 	if _, err := approvals.Decide(proof, "usr_server_actor", response.Data.ID, true); err != nil {
 		t.Fatal(err)
 	}
+	for range 2 {
+		explain("allow", "")
+	}
+	var consumed bool
+	if err := st.Pool.QueryRow(ctx, `SELECT consumed_at IS NOT NULL FROM approval_requests WHERE id = $1`, response.Data.ID).Scan(&consumed); err != nil || consumed {
+		t.Fatalf("explain consumed a business approval: consumed=%v error=%v", consumed, err)
+	}
 	allowed := request("/server/v1/authz/check", checkBody)
 	if allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
 		t.Fatalf("approved HTTP check = %d %s", allowed.Code, allowed.Body.String())
@@ -100,4 +136,5 @@ func TestBusinessApprovalHTTPCreateAndCheckConsumption(t *testing.T) {
 	if replayed.Code != http.StatusOK || !strings.Contains(replayed.Body.String(), "APPROVAL_REQUIRED") {
 		t.Fatalf("replayed HTTP check = %d %s", replayed.Code, replayed.Body.String())
 	}
+	explain("deny", "APPROVAL_REQUIRED")
 }

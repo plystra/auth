@@ -49,6 +49,16 @@ func (s *Service) TopHumanOwnerTx(ctx context.Context, q *db.Queries, agentMembe
 // allows the Agent action. A normal Check, explain, or management preflight
 // cannot consume a business approval.
 func (s *Service) CheckBusiness(ctx context.Context, in CheckRequest, resourceType, resourceID string) (engine.Decision, int64, error) {
+	return s.checkBusiness(ctx, in, resourceType, resourceID, true)
+}
+
+// ExplainBusiness evaluates the same persisted approval and current authority
+// as CheckBusiness without consuming the approval or executing the action.
+func (s *Service) ExplainBusiness(ctx context.Context, in CheckRequest, resourceType, resourceID string) (engine.Decision, int64, error) {
+	return s.checkBusiness(ctx, in, resourceType, resourceID, false)
+}
+
+func (s *Service) checkBusiness(ctx context.Context, in CheckRequest, resourceType, resourceID string, consume bool) (engine.Decision, int64, error) {
 	if s == nil || s.Store == nil {
 		return engine.Decision{}, 0, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
@@ -80,9 +90,9 @@ func (s *Service) CheckBusiness(ctx context.Context, in CheckRequest, resourceTy
 			ownerID, ownerErr := s.TopHumanOwnerTx(ctx, q, in.MemberID)
 			if ownerErr == nil && ownerID == latest.ApproverMemberID {
 				if latest.Status == "pending" {
-					decision.Code = "APPROVAL_PENDING"
+					decision = decision.WithApprovalStatus("APPROVAL_PENDING")
 				} else {
-					decision.Code = "APPROVAL_REJECTED"
+					decision = decision.WithApprovalStatus("APPROVAL_REJECTED")
 				}
 			}
 			return nil
@@ -100,6 +110,10 @@ func (s *Service) CheckBusiness(ctx context.Context, in CheckRequest, resourceTy
 			return err
 		}
 		if allowed.Effect != engine.Allow {
+			return nil
+		}
+		if !consume {
+			decision, version = allowed, allowedVersion
 			return nil
 		}
 		count, err := q.ConsumeApprovedApprovalRequest(ctx, db.ConsumeApprovedApprovalRequestParams{ID: approved.ID})

@@ -86,7 +86,7 @@ func TestAgentAuthorityIsBoundToOwnerEnvelope(t *testing.T) {
 	}
 	if got := Check(agent); got.Effect != Allow {
 		t.Fatalf("agent should be allowed while owner is allowed: %+v", got)
-	} else if !slices.Contains(got.Trace, "owner envelope matched") {
+	} else if !slices.Contains(got.Trace, Passed("owner_envelope", "every owner is allowed the same permission on the resource")) {
 		t.Fatalf("agent allow trace = %v, want owner envelope step", got.Trace)
 	}
 	owner.Assignments[0].Permissions = []string{"invoice:read"}
@@ -276,7 +276,7 @@ func TestCheckTableCoversEveryScopeAndDecisionReason(t *testing.T) {
 		want Effect
 		code string
 	}{
-		{name: "invalid subject", in: Request{Permission: "document:read"}, want: Deny, code: "invalid_subject"},
+		{name: "invalid subject", in: Request{Permission: "document:read"}, want: Deny, code: "INVALID_SUBJECT"},
 		{name: "self", in: Request{MemberID: "mem_1", Permission: "profile:read", ResourceSpace: "spc_1", ResourceOwner: "mem_1", Assignments: []Assignment{grant("profile:read", Scope{Kind: "self"})}}, want: Allow, code: "allowed"},
 		{name: "group", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", ResourceGroup: "grp_1", Assignments: []Assignment{grant("document:read", Scope{Kind: "group", Anchor: "grp_1"})}}, want: Allow, code: "allowed"},
 		{name: "group tree", in: Request{MemberID: "mem_1", Permission: "document:read", ResourceSpace: "spc_1", ResourceGroup: "grp_child", ResourceGroupAncestors: []string{"grp_root"}, Assignments: []Assignment{grant("document:read", Scope{Kind: "group_tree", Anchor: "grp_root"})}}, want: Allow, code: "allowed"},

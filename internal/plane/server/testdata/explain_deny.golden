@@ -4,7 +4,12 @@
   "summary": "missing:read is denied: UNKNOWN_PERMISSION",
   "trace": [
     {
-      "step": "authorization",
+      "step": "application",
+      "result": "pass",
+      "detail": "the application installation and API key authority cover the subject and resource"
+    },
+    {
+      "step": "catalog",
       "result": "fail",
       "detail": "permission is not registered"
     }

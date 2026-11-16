@@ -48,17 +48,21 @@ type Request struct {
 	SelfOwners   []string
 }
 type Decision struct {
-	Effect Effect   `json:"effect"`
-	Code   string   `json:"code"`
-	Trace  []string `json:"trace"`
+	Effect Effect      `json:"effect"`
+	Code   string      `json:"code"`
+	Trace  []TraceStep `json:"trace"`
 }
 
 func Check(in Request) Decision {
 	if in.MemberID == "" || in.Permission == "" {
-		return Decision{Effect: Deny, Code: "invalid_subject", Trace: []string{"missing subject or permission"}}
+		return Reject("INVALID_SUBJECT")
 	}
+	trace := []TraceStep{Passed("subject_input", "subject identity and permission are present")}
 	if in.TokenScopes != nil && !contains(in.TokenScopes, in.Permission) {
-		return Decision{Effect: Deny, Code: "TOKEN_SCOPE_EXCLUDED", Trace: []string{"delegated token scope excludes permission"}}
+		return Reject("TOKEN_SCOPE_EXCLUDED", trace...)
+	}
+	if in.TokenScopes != nil {
+		trace = append(trace, Passed("token_scope", "the delegated token scope includes the permission"))
 	}
 	matches := []Assignment{}
 	sawPermission := false
@@ -99,31 +103,57 @@ func Check(in Request) Decision {
 		case !sawPermission:
 			code = "NO_MATCHING_PERMISSION"
 		}
-		return Decision{Effect: Deny, Code: code, Trace: []string{"no matching assignment"}}
+		trace = append(trace, assignmentTrace(code)...)
+		return Reject(code, trace...)
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].Role < matches[j].Role })
-	trace := []string{"member matched", "permission matched", "scope matched"}
+	trace = append(trace, assignmentTrace("")...)
 	if in.PrincipalType == "agent" {
 		if in.Owner == nil {
-			return Decision{Effect: Deny, Code: "OWNER_INACTIVE", Trace: append(trace, "owner chain missing")}
+			return Reject("OWNER_INACTIVE", trace...)
 		}
 		ownerRequest := *in.Owner
 		ownerRequest.SkipApproval = true
 		owner := Check(ownerRequest)
+		for _, step := range owner.Trace {
+			step.Step = "owner." + step.Step
+			trace = append(trace, step)
+		}
 		if owner.Effect != Allow {
 			if owner.Code == "OWNER_INACTIVE" {
-				return Decision{Effect: Deny, Code: "OWNER_INACTIVE", Trace: append(trace, "owner chain inactive")}
+				return Reject("OWNER_INACTIVE", trace...)
 			}
-			return Decision{Effect: Deny, Code: "OWNER_ENVELOPE_EXCLUDED", Trace: append(trace, "owner envelope denied")}
+			return Reject("OWNER_ENVELOPE_EXCLUDED", trace...)
 		}
-		trace = append(trace, "owner envelope matched")
+		trace = append(trace, Passed("owner_envelope", "every owner is allowed the same permission on the resource"))
+		requiresApproval := false
 		for _, a := range matches {
-			if a.AgentApprovalRequired && !in.ApprovalValid && !in.SkipApproval {
-				return Decision{Effect: Deny, Code: "APPROVAL_REQUIRED", Trace: append(trace, "human approval required")}
+			requiresApproval = requiresApproval || a.AgentApprovalRequired
+		}
+		if !in.SkipApproval && requiresApproval {
+			if !in.ApprovalValid {
+				return Reject("APPROVAL_REQUIRED", trace...)
 			}
+			trace = append(trace, Passed("approval", "a persisted approval authorizes this request"))
 		}
 	}
 	return Decision{Effect: Allow, Code: "allowed", Trace: trace}
+}
+
+func assignmentTrace(failure string) []TraceStep {
+	var trace []TraceStep
+	for _, condition := range []struct{ step, code, detail string }{
+		{"permission", "NO_MATCHING_PERMISSION", "a subject assignment includes the permission"},
+		{"principal_kind", "PRINCIPAL_KIND_NOT_ALLOWED", "the permission allows this principal type"},
+		{"envelope", "ENVELOPE_EXCLUDED", "the permission is included in the assignment's effective envelope"},
+		{"scope", "SCOPE_OUT_OF_BOUNDS", "the assignment scope covers the resource"},
+	} {
+		if failure == condition.code {
+			break
+		}
+		trace = append(trace, Passed(condition.step, condition.detail))
+	}
+	return trace
 }
 func scopeContains(s Scope, in Request) bool {
 	if s.Kind == "" {
