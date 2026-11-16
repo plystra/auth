@@ -214,7 +214,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	sessions.Factors = factors
 	authz.StepUp = sessions
 	apps := &application.Service{Store: st, Authorization: authz, StepUp: sessions, HMACKeys: [][]byte{key}}
-	agents := &agent.Service{Store: st, HMACKeys: [][]byte{key}}
+	agents := &agent.Service{Store: st, StepUp: sessions, HMACKeys: [][]byte{key}}
 	approvals := &approval.Service{Store: st, Authorization: authz, StepUp: sessions}
 	validator := credential.Validator{
 		Principal: credential.PrincipalParser{Sessions: sessions},
@@ -359,10 +359,11 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err := json.Unmarshal(createdFactor.Body.Bytes(), &factorResult); err != nil || factorResult.Data.Secret == "" {
 		t.Fatal("publisher factor enrollment omitted its one-time secret")
 	}
+	manifest := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "invoice:read", "invoice:approve"}
 	appRequest := map[string]any{
 		"space_id": publisher.spaceID, "name": "Invoice SaaS", "visibility": "public",
 		"redirect_uris":        []string{"https://saas.example.test/callback"},
-		"manifest_permissions": []string{"auth.authz:check", "invoice:read", "invoice:approve"},
+		"manifest_permissions": manifest,
 	}
 	appStepBody, err := json.Marshal(map[string]any{
 		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.register", "request": appRequest,
@@ -440,7 +441,6 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if denied := principalRequest(installPath, customer.token, string(installBody)); denied.Code != http.StatusNotFound {
 		t.Fatalf("unapproved public application installation = %d %s", denied.Code, denied.Body.String())
 	}
-	manifest := []string{"auth.authz:check", "invoice:read", "invoice:approve"}
 	reviewRequest := map[string]any{"application_id": appResult.Data.ID, "manifest_permissions": manifest}
 	reviewStepBody, err := json.Marshal(map[string]any{
 		"mfa_code": nextTOTP(secretValue), "operation": "ops.applications.approve", "request": reviewRequest,
@@ -484,8 +484,9 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	}
 	expiresAt := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	restrictTo := []application.KeyRestriction{{SpaceID: customer.spaceID}}
+	keyScopes := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect"}
 	keyRequest := map[string]any{
-		"application_id": appResult.Data.ID, "name": "saas-server", "grants": []string{"auth.authz:check"},
+		"application_id": appResult.Data.ID, "name": "saas-server", "grants": keyScopes,
 		"restrict_to": restrictTo, "expires_at": expiresAt, "allow_subject_assertion": true,
 	}
 	keyStepBody, err := json.Marshal(map[string]any{
@@ -498,7 +499,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatalf("application key step-up = %d %s", stepped.Code, stepped.Body.String())
 	}
 	keyBody, err := json.Marshal(map[string]any{
-		"name": "saas-server", "grants": []string{"auth.authz:check"}, "restrict_to": restrictTo,
+		"name": "saas-server", "grants": keyScopes, "restrict_to": restrictTo,
 		"expires_at": expiresAt, "allow_subject_assertion": true,
 	})
 	if err != nil {
@@ -519,11 +520,11 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatal("application key creation omitted its one-time secret")
 	}
 	overreach := map[string]any{
-		"name": "overreach", "grants": []string{"auth.tokens:introspect"}, "expires_at": expiresAt,
+		"name": "overreach", "grants": []string{"auth.audit:write"}, "expires_at": expiresAt,
 	}
 	overreachStep, err := json.Marshal(map[string]any{
 		"mfa_code": nextTOTP(factorResult.Data.Secret), "operation": "applications.keys.create", "request": map[string]any{
-			"application_id": appResult.Data.ID, "name": "overreach", "grants": []string{"auth.tokens:introspect"}, "expires_at": expiresAt,
+			"application_id": appResult.Data.ID, "name": "overreach", "grants": []string{"auth.audit:write"}, "expires_at": expiresAt,
 		},
 	})
 	if err != nil {
@@ -905,6 +906,15 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 				}
 			}
 		}
+	})
+	t.Run("NativeAgentDelegationAndRevocation", func(t *testing.T) {
+		runNativeAgentDelegationScenario(t, mvpDelegationScenario{
+			Principal: principalHandler, Server: serverHandler,
+			Observer: newMVPObserver(t, database.AppURL, signer, key, sessions.Settings), Signer: signer,
+			UserToken: customer.token, UserMemberID: customer.memberID, SpaceID: customer.spaceID,
+			ClientID: appResult.Data.ClientID, ServerKey: keyResult.Data.Secret, ControlToken: oauthToken.AccessToken,
+			MFACode: func() string { return nextTOTP(customerFactorResult.Data.Secret) },
+		})
 	})
 	defaultSpaceBody, err := json.Marshal(map[string]any{
 		"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",

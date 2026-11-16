@@ -932,6 +932,43 @@ func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T)
 	if _, code := decode(request(expiredParent, childKey, "auth.members:read")); code != "invalid_grant" {
 		t.Fatalf("expired parent error code=%q, want invalid_grant", code)
 	}
+	t.Run("GroupScopedAuthority", func(t *testing.T) {
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, kind)
+			VALUES ('grp_exchange_project', $1, 'Project', 'standard')`, owner.SpaceID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET scope = 'group', anchor_space_id = NULL, anchor_group_id = 'grp_exchange_project'
+			WHERE id = 'grt_token_exchange_child'`); err != nil {
+			t.Fatal(err)
+		}
+		for _, kind := range []string{"group", "group_tree"} {
+			if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET scope = $1 WHERE id = 'grt_token_exchange_child'`, kind); err != nil {
+				t.Fatal(err)
+			}
+			if token, code := decode(request(parentToken, childKey, "auth.members:read")); code != "" || token == "" {
+				t.Fatalf("%s authority could not exchange a narrowed token: code=%s", kind, code)
+			}
+		}
+		// A broad stored child grant can be narrowed by its owner's group
+		// authority. The candidate resource must come from that owner boundary.
+		if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET scope = 'space', anchor_space_id = $1, anchor_group_id = NULL
+			WHERE id = 'grt_token_exchange_child'`, owner.SpaceID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET scope = 'group', anchor_space_id = NULL, anchor_group_id = 'grp_exchange_project'
+			WHERE id = 'grt_token_exchange_parent'`); err != nil {
+			t.Fatal(err)
+		}
+		if token, code := decode(request(parentToken, childKey, "auth.members:read")); code != "" || token == "" {
+			t.Fatalf("owner-narrowed authority could not exchange a token: code=%s", code)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE id = 'grt_token_exchange_parent'`); err != nil {
+			t.Fatal(err)
+		}
+		if _, code := decode(request(parentToken, childKey, "auth.members:read")); code != "invalid_scope" {
+			t.Fatalf("revoked owner authority exchanged a token: code=%s", code)
+		}
+	})
 	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'suspended' WHERE id = (SELECT home_group_id FROM members WHERE id = $1)`, child.ID); err != nil {
 		t.Fatal(err)
 	}

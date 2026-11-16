@@ -18,7 +18,6 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
-	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
@@ -473,16 +472,14 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	for _, permission := range requested {
-		decision, _, checkErr := h.Authorization.Check(r.Context(), authorization.CheckRequest{MemberID: actor.MemberID, Permission: permission, ResourceSpace: actor.SpaceID})
-		if checkErr != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
-			return
-		}
-		if decision.Effect != engine.Allow {
-			writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
-			return
-		}
+	allowed, err := h.Authorization.ValidateTokenScopes(r.Context(), actor.MemberID, requested)
+	if err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
+		return
+	}
+	if !allowed {
+		writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
+		return
 	}
 	tokens, err := h.Sessions.CreateAgentDelegatedAccess(r.Context(), actor.MemberID, actor.SpaceID, r.Form.Get("resource"), parentClaims.Subject, requested, parentClaims.ExpiresAt)
 	if err != nil {
