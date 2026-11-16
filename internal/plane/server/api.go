@@ -165,13 +165,20 @@ type IntrospectInput struct {
 
 type IntrospectOutput struct {
 	Body struct {
-		Data struct {
-			Active    bool   `json:"active"`
-			Subject   string `json:"sub,omitempty"`
-			SessionID string `json:"sid,omitempty"`
-			ExpiresAt int64  `json:"exp,omitempty"`
-		} `json:"data"`
+		Data IntrospectIdentity `json:"data"`
 	}
+}
+
+type IntrospectIdentity struct {
+	Active     bool                  `json:"active"`
+	Subject    string                `json:"sub,omitempty"`
+	SessionID  string                `json:"sid,omitempty"`
+	ExpiresAt  int64                 `json:"exp,omitempty"`
+	MemberID   string                `json:"member_id,omitempty"`
+	MemberType string                `json:"member_type,omitempty"`
+	SpaceID    string                `json:"space_id,omitempty"`
+	UserID     string                `json:"user_id,omitempty"`
+	OwnerChain []agent.OwnerIdentity `json:"owner_chain,omitempty"`
 }
 
 type resolvedSubject struct {
@@ -535,16 +542,13 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 	if strings.TrimSpace(in.Body.Token) == "" {
 		return nil, apierr.New("VALIDATION_FAILED", "token is required")
 	}
-	if a.Sessions == nil {
-		return nil, apierr.New("UNAVAILABLE", "token introspection is unavailable")
-	}
-	claims, active, err := a.Sessions.Introspect(ctx, in.Body.Token, key.ClientID)
+	identity, active, err := a.introspectIdentity(ctx, in.Body.Token, key.ClientID)
 	if err != nil {
 		return nil, err
 	}
 	out := &IntrospectOutput{}
 	if active {
-		spaceID := claims.SpaceID
+		spaceID := identity.SpaceID
 		if spaceID == "" {
 			spaceID = key.SpaceID
 		}
@@ -555,10 +559,8 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 		if decision.Effect != engine.Allow {
 			return out, nil
 		}
-		out.Body.Data.Active = true
-		out.Body.Data.Subject = claims.Subject
-		out.Body.Data.SessionID = claims.SessionID
-		out.Body.Data.ExpiresAt = claims.ExpiresAt
+		identity.Active = true
+		out.Body.Data = identity
 	}
 	return out, nil
 }

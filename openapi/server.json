@@ -178,28 +178,6 @@
         },
         "type": "object"
       },
-      "DataStruct": {
-        "additionalProperties": false,
-        "properties": {
-          "active": {
-            "type": "boolean"
-          },
-          "exp": {
-            "format": "int64",
-            "type": "integer"
-          },
-          "sid": {
-            "type": "string"
-          },
-          "sub": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "active"
-        ],
-        "type": "object"
-      },
       "Error": {
         "additionalProperties": false,
         "properties": {
@@ -289,6 +267,49 @@
         ],
         "type": "object"
       },
+      "IntrospectIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "exp": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "member_id": {
+            "type": "string"
+          },
+          "member_type": {
+            "type": "string"
+          },
+          "owner_chain": {
+            "items": {
+              "$ref": "#/components/schemas/OwnerIdentity"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "sid": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "sub": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "active"
+        ],
+        "type": "object"
+      },
       "IntrospectInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -305,11 +326,31 @@
         "additionalProperties": false,
         "properties": {
           "data": {
-            "$ref": "#/components/schemas/DataStruct"
+            "$ref": "#/components/schemas/IntrospectIdentity"
           }
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "OwnerIdentity": {
+        "additionalProperties": false,
+        "properties": {
+          "member_id": {
+            "type": "string"
+          },
+          "member_type": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "member_id",
+          "member_type",
+          "space_id"
         ],
         "type": "object"
       },
