@@ -25,6 +25,7 @@ func TestStatusUsesStableHTTPSemantics(t *testing.T) {
 		"PERMISSION_DISABLED":         http.StatusForbidden,
 		"SCOPE_OUT_OF_BOUNDS":         http.StatusForbidden,
 		"AUTHORITY_DELTA_NOT_COVERED": http.StatusForbidden,
+		"SUBJECT_NOT_FOUND":           http.StatusNotFound,
 	}
 	for code, want := range tests {
 		if got := Status(code); got != want {

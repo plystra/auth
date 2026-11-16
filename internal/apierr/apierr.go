@@ -49,7 +49,7 @@ func Status(code string) int {
 		"scope_out_of_bounds", "token_scope_excluded", "authority_delta_not_covered",
 		"assign_right_required", "grant_exceeds_owner":
 		return http.StatusForbidden
-	case "not_found":
+	case "not_found", "subject_not_found":
 		return http.StatusNotFound
 	case "conflict":
 		return http.StatusConflict

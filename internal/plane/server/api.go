@@ -306,8 +306,17 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		return authorizationEvaluation{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	spaceID := strings.TrimSpace(body.Resource.SpaceID)
+	var resolved resolvedSubject
 	if spaceID == "" {
-		spaceID = key.SpaceID
+		if !contains(key.Scopes, requiredScope) {
+			return authorizationEvaluation{}, apierr.New("PERMISSION_DENIED", "API key is not scoped for this operation.")
+		}
+		var err error
+		resolved, err = a.resolveSubject(ctx, key, body.Subject, "")
+		if err != nil {
+			return authorizationEvaluation{}, err
+		}
+		spaceID = resolved.SpaceID
 	}
 	keyDecision, keyVersion, err := a.keyOperationDecision(ctx, key, requiredScope, spaceID)
 	if err != nil {
@@ -316,9 +325,11 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	if keyDecision.Effect != engine.Allow {
 		return authorizationEvaluation{decision: keyDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
 	}
-	resolved, err := a.resolveSubject(ctx, key, body.Subject, spaceID)
-	if err != nil {
-		return authorizationEvaluation{}, err
+	if resolved.ID == "" {
+		resolved, err = a.resolveSubject(ctx, key, body.Subject, spaceID)
+		if err != nil {
+			return authorizationEvaluation{}, err
+		}
 	}
 	if resolved.SpaceID != "" && resolved.SpaceID != spaceID {
 		subjectDecision, _, err := a.keyOperationDecision(ctx, key, requiredScope, resolved.SpaceID)
@@ -405,8 +416,15 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 		}
 		var member authorization.Member
 		if claims.MemberID != "" {
-			member, err = a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
+			if spaceID == "" {
+				member, err = a.Authorization.GetMemberAnySpace(ctx, claims.MemberID)
+			} else {
+				member, err = a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
+			}
 		} else {
+			if spaceID == "" {
+				return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "resource.space_id is required when the subject has no selected member")
+			}
 			member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 		}
 		if err != nil {
@@ -426,13 +444,22 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 	if a.Authorization == nil {
 		return resolvedSubject{ID: subject.MemberID, Type: "human", SpaceID: spaceID}, nil
 	}
-	member, err := a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
+	var member authorization.Member
+	var err error
+	if spaceID == "" {
+		member, err = a.Authorization.GetMemberAnySpace(ctx, subject.MemberID)
+	} else {
+		member, err = a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
+	}
 	if err != nil {
 		return resolvedSubject{}, err
 	}
 	if subject.UserID != "" {
-		bound, err := a.Authorization.GetMemberForUser(ctx, subject.UserID, spaceID)
-		if err != nil || bound.ID != member.ID {
+		bound, err := a.Authorization.UserBoundToMember(ctx, subject.UserID, member.ID)
+		if err != nil {
+			return resolvedSubject{}, err
+		}
+		if !bound {
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
 		}
 	}

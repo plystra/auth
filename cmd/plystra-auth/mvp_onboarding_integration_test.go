@@ -589,6 +589,9 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if allowed := check(keyResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:read"); allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
 		t.Fatalf("installed SaaS authorization = %d %s", allowed.Code, allowed.Body.String())
 	}
+	if allowed := check(keyResult.Data.Secret, customer.memberID, "", "invoice:read"); allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("SaaS authorization with subject Space default = %d %s", allowed.Code, allowed.Body.String())
+	}
 	if denied := check(keyResult.Data.Secret, publisher.memberID, publisher.spaceID, "invoice:read"); denied.Code != http.StatusOK || !strings.Contains(denied.Body.String(), `"deny_code":"KEY_SCOPE_EXCLUDED"`) {
 		t.Fatalf("key scope outside customer = %d %s", denied.Code, denied.Body.String())
 	}
@@ -827,6 +830,21 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			t.Fatalf("approval consumption audits = %d, error = %v", consumedAudits, err)
 		}
 	})
+	defaultSpaceBody, err := json.Marshal(map[string]any{
+		"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",
+		"resource": map[string]string{"type": "invoice", "id": "inv_default_customer"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultSpaceRequest := httptest.NewRequest(http.MethodPost, "/server/v1/authz/check", bytes.NewReader(defaultSpaceBody))
+	defaultSpaceRequest.Header.Set("Authorization", "Bearer "+keyResult.Data.Secret)
+	defaultSpaceRequest.Header.Set("Content-Type", "application/json")
+	defaultSpaceResponse := httptest.NewRecorder()
+	serverHandler.ServeHTTP(defaultSpaceResponse, defaultSpaceRequest)
+	if defaultSpaceResponse.Code != http.StatusOK || !strings.Contains(defaultSpaceResponse.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("OAuth SaaS authorization with omitted resource Space = %d %s", defaultSpaceResponse.Code, defaultSpaceResponse.Body.String())
+	}
 	repeatQuery, err := url.ParseQuery(authorizeQuery.Encode())
 	if err != nil {
 		t.Fatal(err)
