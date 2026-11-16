@@ -94,9 +94,13 @@ func TestInvoiceSaaSAuditOutbox(t *testing.T) {
 			t.Fatalf("repeated approval status=%d", conflict.Code)
 		}
 		statuses = f.statuses()
+		outcomes := make(map[string]int)
+		for _, status := range statuses {
+			outcomes[status.Outcome]++
+		}
 		var jobs int
 		if err := f.store.pool.QueryRow(ctx, `SELECT count(*) FROM river_job`).Scan(&jobs); err != nil || len(statuses) != 2 || jobs != 2 ||
-			statuses[0].Outcome != "success" || statuses[1].Outcome != "failure" {
+			outcomes["success"] != 1 || outcomes["failure"] != 1 {
 			t.Fatal("business success or conflict lost its durable delivery job")
 		}
 		f.assertNoCredentials()
