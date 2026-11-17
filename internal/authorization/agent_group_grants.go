@@ -26,10 +26,7 @@ func (s *Service) ReplaceAgentGroupGrants(ctx context.Context, actorMemberID, sp
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
-			return err
-		}
-		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
 		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: granteeMemberID})
@@ -53,6 +50,9 @@ func (s *Service) ReplaceAgentGroupGrants(ctx context.Context, actorMemberID, sp
 			return err
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, anchorSpaceID, anchorGroupID, spaceID); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, spaceID, "space", anchorSpaceID); err != nil {

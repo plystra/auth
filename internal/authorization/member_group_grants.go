@@ -26,6 +26,9 @@ func (s *Service) CreateMemberGroupGrant(ctx context.Context, actorMemberID, spa
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockHumanActorAccountTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		permissions, err := grantPermissionSourceTx(ctx, q, spaceID, in)
 		if err != nil {
 			return err
@@ -62,6 +65,9 @@ func (s *Service) CreateMemberGroupGrant(ctx context.Context, actorMemberID, spa
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, spaceID, "space", anchorSpace); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, anchorSpace); err != nil {

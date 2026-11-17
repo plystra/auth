@@ -132,7 +132,7 @@ func (s *Service) changeGroupMembership(ctx context.Context, actorMemberID, spac
 		return apierr.New("VALIDATION_FAILED", "group membership fields are required")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, memberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
 			return err
 		}
 		group, err := q.LockGroupInSpaceForAuthorization(ctx, db.LockGroupInSpaceForAuthorizationParams{ID: groupID, SpaceID: spaceID})

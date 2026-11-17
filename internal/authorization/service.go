@@ -1083,7 +1083,8 @@ func (s *Service) UpdateRole(ctx context.Context, actorMemberID, spaceID, roleID
 	permissions = uniqueSorted(permissions)
 	var out Role
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+		// Role edits and grants lock the account, then the role, then members.
+		if err := lockHumanActorAccountTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
@@ -1177,6 +1178,9 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockHumanActorAccountTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("NOT_FOUND", "role was not found in this Space")
@@ -1201,6 +1205,9 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, member.ID, anchorSpaceID); err != nil {
@@ -1285,6 +1292,9 @@ func (s *Service) CreateOAuthInlineGrantTx(ctx context.Context, q *db.Queries, o
 func (s *Service) createInlineGrant(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
+			return err
+		}
 		var err error
 		out, err = s.createInlineGrantTx(ctx, q, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, mode)
 		return err
@@ -1326,6 +1336,9 @@ func (s *Service) createInlineGrantTx(ctx context.Context, q *db.Queries, actorM
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		if mode == inlineGrantOAuthConsent {
@@ -1379,6 +1392,9 @@ func (s *Service) createInlineGrantTx(ctx context.Context, q *db.Queries, actorM
 }
 
 func (s *Service) authorizeAgentOwnerGrantTx(ctx context.Context, q *db.Queries, ownerMemberID, spaceID string, permissions []string, mode inlineGrantMode) error {
+	if err := validateHumanActorTx(ctx, q, ownerMemberID); err != nil {
+		return err
+	}
 	owner, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: ownerMemberID})
 	if err != nil {
 		return err
@@ -1421,6 +1437,9 @@ func (s *Service) authorizeAgentOwnerGrantTx(ctx context.Context, q *db.Queries,
 			decision, checkErr := s.CheckTx(ctx, q, request)
 			if checkErr != nil {
 				return checkErr
+			}
+			if decision.Code == "OWNER_INACTIVE" || decision.Code == "ACTOR_MEMBER_INACTIVE" {
+				return apierr.New("OWNER_INACTIVE", "the Agent owner chain is not active")
 			}
 			if decision.Effect == engine.Allow {
 				allowed = true
@@ -1466,6 +1485,9 @@ func (s *Service) ReplaceAgentGrants(ctx context.Context, actorMemberID, spaceID
 func (s *Service) replaceInlineGrants(ctx context.Context, actorMemberID, spaceID, granteeMemberID string, permissions []string, scope, anchorSpaceID string, mode inlineGrantMode) (Grant, error) {
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
+			return err
+		}
 		var err error
 		out, err = s.replaceInlineGrantsTx(ctx, q, actorMemberID, spaceID, granteeMemberID, permissions, scope, anchorSpaceID, mode)
 		return err
@@ -1496,11 +1518,6 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
-		if mode == inlineGrantAgentOwner {
-			if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
-				return err
-			}
-		}
 		member, err := q.LockMemberInSpace(ctx, db.LockMemberInSpaceParams{ID: granteeMemberID, SpaceID: spaceID})
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
@@ -1512,6 +1529,9 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 			return err
 		}
 		if err := validateMemberGrantAnchorTx(ctx, q, member.SpaceID, scope, anchorSpaceID); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		systemOwner := false
@@ -1599,7 +1619,7 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 		// The grantee is immutable, but its position and revocation state can
 		// change while waiting for locks. Resolve both under the mutation locks.
 		targetMemberID := row.GranteeMemberID.String
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, targetMemberID); err != nil {
 			return err
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
@@ -1633,6 +1653,9 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 			return apierr.New("NOT_FOUND", "grant grantee was not found")
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, spaceID, resourceGroup); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		decision, err := s.CheckTx(ctx, q, CheckRequest{
@@ -1841,6 +1864,9 @@ func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMem
 		return err
 	}
 	if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID, extraSpaceIDs...); err != nil {
+		return err
+	}
+	if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 		return err
 	}
 	decision, err := s.checkGovernanceTx(ctx, q, CheckRequest{

@@ -39,13 +39,16 @@ func (s *Service) ListGrants(ctx context.Context, actorID string, in GrantQuery)
 	}
 	var out GrantPage
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorID); err != nil {
 			return err
 		}
 		// Membership and group writers hold the governing Space. Hold the same
 		// lock while resolving recipient positions and selecting the page, so a
 		// concurrent move cannot turn an authorized position into a stale filter.
 		if err := lockAuthorizationNodesTx(ctx, q, in.SpaceID, ""); err != nil {
+			return err
+		}
+		if err := validateHumanActorTx(ctx, q, actorID); err != nil {
 			return err
 		}
 		base := CheckRequest{MemberID: actorID, Permission: "auth.grants:assign", ResourceSpace: in.SpaceID}
