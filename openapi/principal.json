@@ -980,6 +980,7 @@
         "additionalProperties": false,
         "properties": {
           "binding_policy": {
+            "default": "single",
             "type": "string"
           },
           "name": {
@@ -994,8 +995,7 @@
         },
         "required": [
           "name",
-          "type",
-          "binding_policy"
+          "type"
         ],
         "type": "object"
       },

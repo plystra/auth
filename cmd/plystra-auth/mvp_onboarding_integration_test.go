@@ -1032,6 +1032,62 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			}
 		}
 	})
+	t.Run("MemberGovernanceAudit", func(t *testing.T) {
+		user := mvpData[account.User](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/me", customer.token, nil))
+		spacePath := "/v1/spaces/" + customer.spaceID
+		unboundResponse := mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/members", customer.token,
+			map[string]string{"name": "Integration team member", "type": "human"})
+		unbound := mvpData[authorization.Member](t, unboundResponse)
+		boundResponse := mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/members", customer.token,
+			map[string]string{"name": "Second personal identity", "type": "human", "user_id": user.ID})
+		bound := mvpData[authorization.Member](t, boundResponse)
+		policyResponse := mvpJSON(t, principalHandler, http.MethodPatch, spacePath+"/members/"+unbound.ID, customer.token,
+			map[string]string{"binding_policy": "shared"})
+		mvpData[map[string]bool](t, policyResponse)
+		mvpData[map[string]bool](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/step-up", customer.token,
+			map[string]any{"mfa_code": nextTOTP(customerFactorResult.Data.Secret), "operation": "members.bindings.create",
+				"request": map[string]string{"space_id": customer.spaceID, "member_id": unbound.ID, "user_id": user.ID}}))
+		bindingResponse := mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/members/"+unbound.ID+"/users", customer.token,
+			map[string]string{"user_id": user.ID})
+		mvpData[map[string]bool](t, bindingResponse)
+		for _, item := range []struct {
+			response                     *httptest.ResponseRecorder
+			action, targetID, permission string
+		}{
+			{unboundResponse, "member.create", unbound.ID, "auth.members:manage"},
+			{boundResponse, "member.create", bound.ID, "auth.members:manage"},
+			{boundResponse, "member.binding.create", bound.ID, "auth.members:manage"},
+			{policyResponse, "member.binding_policy.update", unbound.ID, "auth.bindings:manage"},
+			{bindingResponse, "member.binding.create", unbound.ID, "auth.bindings:manage"},
+		} {
+			requestID := item.response.Header().Get("X-Request-ID")
+			if requestID == "" {
+				t.Fatal("member governance omitted the request identifier")
+			}
+			query := url.Values{"request_id": {requestID}, "action": {item.action}, "member_id": {customer.memberID}}.Encode()
+			response := mvpJSON(t, principalHandler, http.MethodGet, spacePath+"/audit-logs?"+query, customer.token, nil)
+			events := mvpData[[]audit.Event](t, response)
+			if len(events) != 1 {
+				t.Fatal("empty-deployment member governance did not produce one queryable audit event")
+			}
+			event := events[0]
+			if event.ActorID != customer.memberID || event.MemberID != customer.memberID || event.MemberType != "human" || event.UserID != user.ID ||
+				event.ResourceType != "member" || event.ResourceID != item.targetID || event.SpaceID != customer.spaceID || event.ResourceGroupID != "" ||
+				event.PermissionKey != item.permission || event.PolicyVersion <= 0 || event.Plane != "principal" || event.CredentialType != "user_access_token" || len(event.OwnerChain) != 0 {
+				t.Fatal("member governance audit omitted verified identity or target facts")
+			}
+			for _, credential := range []string{customer.token, customerFactorResult.Data.Secret, oauthToken.AccessToken, keyResult.Data.Secret} {
+				if strings.Contains(response.Body.String(), credential) {
+					t.Fatal("member governance audit exposed credential content")
+				}
+			}
+			otherEvents := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet,
+				"/v1/spaces/"+publisher.spaceID+"/audit-logs?"+query, publisher.token, nil))
+			if len(otherEvents) != 0 {
+				t.Fatal("member governance audit crossed the customer Space boundary")
+			}
+		}
+	})
 	var standardRootID string
 	t.Run("NativeAgentDelegationAndRevocation", func(t *testing.T) {
 		businessDatabase, err := harness.CloneEmpty(ctx)

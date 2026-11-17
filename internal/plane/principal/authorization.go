@@ -38,7 +38,7 @@ type createMemberInput struct {
 	Body          struct {
 		Name          string `json:"name"`
 		Kind          string `json:"type"`
-		BindingPolicy string `json:"binding_policy"`
+		BindingPolicy string `json:"binding_policy,omitempty" default:"single"`
 		UserID        string `json:"user_id,omitempty"`
 	}
 }

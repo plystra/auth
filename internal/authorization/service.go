@@ -857,8 +857,27 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 				return err
 			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "member.create", memberRow.ID, "success"); err != nil {
+		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID})
+		if err != nil {
 			return err
+		}
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "member.create", Outcome: "success", Permission: "auth.members:manage", PolicyVersion: space.PolicyVersion,
+			Resource: audit.Resource{Type: "member", ID: memberRow.ID, SpaceID: spaceID},
+			Metadata: map[string]string{"type": memberRow.Type, "binding_policy": memberRow.BindingPolicy},
+		}); err != nil {
+			return err
+		}
+		if userID != "" {
+			if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+				ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+				Action: "member.binding.create", Outcome: "success", Permission: "auth.members:manage", PolicyVersion: space.PolicyVersion,
+				Resource: audit.Resource{Type: "member", ID: memberRow.ID, SpaceID: spaceID},
+				Metadata: map[string]string{"binding_user_id": userID, "initial_binding": "true"},
+			}); err != nil {
+				return err
+			}
 		}
 		out = Member{ID: memberRow.ID, SpaceID: memberRow.SpaceID, Name: memberRow.Name, Kind: memberRow.Type, BindingPolicy: memberRow.BindingPolicy, Status: memberRow.Status}
 		return nil
@@ -911,10 +930,20 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "member.binding.create", memberID, "success")
+		groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
+		if err != nil {
+			return err
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "member.binding.create", Outcome: "success", Permission: "auth.bindings:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "member", ID: memberID, SpaceID: spaceID, GroupID: groupID},
+			Metadata: map[string]string{"binding_user_id": userID},
+		})
 	})
 }
 
@@ -994,10 +1023,20 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 		if err := q.SetMemberBindingPolicy(ctx, db.SetMemberBindingPolicyParams{ID: memberID, SpaceID: spaceID, BindingPolicy: policy}); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "member.binding_policy.update", member.ID, "success")
+		groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
+		if err != nil {
+			return err
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "member.binding_policy.update", Outcome: "success", Permission: "auth.bindings:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "member", ID: memberID, SpaceID: spaceID, GroupID: groupID},
+			Metadata: map[string]string{"previous_binding_policy": member.BindingPolicy, "binding_policy": policy},
+		})
 	})
 }
 
