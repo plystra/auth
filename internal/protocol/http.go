@@ -2,7 +2,6 @@ package protocol
 
 import (
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,7 +9,6 @@ import (
 	"mime"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
@@ -171,45 +169,13 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeOAuthErr(w, err)
 			return
 		}
-		client, err := h.Applications.AuthenticateOAuthClient(r.Context(), clientID, clientSecret)
+		tokens, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions}).refresh(
+			r.Context(), clientID, secret.New(clientSecret), secret.New(r.Form.Get("refresh_token")), r.Form.Get("resource"))
 		if err != nil {
 			writeOAuthErr(w, err)
 			return
 		}
-		resource := strings.TrimSpace(r.Form.Get("resource"))
-		if resource == "" {
-			resource = client.ClientID
-		}
-		if resource != client.ClientID {
-			writeErr(w, apierr.New("invalid_target", "resource is not registered for this client"))
-			return
-		}
-		ctx := audit.WithCaller(r.Context(), audit.Caller{ApplicationID: client.ID, CredentialType: "oauth_refresh_token"})
-		credential, refresh, err := h.Agents.RotateOAuthRefreshForClient(ctx, r.Form.Get("refresh_token"), client.ClientID)
-		if err != nil {
-			var publicErr *apierr.Error
-			if errors.As(err, &publicErr) && publicErr.Code == "invalid_client" {
-				writeOAuthErr(w, err)
-			} else {
-				writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
-			}
-			return
-		}
-		installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, credential.SpaceID)
-		if err != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
-			return
-		}
-		if !installed {
-			writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
-			return
-		}
-		tokens, err := h.Sessions.CreateAgentAccess(ctx, credential.MemberID, credential.SpaceID, resource)
-		if err != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": refresh})
+		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": tokens.RefreshToken})
 		return
 	}
 	if grantType == "authorization_code" {
@@ -243,7 +209,7 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
-	if h.Applications == nil || h.Agents == nil || h.Sessions == nil || h.Authorization == nil {
+	if h.Applications == nil || h.Agents == nil || h.Sessions == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
@@ -259,68 +225,15 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "client_id, redirect_uri, code and code_verifier are required"))
 		return
 	}
-	client, err := h.Applications.AuthenticateOAuthClient(r.Context(), clientID, clientSecret)
+	tokens, scope, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions}).authorizationCode(r.Context(), codeExchangeInput{
+		clientID: clientID, clientSecret: secret.New(clientSecret), redirectURI: redirectURI, code: secret.New(code), verifier: secret.New(verifier),
+		resource: strings.TrimSpace(r.Form.Get("resource")),
+	})
 	if err != nil {
 		writeOAuthErr(w, err)
 		return
 	}
-	if !containsString(client.RedirectURIs, redirectURI) {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
-		return
-	}
-	digest := sha256.Sum256([]byte(verifier))
-	codeHash := sha256.Sum256([]byte(code))
-	consumed, err := h.Applications.ConsumeAuthorizationCode(r.Context(), codeHash[:], client.ID, redirectURI)
-	if err != nil {
-		writeProtocolErr(w, err)
-		return
-	}
-	if consumed.CodeChallengeMethod != "S256" || subtle.ConstantTimeCompare([]byte(consumed.CodeChallenge), []byte(base64.RawURLEncoding.EncodeToString(digest[:]))) != 1 {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
-		return
-	}
-	if consumed.MemberID == "" {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
-		return
-	}
-	resource := consumed.Resource
-	if requested := strings.TrimSpace(r.Form.Get("resource")); requested != "" && requested != resource {
-		writeErr(w, apierr.New("invalid_target", "resource does not match the authorization request"))
-		return
-	}
-	agentMember, err := h.Authorization.GetMemberAnySpace(r.Context(), consumed.MemberID)
-	if err != nil {
-		var public *apierr.Error
-		if !errors.As(err, &public) {
-			writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
-			return
-		}
-	}
-	if err != nil || agentMember.Kind != "agent" {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
-		return
-	}
-	installed, err := h.Applications.OAuthClientInstalled(r.Context(), client.ID, agentMember.SpaceID)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "application installation is unavailable"))
-		return
-	}
-	if !installed {
-		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
-		return
-	}
-	ctx := audit.WithCaller(r.Context(), audit.Caller{UserID: consumed.UserID, ApplicationID: client.ID, CredentialType: "oauth_authorization_code"})
-	tokens, err := h.Sessions.CreateAgentAccess(ctx, consumed.MemberID, agentMember.SpaceID, resource)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
-		return
-	}
-	refresh, err := h.Agents.CreateOAuthRefreshCredential(ctx, consumed.MemberID, time.Time{})
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": refresh, "scope": consumed.Scope})
+	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": tokens.RefreshToken, "scope": scope})
 }
 
 func (h HTTP) userClaims(r *http.Request) (security.Claims, error) {
@@ -527,7 +440,7 @@ func writeOAuthErr(w http.ResponseWriter, err error) {
 		writeErr(w, publicErr)
 		return
 	}
-	writeErr(w, apierr.New("temporarily_unavailable", "OAuth client authentication is unavailable"))
+	writeErr(w, apierr.New("temporarily_unavailable", "OAuth token exchange is unavailable"))
 }
 
 func oauthClientCredentials(r *http.Request) (string, string, error) {

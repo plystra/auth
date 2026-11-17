@@ -444,6 +444,18 @@ func (s *Service) OAuthClientInstalled(ctx context.Context, applicationID, space
 	return err == nil, err
 }
 
+// OAuthClientInstalledTx keeps the selected installation active until the
+// enclosing exchange commits. Callers lock the application before its members.
+func (s *Service) OAuthClientInstalledTx(ctx context.Context, q *db.Queries, applicationID, spaceID string) (bool, error) {
+	_, err := q.LockActiveApplicationInstallationForSpace(ctx, db.LockActiveApplicationInstallationForSpaceParams{
+		ApplicationID: applicationID, TargetSpaceID: spaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
 func (s *Service) OAuthClientByIDTx(ctx context.Context, q *db.Queries, id string) (OAuthClient, error) {
 	row, err := q.GetOAuthClientByID(ctx, db.GetOAuthClientByIDParams{ID: id})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -467,9 +479,27 @@ func (s *Service) OAuthClientByIDTx(ctx context.Context, q *db.Queries, id strin
 // secret and are intentionally accepted without one.
 func (s *Service) AuthenticateOAuthClient(ctx context.Context, clientID, rawSecret string) (OAuthClient, error) {
 	client, err := s.OAuthClient(ctx, clientID)
+	return s.authenticateOAuthClient(client, rawSecret, err)
+}
+
+// AuthenticateOAuthClientTx revalidates client status and secret after taking
+// the application lock shared with suspension, metadata changes and rotation.
+func (s *Service) AuthenticateOAuthClientTx(ctx context.Context, q *db.Queries, clientID, rawSecret string) (OAuthClient, error) {
+	row, err := q.GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: clientID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+	}
+	if err != nil {
+		return OAuthClient{}, err
+	}
+	client, err := s.OAuthClientByIDTx(ctx, q, row.ID)
+	return s.authenticateOAuthClient(client, rawSecret, err)
+}
+
+func (s *Service) authenticateOAuthClient(client OAuthClient, rawSecret string, err error) (OAuthClient, error) {
 	if err != nil {
 		var publicErr *apierr.Error
-		if errors.As(err, &publicErr) && publicErr.Code != "invalid_request" {
+		if !errors.As(err, &publicErr) || publicErr.Code != "invalid_request" {
 			return OAuthClient{}, err
 		}
 		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
@@ -518,32 +548,27 @@ func (s *Service) CreateAuthorizationCodeTx(ctx context.Context, q *db.Queries, 
 func (s *Service) ConsumeAuthorizationCode(ctx context.Context, codeHash []byte, applicationID, redirectURI string) (AuthorizationCode, error) {
 	var out AuthorizationCode
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		row, err := q.ConsumeAuthorizationCode(ctx, db.ConsumeAuthorizationCodeParams{CodeHash: codeHash, ApplicationID: applicationID, RedirectUri: redirectURI})
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("invalid_grant", "authorization code is invalid or expired")
-			}
-			return err
-		}
-		out = AuthorizationCode{ID: row.ID, ApplicationID: row.ApplicationID, UserID: row.UserID, RedirectURI: row.RedirectUri, Scope: row.Scope, ExpiresAt: row.ExpiresAt.Time}
-		if row.MemberID.Valid {
-			out.MemberID = row.MemberID.String
-		}
-		if row.CodeChallenge.Valid {
-			out.CodeChallenge = row.CodeChallenge.String
-		}
-		if row.CodeChallengeMethod.Valid {
-			out.CodeChallengeMethod = row.CodeChallengeMethod.String
-		}
-		if row.Nonce.Valid {
-			out.Nonce = row.Nonce.String
-		}
-		if row.Resource.Valid {
-			out.Resource = row.Resource.String
-		}
-		return nil
+		var err error
+		out, err = s.ConsumeAuthorizationCodeTx(ctx, q, codeHash, applicationID, redirectURI)
+		return err
 	})
 	return out, err
+}
+
+// ConsumeAuthorizationCodeTx rolls consumption back with the enclosing token
+// exchange if validation, credential creation, signing or audit fails.
+func (s *Service) ConsumeAuthorizationCodeTx(ctx context.Context, q *db.Queries, codeHash []byte, applicationID, redirectURI string) (AuthorizationCode, error) {
+	row, err := q.ConsumeAuthorizationCode(ctx, db.ConsumeAuthorizationCodeParams{CodeHash: codeHash, ApplicationID: applicationID, RedirectUri: redirectURI})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return AuthorizationCode{}, apierr.New("invalid_grant", "authorization code is invalid or expired")
+	}
+	if err != nil {
+		return AuthorizationCode{}, err
+	}
+	return AuthorizationCode{ID: row.ID, ApplicationID: row.ApplicationID, UserID: row.UserID,
+		RedirectURI: row.RedirectUri, Scope: row.Scope, ExpiresAt: row.ExpiresAt.Time,
+		MemberID: row.MemberID.String, CodeChallenge: row.CodeChallenge.String,
+		CodeChallengeMethod: row.CodeChallengeMethod.String, Nonce: row.Nonce.String, Resource: row.Resource.String}, nil
 }
 
 func nullableText(value string) pgtype.Text {

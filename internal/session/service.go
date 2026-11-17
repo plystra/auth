@@ -270,6 +270,15 @@ func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audi
 	return s.createAgentAccess(ctx, memberID, spaceID, audience, "", nil, 0)
 }
 
+// CreateAgentAccessTx includes issuance and its audit in the caller's credential
+// transaction. The caller must not return the token before that transaction commits.
+func (s *Service) CreateAgentAccessTx(ctx context.Context, q *db.Queries, memberID, spaceID, audience string) (Tokens, error) {
+	if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+		return Tokens{}, err
+	}
+	return s.agentAccessTx(ctx, q, memberID, spaceID, audience, "", nil, 0)
+}
+
 // CreateAgentDelegatedAccess issues a token for an existing child Agent. The
 // actor and optional upper expiry bound are carried from the parent token so a
 // delegated token cannot outlive the delegation step that produced it.
