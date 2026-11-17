@@ -419,7 +419,7 @@ func TestGovernanceApprovalRequiresMatchingDetailsAndDigest(t *testing.T) {
 	wrong := sha256.Sum256([]byte("different request"))
 	in := GovernanceInput{
 		AgentMemberID: f.agentID, Permission: "auth.bindings:manage", Operation: "members.update",
-		SpaceID: f.spaceID, TargetMemberID: f.ownerID,
+		SpaceID: f.spaceID, ResourceID: f.ownerID,
 		RequestDigest: wrong[:], RequestDetails: details,
 	}
 	if _, err := f.service.CreateGovernance(context.Background(), in); approvalCode(err) != "VALIDATION_FAILED" {
@@ -432,5 +432,45 @@ func TestGovernanceApprovalRequiresMatchingDetailsAndDigest(t *testing.T) {
 	var count int
 	if err := f.store.Pool.QueryRow(context.Background(), `SELECT count(*) FROM approval_requests`).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("invalid governance approvals persisted = %d, %v", count, err)
+	}
+}
+
+func TestSharedMemberGovernanceApprovalRequiresSpaceTarget(t *testing.T) {
+	f := newApprovalFixture(t)
+	for _, change := range []string{"resource", "group", "member", "policy", "kind", "permission"} {
+		t.Run(change, func(t *testing.T) {
+			details := map[string]any{"operation": "members.create", "space_id": f.spaceID, "name": "Shared member", "type": "human", "binding_policy": "shared", "user_id": ""}
+			in := GovernanceInput{AgentMemberID: f.agentID, Permission: "auth.bindings:manage", Operation: "members.create", SpaceID: f.spaceID, ResourceID: f.spaceID}
+			switch change {
+			case "resource":
+				in.ResourceID = f.ownerID
+			case "group":
+				in.ResourceGroup = "grp_wrong_creation_target"
+			case "member":
+				details["member_id"] = f.ownerID
+			case "policy":
+				details["binding_policy"] = "single"
+			case "kind":
+				details["type"] = "agent"
+			case "permission":
+				in.Permission = "auth.members:manage"
+			}
+			var err error
+			in.RequestDetails, err = json.Marshal(details)
+			if err != nil {
+				t.Fatal(err)
+			}
+			in.RequestDigest, err = stepup.Digest(in.RequestDetails)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.service.CreateGovernance(context.Background(), in); approvalCode(err) != "VALIDATION_FAILED" {
+				t.Fatalf("invalid shared member approval target accepted: err=%v", err)
+			}
+		})
+	}
+	var count int
+	if err := f.store.Pool.QueryRow(context.Background(), `SELECT count(*) FROM approval_requests`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("invalid shared member approvals persisted: count=%d err=%v", count, err)
 	}
 }

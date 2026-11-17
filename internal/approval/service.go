@@ -74,7 +74,7 @@ type GovernanceInput struct {
 	Permission     string
 	Operation      string
 	SpaceID        string
-	TargetMemberID string
+	ResourceID     string
 	ResourceGroup  string
 	RequestDigest  []byte
 	RequestDetails json.RawMessage
@@ -85,16 +85,26 @@ func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Req
 		return Request{}, apierr.New("UNAVAILABLE", "approvals are unavailable")
 	}
 	if in.AgentMemberID == "" || in.Permission == "" || in.Operation == "" || in.SpaceID == "" ||
-		in.TargetMemberID == "" || len(in.RequestDigest) != sha256.Size || !json.Valid(in.RequestDetails) {
+		in.ResourceID == "" || len(in.RequestDigest) != sha256.Size || !json.Valid(in.RequestDetails) {
 		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval request is invalid")
 	}
 	var details struct {
 		Operation string `json:"operation"`
 		SpaceID   string `json:"space_id"`
 		MemberID  string `json:"member_id"`
+		Kind      string `json:"type"`
+		Policy    string `json:"binding_policy"`
 	}
 	if err := json.Unmarshal(in.RequestDetails, &details); err != nil || details.Operation != in.Operation ||
-		details.SpaceID != in.SpaceID || details.MemberID != in.TargetMemberID {
+		details.SpaceID != in.SpaceID {
+		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval details do not match the target")
+	}
+	if in.Operation == "members.create" {
+		if in.Permission != "auth.bindings:manage" || in.ResourceID != in.SpaceID || in.ResourceGroup != "" ||
+			details.MemberID != "" || details.Kind != "human" || details.Policy != "shared" {
+			return Request{}, apierr.New("VALIDATION_FAILED", "shared member approval must target its Space")
+		}
+	} else if details.MemberID != in.ResourceID {
 		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval details do not match the target")
 	}
 	canonicalDigest, err := stepup.Digest(in.RequestDetails)
@@ -120,7 +130,7 @@ func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Req
 		created, err = q.CreateGovernanceApprovalRequest(ctx, db.CreateGovernanceApprovalRequestParams{
 			ID: string(ids.New[ids.ApprovalID]("apr")), AgentMemberID: in.AgentMemberID,
 			ApproverMemberID: approverMemberID, PermissionKey: in.Permission,
-			ResourceID: in.TargetMemberID, ResourceSpaceID: in.SpaceID,
+			ResourceID: in.ResourceID, ResourceSpaceID: in.SpaceID,
 			ResourceGroupID: nullableText(in.ResourceGroup), Operation: nullableText(in.Operation),
 			RequestDetails: append([]byte(nil), in.RequestDetails...),
 			RequestDigest:  append([]byte(nil), in.RequestDigest...),

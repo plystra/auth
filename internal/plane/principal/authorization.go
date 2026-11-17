@@ -33,6 +33,7 @@ type spacePathInput struct {
 
 type createMemberInput struct {
 	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	Body          struct {
 		Name          string `json:"name"`
@@ -209,7 +210,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("audit_logs.list", "GET", "/v1/spaces/{id}/audit-logs", route.Principal, "auth.audit:read", []route.Subject{route.HumanAgent}), a.listAuditLogs)
 	route.Register(api, route.NewSpec("spaces.children", "GET", "/v1/spaces/{id}/children", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listChildren)
 	route.Register(api, route.NewSpec("members.list", "GET", "/v1/spaces/{id}/members", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listMembers)
-	route.Register(api, route.NewSpec("members.create", "POST", "/v1/spaces/{id}/members", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createMember)
+	route.Register(api, route.NewSpec("members.create", "POST", "/v1/spaces/{id}/members", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.bindings:manage"), route.WithAuthoritativeCheck()), a.createMember)
 	route.Register(api, route.NewSpec("members.update", "PATCH", "/v1/spaces/{id}/members/{mid}", route.Principal, "auth.bindings:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.updateMember)
 	route.Register(api, route.NewSpec("members.suspend", "POST", "/v1/spaces/{id}/members/{mid}/suspend", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}), a.suspendMember)
 	route.Register(api, route.NewSpec("members.resume", "POST", "/v1/spaces/{id}/members/{mid}/resume", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}), a.resumeMember)
@@ -313,7 +314,21 @@ func (a *API) createMember(ctx context.Context, in *createMemberInput) (*authori
 	if kind == "" {
 		kind = "human"
 	}
-	member, err := a.Authorization.CreateMember(ctx, actor.ID, in.Body.UserID, in.ID, in.Body.Name, kind, policy)
+	if kind == "user" {
+		kind = "human"
+	}
+	name := strings.TrimSpace(in.Body.Name)
+	if policy == "shared" {
+		if name == "" || len(name) > 128 || kind != "human" {
+			return nil, apierr.New("VALIDATION_FAILED", "member fields are invalid")
+		}
+		request := map[string]any{"operation": "members.create", "space_id": in.ID, "name": name, "type": kind, "binding_policy": policy, "user_id": in.Body.UserID}
+		actor, ctx, err = a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.bindings:manage", "members.create", request)
+		if err != nil {
+			return nil, err
+		}
+	}
+	member, err := a.Authorization.CreateMember(ctx, actor.ID, in.Body.UserID, in.ID, name, kind, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -687,9 +702,14 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	resourceGroup, err := a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
-	if err != nil {
-		return authorization.Member{}, ctx, err
+	// A new member has no position yet; creation targets the existing Space.
+	resourceGroup, resourceID := "", spaceID
+	if targetMemberID != "" {
+		resourceID = targetMemberID
+		resourceGroup, err = a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
+		if err != nil {
+			return authorization.Member{}, ctx, err
+		}
 	}
 	ctx = principalMemberContext(ctx, claims, member.ID)
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
@@ -710,7 +730,7 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 		return authorization.Member{}, ctx, err
 	}
 	if approvalID != "" {
-		return member, authorization.WithGovernanceApproval(ctx, approvalID, operation, targetMemberID, digest), nil
+		return member, authorization.WithGovernanceApproval(ctx, approvalID, operation, resourceID, digest), nil
 	}
 	details, err := json.Marshal(request)
 	if err != nil {
@@ -718,7 +738,7 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	}
 	created, err := a.Approvals.CreateGovernance(ctx, approval.GovernanceInput{
 		AgentMemberID: member.ID, Permission: permission, Operation: operation,
-		SpaceID: spaceID, TargetMemberID: targetMemberID, ResourceGroup: resourceGroup,
+		SpaceID: spaceID, ResourceID: resourceID, ResourceGroup: resourceGroup,
 		RequestDigest: digest, RequestDetails: details,
 	})
 	if err != nil {

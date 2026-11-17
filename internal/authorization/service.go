@@ -820,6 +820,26 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:manage", spaceID); err != nil {
 			return err
 		}
+		if bindingPolicy == "shared" {
+			if proof, ok := ctx.Value(governanceApprovalKey{}).(governanceApproval); ok {
+				// Bind approval to the actual normalized inputs, not a digest supplied by the caller.
+				digest, err := stepup.DigestValue(map[string]any{
+					"operation": "members.create", "space_id": spaceID, "name": name,
+					"type": kind, "binding_policy": bindingPolicy, "user_id": userID,
+				})
+				if err != nil {
+					return err
+				}
+				ctx = WithGovernanceApproval(ctx, proof.id, "members.create", spaceID, digest)
+			}
+			decision, err := s.checkGovernanceTx(ctx, q, CheckRequest{MemberID: actorMemberID, Permission: "auth.bindings:manage", ResourceSpace: spaceID})
+			if err != nil {
+				return err
+			}
+			if decision.Effect != engine.Allow {
+				return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.bindings:manage"}}
+			}
+		}
 		memberRow, err := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: spaceID, Name: name, Type: kind, BindingPolicy: bindingPolicy})
 		if err != nil {
 			return err
