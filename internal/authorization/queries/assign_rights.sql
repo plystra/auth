@@ -64,6 +64,6 @@ SELECT ar.id, ar.holder_member_id, ar.permission_keys, ar.anchor_space_id, ar.an
 FROM assign_rights ar
 LEFT JOIN groups g ON g.id = ar.anchor_group_id
 WHERE ar.revoked_at IS NULL
-  AND (ar.expires_at IS NULL OR ar.expires_at > now())
+  AND (ar.expires_at IS NULL OR ar.expires_at > statement_timestamp())
   AND (ar.anchor_space_id = sqlc.arg(space_id) OR g.space_id = sqlc.arg(space_id))
 ORDER BY ar.created_at, ar.id;

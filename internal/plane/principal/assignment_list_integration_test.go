@@ -378,3 +378,55 @@ func TestAssignmentRightListDomainUsesIdentityAndTokenScope(t *testing.T) {
 		}
 	}
 }
+
+func TestAssignmentRightListHTTPOmitsRightsExpiredWhileWaiting(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"human", "agent"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			f := newGovernanceAuditFixture(t, kind, "group")
+			op := assignmentListOperation(t, f)
+			expiresAt := time.Now().UTC().Add(3 * time.Second)
+			if _, err := f.store.Pool.Exec(ctx, `UPDATE assign_rights SET expires_at = $2 WHERE id = $1`, f.right.ID, expiresAt); err != nil {
+				t.Fatal(err)
+			}
+			barrier, err := f.store.BeginIdempotency(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = barrier.Rollback(context.Background()) })
+			if err := f.store.InTx(barrier.Context(ctx), func(q *db.Queries) error {
+				return member.LockChainsTx(ctx, q, f.actorID)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			completed := make(chan error, 1)
+			var out *httptest.ResponseRecorder
+			go func() {
+				out = memberIdentityRequest(t, ctx, f, op)
+				completed <- fmt.Errorf("HTTP status %d", out.Code)
+			}()
+			waitForGrantIdentityLock(t, ctx, f.store, completed)
+			timer := time.NewTimer(time.Until(expiresAt.Add(25 * time.Millisecond)))
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if err := barrier.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-completed:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if out.Code != http.StatusOK || strings.Contains(out.Body.String(), f.right.ID) || !strings.Contains(out.Body.String(), `"data":[`) {
+				t.Fatalf("list included a right expired during its lock wait: status=%d", out.Code)
+			}
+		})
+	}
+}
