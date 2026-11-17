@@ -15,6 +15,7 @@ import (
 )
 
 func TestGovernanceManagementHTTPRechecksIdentityAfterWaitingForLocks(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"group_create", "group_move", "role_create", "role_update", "right_create", "right_revoke"} {
 		for _, change := range []string{"binding", "expired_binding", "account", "owner", "expires_while_waiting"} {
 			t.Run(name+"/"+change, func(t *testing.T) {

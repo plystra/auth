@@ -140,6 +140,7 @@ func waitForGrantIdentityLock(t *testing.T, ctx context.Context, st *store.Store
 }
 
 func TestGrantManagementHTTPRechecksIdentityAfterWaitingForLocks(t *testing.T) {
+	t.Parallel()
 	for _, name := range grantIdentityOperations {
 		for _, change := range []string{"binding", "expired_binding", "account", "owner", "expires_while_waiting", "expires_after_group_wait"} {
 			if change == "expires_after_group_wait" && (name == "list" || name == "owner_agent_space") {
