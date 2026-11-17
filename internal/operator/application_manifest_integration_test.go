@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -171,6 +172,115 @@ func TestPublicManifestReviewPreservesLiveVersionAndRequiresCustomerReapproval(t
 	}
 }
 
+func TestPublicGroupManifestReviewRequiresCustomerReapproval(t *testing.T) {
+	ctx := context.Background()
+	f := newApplicationSuspensionFixture(t)
+	for i, scope := range []string{"group", "group_tree"} {
+		owner := f.owners[i]
+		if _, err := f.applications.ChangeInstallationStatus(ctx, owner.ID, owner.SpaceID, f.installations[i].ID, "uninstall"); err != nil {
+			t.Fatal(err)
+		}
+		anchor := fmt.Sprintf("grp_public_manifest_%d", i)
+		if _, err := f.store.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ($1, $2, 'Manifest anchor')`, anchor, owner.SpaceID); err != nil {
+			t.Fatal(err)
+		}
+		installed, err := f.applications.Install(ctx, owner.ID, f.application.ID, owner.SpaceID, scope, anchor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.installations[i] = installed
+	}
+	check := func(want ...bool) {
+		t.Helper()
+		for i, installed := range f.installations {
+			for _, authz := range f.authorizers {
+				decision, _, err := authz.Check(ctx, authorization.CheckRequest{MemberID: installed.MemberID, Permission: "auth.agents:create",
+					ResourceSpace: installed.SpaceID, ResourceGroup: installed.AnchorGroupID})
+				if err != nil || (decision.Effect == engine.Allow) != want[i] {
+					t.Fatalf("group customer %d: %s/%s error=%v", i, decision.Effect, decision.Code, err)
+				}
+			}
+		}
+	}
+	check(true, true)
+	_, raw, err := f.applications.CreateManagedKey(ctx, f.owners[0].ID, f.application.ID, application.CreateManagedKeyInput{
+		Name: "group-manifest-key", Grants: []string{"auth.agents:create", "auth.authz:check"}, ExpiresAt: time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.applications.ChangeInstallationStatus(ctx, f.owners[1].ID, f.owners[1].SpaceID, f.installations[1].ID, "suspend"); err != nil {
+		t.Fatal(err)
+	}
+	check(true, false)
+	narrowed := []string{"auth.authz:check"}
+	submitPublicManifest(t, f, narrowed)
+	check(true, false)
+	if _, err := f.store.Pool.Exec(ctx, `CREATE FUNCTION reject_public_group_manifest() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action = 'application.installation.manifest.narrow' THEN RAISE EXCEPTION 'audit unavailable'; END IF; RETURN NEW; END; $$;
+		CREATE TRIGGER reject_public_group_manifest BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_public_group_manifest()`); err != nil {
+		t.Fatal(err)
+	}
+	digest := manifestReviewProof(t, f, "ops.applications.approve", narrowed)
+	if _, err := f.operators.ApprovePublicApplication(ctx, f.operatorToken, f.application.ID, narrowed, digest); err == nil {
+		t.Fatal("group manifest shrink committed without audit")
+	}
+	check(true, false)
+	key, err := f.applications.AuthenticateKey(ctx, raw.Value())
+	if err != nil || !slices.Contains(key.Scopes, "auth.agents:create") {
+		t.Fatal("failed group manifest review changed the key")
+	}
+	if _, err := f.store.Pool.Exec(ctx, `DROP TRIGGER reject_public_group_manifest ON audit_logs`); err != nil {
+		t.Fatal(err)
+	}
+	publishPublicManifest(t, f, narrowed)
+	check(false, false)
+	for _, installed := range f.installations {
+		var approved []byte
+		var permissions, audits int
+		if err := f.store.Pool.QueryRow(ctx, `SELECT approved_permissions FROM application_installations WHERE id = $1`, installed.ID).Scan(&approved); err != nil || string(approved) != `["auth.authz:check"]` {
+			t.Fatalf("group approval not narrowed: %s error=%v", approved, err)
+		}
+		if err := f.store.Pool.QueryRow(ctx, `SELECT count(*) FROM role_permissions rp JOIN application_installations i ON i.role_id = rp.role_id WHERE i.id = $1`, installed.ID).Scan(&permissions); err != nil || permissions != 1 {
+			t.Fatalf("group role not narrowed: count=%d error=%v", permissions, err)
+		}
+		if err := f.store.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'application.installation.manifest.narrow'
+			AND resource_id = $1 AND resource_group_id = $2 AND space_id = $3 AND application_id = $4`, installed.ID, installed.AnchorGroupID, installed.SpaceID, installed.ApplicationID).Scan(&audits); err != nil || audits != 1 {
+			t.Fatalf("group manifest audit lost resource scope: count=%d error=%v", audits, err)
+		}
+	}
+	if _, err := f.applications.ChangeInstallationStatus(ctx, f.owners[1].ID, f.owners[1].SpaceID, f.installations[1].ID, "resume"); err != nil {
+		t.Fatal(err)
+	}
+	check(false, false)
+	expanded := []string{"auth.agents:create", "auth.authz:check"}
+	submitPublicManifest(t, f, expanded)
+	publishPublicManifest(t, f, expanded)
+	check(false, false)
+	if _, err := f.store.Pool.Exec(ctx, `INSERT INTO group_envelopes (group_id) VALUES ($1)`, f.installations[0].AnchorGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(ctx, `INSERT INTO group_envelope_entries (group_id, permission_id, mode)
+		SELECT $1, id, 'delegate' FROM permissions WHERE key <> 'auth.agents:create'`, f.installations[0].AnchorGroupID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = f.applications.ApproveInstallationManifest(ctx, f.owners[0].ID, f.owners[0].SpaceID, f.installations[0].ID)
+	assertOperatorError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
+	check(false, false)
+	if _, err := f.store.Pool.Exec(ctx, `INSERT INTO group_envelope_entries (group_id, permission_id, mode)
+		SELECT $1, id, 'assign' FROM permissions WHERE key = 'auth.agents:create'`, f.installations[0].AnchorGroupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.applications.ApproveInstallationManifest(ctx, f.owners[0].ID, f.owners[0].SpaceID, f.installations[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	check(true, false)
+	key, err = f.applications.AuthenticateKey(ctx, raw.Value())
+	if err != nil || !slices.Equal(key.Scopes, []string{"auth.authz:check"}) {
+		t.Fatal("group customer approval restored a removed key grant")
+	}
+}
+
 func TestPublicManifestReviewRollsBackEveryCustomerAndStepUpOnAuditFailure(t *testing.T) {
 	for _, action := range []string{"ops.application.approve", "application.installation.manifest.narrow"} {
 		t.Run(action, func(t *testing.T) {
@@ -333,7 +443,7 @@ func TestPublicManifestReviewNarrowsSuspendedAndTreeInstallations(t *testing.T) 
 		VALUES ('grt_manifest_tree', $1, '["auth.applications:manage"]'::jsonb, $2, 'space', $1, 'system')`, space.ID, owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	installed, err := f.applications.Install(ctx, owner.ID, f.application.ID, space.ID, "space_tree")
+	installed, err := f.applications.Install(ctx, owner.ID, f.application.ID, space.ID, "space_tree", "")
 	if err != nil {
 		t.Fatal(err)
 	}

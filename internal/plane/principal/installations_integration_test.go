@@ -270,7 +270,7 @@ func TestPrivateSpaceTreeInstallationRejectsUncoveredAndExistingChild(t *testing
 	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = false WHERE holder_member_id = $1`, actorID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree", ""); err == nil {
 		t.Fatal("tree installation ignored descendant assignment coverage")
 	} else {
 		assertPrincipalError(t, err, "AUTHORITY_DELTA_NOT_COVERED")
@@ -293,7 +293,7 @@ func TestPrivateSpaceTreeInstallationRejectsUncoveredAndExistingChild(t *testing
 	if _, err := st.Pool.Exec(ctx, `UPDATE assign_rights SET covers_subtree = true WHERE holder_member_id = $1`, actorID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree"); err == nil {
+	if _, err := apps.Install(ctx, actorID, appID, rootSpace, "space_tree", ""); err == nil {
 		t.Fatal("tree installation overlapped existing child installation")
 	} else {
 		assertPrincipalError(t, err, "CONFLICT")
@@ -318,7 +318,7 @@ func TestPrivateInstallationOverlapIsSerializedAcrossScopes(t *testing.T) {
 	results := make(chan error, 2)
 	go func() {
 		<-start
-		_, installErr := apps.Install(ctx, rootActor, appID, rootSpace, "space_tree")
+		_, installErr := apps.Install(ctx, rootActor, appID, rootSpace, "space_tree", "")
 		results <- installErr
 	}()
 	go func() {

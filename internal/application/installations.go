@@ -26,6 +26,7 @@ type Installation struct {
 	SpaceID             string    `json:"space_id"`
 	MemberID            string    `json:"member_id"`
 	Scope               string    `json:"scope"`
+	AnchorGroupID       string    `json:"anchor_group_id,omitempty"`
 	ApprovedPermissions []string  `json:"approved_permissions"`
 	Status              string    `json:"status"`
 	CreatedAt           time.Time `json:"created_at"`
@@ -34,27 +35,21 @@ type Installation struct {
 // InstallSpace grants the entire current manifest to one new
 // application member. The installer must cover the positive authority delta.
 func (s *Service) InstallSpace(ctx context.Context, actorMemberID, applicationID, spaceID string) (Installation, error) {
-	return s.Install(ctx, actorMemberID, applicationID, spaceID, "space")
+	return s.Install(ctx, actorMemberID, applicationID, spaceID, "space", "")
 }
 
-func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spaceID, scope string) (Installation, error) {
+func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spaceID, scope, anchorGroupID string) (Installation, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return Installation{}, apierr.New("UNAVAILABLE", "application installation is unavailable")
 	}
-	if scope != "space" && scope != "space_tree" {
+	if scope != "space" && scope != "space_tree" && scope != "group" && scope != "group_tree" {
 		return Installation{}, apierr.New("VALIDATION_FAILED", "installation scope is invalid")
+	}
+	if (scope == "group" || scope == "group_tree") != (anchorGroupID != "") {
+		return Installation{}, apierr.New("VALIDATION_FAILED", "anchor_group_id is required only for group and group_tree installations")
 	}
 	var out Installation
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: spaceID,
-		})
-		if err != nil {
-			return err
-		}
-		if decision.Effect != engine.Allow {
-			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
-		}
 		app, err := q.GetApplicationForInstall(ctx, db.GetApplicationForInstallParams{
 			ApplicationID: applicationID, TargetSpaceID: spaceID,
 		})
@@ -63,6 +58,15 @@ func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spa
 		}
 		if err != nil {
 			return err
+		}
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: spaceID, ResourceGroup: anchorGroupID,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 		}
 		overlaps, err := q.HasOverlappingApplicationInstallation(ctx, db.HasOverlappingApplicationInstallationParams{
 			ApplicationID: applicationID, TargetSpaceID: spaceID, NewScope: scope,
@@ -129,17 +133,19 @@ func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spa
 			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceID,
 			RoleID:          pgtype.Text{String: roleID, Valid: true},
 			GranteeMemberID: pgtype.Text{String: memberID, Valid: true},
-			Scope:           scope, AnchorSpaceID: pgtype.Text{String: spaceID, Valid: true},
-			GrantedBy: actorMemberID,
+			Scope:           scope, AnchorSpaceID: pgtype.Text{String: spaceID, Valid: anchorGroupID == ""},
+			AnchorGroupID: pgtype.Text{String: anchorGroupID, Valid: anchorGroupID != ""},
+			GrantedBy:     actorMemberID,
 		}); err != nil {
 			return err
 		}
-		if err := s.Authorization.CoverApplicationInstallationTx(ctx, q, actorMemberID, memberID, spaceID); err != nil {
+		if err := s.Authorization.CoverApplicationManifestTx(ctx, q, actorMemberID, memberID, spaceID, scope, anchorGroupID, manifest); err != nil {
 			return err
 		}
 		row, err := q.CreateApplicationInstallation(ctx, db.CreateApplicationInstallationParams{
 			ID: installationID, ApplicationID: applicationID, SpaceID: spaceID,
 			MemberID: memberID, RoleID: roleID, Scope: scope,
+			AnchorGroupID:       pgtype.Text{String: anchorGroupID, Valid: anchorGroupID != ""},
 			ApprovedPermissions: app.ManifestPermissions, InstalledBy: pgtype.Text{String: actorMemberID, Valid: true},
 		})
 		if err != nil {
@@ -149,11 +155,11 @@ func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spa
 			}
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.install", row.ID, "success"); err != nil {
+		if err := writeInstallationAuditTx(ctx, q, actorMemberID, row.MemberID, applicationID, spaceID, anchorGroupID, row.ID, "application.install"); err != nil {
 			return err
 		}
 		out = Installation{ID: row.ID, ApplicationID: row.ApplicationID, ApplicationName: app.Name,
-			SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope,
+			SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String,
 			ApprovedPermissions: manifest, Status: row.Status, CreatedAt: row.CreatedAt.Time}
 		return nil
 	})
@@ -176,20 +182,20 @@ func (s *Service) ListInstallations(ctx context.Context, spaceID string) ([]Inst
 		}
 		installations = append(installations, Installation{ID: row.ID, ApplicationID: row.ApplicationID,
 			ApplicationName: row.ApplicationName, SpaceID: row.SpaceID, MemberID: row.MemberID,
-			Scope: row.Scope, ApprovedPermissions: permissions, Status: row.Status, CreatedAt: row.CreatedAt.Time})
+			Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String, ApprovedPermissions: permissions, Status: row.Status, CreatedAt: row.CreatedAt.Time})
 	}
 	return installations, nil
 }
 
-func (s *Service) InstallationSpace(ctx context.Context, installationID string) (string, error) {
+func (s *Service) InstallationTarget(ctx context.Context, installationID string) (string, string, error) {
 	if s == nil || s.Store == nil {
-		return "", apierr.New("UNAVAILABLE", "application installations are unavailable")
+		return "", "", apierr.New("UNAVAILABLE", "application installations are unavailable")
 	}
-	spaceID, err := s.Store.Queries().GetInstallationTargetSpace(ctx, db.GetInstallationTargetSpaceParams{InstallationID: installationID})
+	target, err := s.Store.Queries().GetInstallationTarget(ctx, db.GetInstallationTargetParams{InstallationID: installationID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", apierr.New("NOT_FOUND", "installation was not found")
+		return "", "", apierr.New("NOT_FOUND", "installation was not found")
 	}
-	return spaceID, err
+	return target.SpaceID, target.AnchorGroupID.String, err
 }
 
 func (s *Service) ChangeInstallationStatus(ctx context.Context, actorMemberID, spaceID, installationID, action string) (Installation, error) {
@@ -209,6 +215,16 @@ func (s *Service) ChangeInstallationStatus(ctx context.Context, actorMemberID, s
 	}
 	var out Installation
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		identity, err := q.GetInstallationApplicationIdentity(ctx, db.GetInstallationApplicationIdentityParams{InstallationID: installationID})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && identity.SpaceID != spaceID) {
+			return apierr.New("NOT_FOUND", "installation was not found in this Space")
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := q.LockApplicationForUpdate(ctx, db.LockApplicationForUpdateParams{ApplicationID: identity.ApplicationID}); err != nil {
+			return err
+		}
 		row, err := q.LockInstallationForLifecycle(ctx, db.LockInstallationForLifecycleParams{
 			InstallationID: installationID, SpaceID: spaceID,
 		})
@@ -218,8 +234,8 @@ func (s *Service) ChangeInstallationStatus(ctx context.Context, actorMemberID, s
 		if err != nil {
 			return err
 		}
-		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID, ResourceGroup: row.AnchorGroupID.String,
 		})
 		if err != nil {
 			return err
@@ -281,7 +297,7 @@ func (s *Service) ChangeInstallationStatus(ctx context.Context, actorMemberID, s
 				return err
 			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.installation."+action, installationID, "success"); err != nil {
+		if err := writeInstallationAuditTx(ctx, q, actorMemberID, row.MemberID, row.ApplicationID, row.SpaceID, row.AnchorGroupID.String, installationID, "application.installation."+action); err != nil {
 			return err
 		}
 		return installationResult(row, desiredStatus, &out)
@@ -296,8 +312,17 @@ func installationResult(row db.LockInstallationForLifecycleRow, status string, o
 	}
 	*out = Installation{
 		ID: row.ID, ApplicationID: row.ApplicationID, ApplicationName: row.ApplicationName,
-		SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope,
+		SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String,
 		ApprovedPermissions: permissions, Status: status, CreatedAt: row.CreatedAt.Time,
 	}
 	return nil
+}
+
+func writeInstallationAuditTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, applicationID, spaceID, groupID, installationID, action string) error {
+	return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
+		Action: action, Outcome: "success",
+		Resource: audit.Resource{Type: "installation", ID: installationID, SpaceID: spaceID, GroupID: groupID},
+		Metadata: map[string]string{"installation_member_id": memberID},
+	})
 }

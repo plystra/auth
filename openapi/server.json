@@ -369,6 +369,9 @@
       "Installation": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
           "application_id": {
             "type": "string"
           },

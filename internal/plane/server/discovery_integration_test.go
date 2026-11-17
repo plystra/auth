@@ -80,7 +80,7 @@ func TestServerInstallationDiscoveryFiltersBeforePaginationAndRechecksScope(t *t
 		if customerSpaceID == "" {
 			customerSpaceID, scope = space.ID, "space_tree"
 		}
-		installed, err := apps.Install(ctx, owner.ID, "app_server_test", space.ID, scope)
+		installed, err := apps.Install(ctx, owner.ID, "app_server_test", space.ID, scope, "")
 		if err != nil {
 			t.Fatal(err)
 		}

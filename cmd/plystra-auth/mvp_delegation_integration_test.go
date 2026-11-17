@@ -96,7 +96,7 @@ func mvpToken(t *testing.T, handler http.Handler, form url.Values) *httptest.Res
 	return response
 }
 
-func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenario) {
+func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenario) string {
 	t.Helper()
 	principal := func(method, path, token string, body any) *httptest.ResponseRecorder {
 		return mvpJSON(t, scenario.Principal, method, path, token, body)
@@ -258,4 +258,5 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 	if len(deniedDecisions) != 0 {
 		t.Fatal("public audit could not correlate every revoked check and explanation")
 	}
+	return root.ID
 }

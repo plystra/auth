@@ -988,13 +988,14 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			}
 		}
 	})
+	var standardRootID string
 	t.Run("NativeAgentDelegationAndRevocation", func(t *testing.T) {
 		businessDatabase, err := harness.CloneEmpty(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = businessDatabase.Close(context.Background()) })
-		runNativeAgentDelegationScenario(t, mvpDelegationScenario{
+		standardRootID = runNativeAgentDelegationScenario(t, mvpDelegationScenario{
 			Principal: principalHandler, Server: serverHandler,
 			Observer: newMVPObserver(t, database.AppURL, signer, key, sessions.Settings), Signer: signer,
 			UserToken: customer.token, UserMemberID: customer.memberID, SpaceID: customer.spaceID,
@@ -1002,6 +1003,78 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			MFACode:             func() string { return nextTOTP(customerFactorResult.Data.Secret) },
 			BusinessDatabaseURL: businessDatabase.URL,
 		})
+	})
+	t.Run("GroupScopedApplicationInstallation", func(t *testing.T) {
+		spacePath := "/v1/spaces/" + customer.spaceID
+		if standardRootID == "" {
+			standardRootID = mvpData[authorization.Group](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/groups", customer.token,
+				map[string]string{"name": "Projects"})).ID
+		}
+		root := mvpData[authorization.Group](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/groups", customer.token,
+			map[string]string{"name": "Installed project", "parent_group_id": standardRootID}))
+		child := mvpData[authorization.Group](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/groups", customer.token,
+			map[string]string{"name": "Installed project child", "parent_group_id": root.ID}))
+		outside := mvpData[authorization.Group](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/groups", customer.token,
+			map[string]string{"name": "Uninstalled project", "parent_group_id": standardRootID}))
+		observer := newMVPObserver(t, database.AppURL, signer, key, sessions.Settings)
+		check := func(groupID, want string) {
+			t.Helper()
+			body := map[string]any{"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",
+				"resource": map[string]string{"type": "invoice", "id": "inv_group_install", "space_id": customer.spaceID, "group_id": groupID}}
+			for _, surface := range []http.Handler{serverHandler, observer} {
+				response := mvpJSON(t, surface, http.MethodPost, "/server/v1/authz/check", keyResult.Data.Secret, body)
+				if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), want) {
+					t.Fatalf("group installation with OAuth Agent: status=%d want=%s", response.Code, want)
+				}
+			}
+		}
+		install := func(scope, anchor string) application.Installation {
+			t.Helper()
+			request := map[string]any{"space_id": customer.spaceID, "application_id": appResult.Data.ID, "scope": scope}
+			body := map[string]any{"application_id": appResult.Data.ID, "scope": scope}
+			if anchor != "" {
+				request["anchor_group_id"], body["anchor_group_id"] = anchor, anchor
+			}
+			mvpData[json.RawMessage](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/step-up", customer.token,
+				map[string]any{"mfa_code": nextTOTP(customerFactorResult.Data.Secret), "operation": "installations.create", "request": request}))
+			return mvpData[application.Installation](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/installations", customer.token, body))
+		}
+		mvpData[application.Installation](t, mvpJSON(t, principalHandler, http.MethodPost,
+			spacePath+"/installations/"+installationResult.Data.ID+"/uninstall", customer.token, nil))
+		check(root.ID, "APPLICATION_NOT_INSTALLED")
+		groupInstallation := install("group_tree", root.ID)
+		if groupInstallation.AnchorGroupID != root.ID || groupInstallation.Scope != "group_tree" {
+			t.Fatal("public installation omitted the approved group boundary")
+		}
+		check(root.ID, `"decision":"allow"`)
+		check(child.ID, `"decision":"allow"`)
+		check(outside.ID, "SCOPE_OUT_OF_BOUNDS")
+		check("", "SCOPE_OUT_OF_BOUNDS")
+		items := mvpData[[]application.Installation](t, mvpJSON(t, serverHandler, http.MethodGet,
+			"/server/v1/installations", keyResult.Data.Secret, nil))
+		if len(items) != 1 || items[0].ID != groupInstallation.ID || items[0].AnchorGroupID != root.ID {
+			t.Fatal("application discovery did not preserve its resource boundary")
+		}
+		start := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil)
+		started := httptest.NewRecorder()
+		principalHandler.ServeHTTP(started, start)
+		var authorizationRequest struct {
+			RequestID string `json:"request_id"`
+		}
+		if started.Code != http.StatusOK || json.Unmarshal(started.Body.Bytes(), &authorizationRequest) != nil || authorizationRequest.RequestID == "" {
+			t.Fatal("group installation could not start OAuth authorization")
+		}
+		if response := consent(customer.token, authorizationRequest.RequestID, customer.memberID); response.Code != http.StatusOK {
+			t.Fatalf("group installation OAuth consent failed: status=%d", response.Code)
+		}
+		for _, step := range []struct{ action, want string }{{"suspend", "APPLICATION_NOT_INSTALLED"}, {"resume", `"decision":"allow"`}, {"uninstall", "APPLICATION_NOT_INSTALLED"}} {
+			mvpData[application.Installation](t, mvpJSON(t, principalHandler, http.MethodPost,
+				spacePath+"/installations/"+groupInstallation.ID+"/"+step.action, customer.token, nil))
+			check(root.ID, step.want)
+		}
+		restored := install("space", "")
+		installationResult.Data.ID = restored.ID
+		check(outside.ID, `"decision":"allow"`)
 	})
 	defaultSpaceBody, err := json.Marshal(map[string]any{
 		"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",

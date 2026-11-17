@@ -1662,13 +1662,19 @@
       "InstallApplicationInputBody": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "maxLength": 128,
+            "type": "string"
+          },
           "application_id": {
             "type": "string"
           },
           "scope": {
             "enum": [
               "space",
-              "space_tree"
+              "space_tree",
+              "group",
+              "group_tree"
             ],
             "type": "string"
           }
@@ -1681,6 +1687,9 @@
       "Installation": {
         "additionalProperties": false,
         "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
           "application_id": {
             "type": "string"
           },

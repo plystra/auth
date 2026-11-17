@@ -42,7 +42,8 @@ type installApplicationInput struct {
 	ID            string `path:"id"`
 	Body          struct {
 		ApplicationID string `json:"application_id"`
-		Scope         string `json:"scope,omitempty" enum:"space,space_tree"`
+		Scope         string `json:"scope,omitempty" enum:"space,space_tree,group,group_tree"`
+		AnchorGroupID string `json:"anchor_group_id,omitempty" maxLength:"128"`
 	}
 }
 
@@ -246,20 +247,27 @@ func (a *API) installApplication(ctx context.Context, in *installApplicationInpu
 	if scope == "" {
 		scope = "space"
 	}
-	if scope != "space" && scope != "space_tree" {
+	if scope != "space" && scope != "space_tree" && scope != "group" && scope != "group_tree" {
 		return nil, apierr.New("VALIDATION_FAILED", "installation scope is invalid")
 	}
-	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
+	if (scope == "group" || scope == "group_tree") != (in.Body.AnchorGroupID != "") {
+		return nil, apierr.New("VALIDATION_FAILED", "anchor_group_id is required only for group and group_tree installations")
+	}
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, in.Body.AnchorGroupID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
-	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "installations.create", map[string]any{
+	stepUpRequest := map[string]any{
 		"space_id": in.ID, "application_id": in.Body.ApplicationID, "scope": scope,
-	})
+	}
+	if in.Body.AnchorGroupID != "" {
+		stepUpRequest["anchor_group_id"] = in.Body.AnchorGroupID
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "installations.create", stepUpRequest)
 	if err != nil {
 		return nil, err
 	}
-	installed, err := a.Applications.Install(ctx, actor.ID, in.Body.ApplicationID, in.ID, scope)
+	installed, err := a.Applications.Install(ctx, actor.ID, in.Body.ApplicationID, in.ID, scope, in.Body.AnchorGroupID)
 	if err != nil {
 		return nil, err
 	}
@@ -275,14 +283,14 @@ func (a *API) approveInstallation(ctx context.Context, in *installationLifecycle
 	if _, err := a.authenticatePrincipal(ctx, in.Authorization); err != nil {
 		return nil, err
 	}
-	spaceID, err := a.Applications.InstallationSpace(ctx, in.InstallationID)
+	spaceID, groupID, err := a.Applications.InstallationTarget(ctx, in.InstallationID)
 	if err != nil {
 		return nil, err
 	}
 	if spaceID != in.ID {
 		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
 	}
-	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, spaceID, groupID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}
@@ -314,14 +322,14 @@ func (a *API) changeInstallationStatus(ctx context.Context, in *installationLife
 	if _, err := a.authenticatePrincipal(ctx, in.Authorization); err != nil {
 		return nil, err
 	}
-	spaceID, err := a.Applications.InstallationSpace(ctx, in.InstallationID)
+	spaceID, groupID, err := a.Applications.InstallationTarget(ctx, in.InstallationID)
 	if err != nil {
 		return nil, err
 	}
 	if spaceID != in.ID {
 		return nil, apierr.New("NOT_FOUND", "installation was not found in this Space")
 	}
-	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, spaceID, "auth.applications:manage")
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, spaceID, groupID, "auth.applications:manage")
 	if err != nil {
 		return nil, err
 	}

@@ -216,7 +216,7 @@ func NarrowManifestAuthorityTx(ctx context.Context, q *db.Queries, applicationID
 		event := actor
 		event.Action, event.Outcome = "application.installation.manifest.narrow", "success"
 		event.MemberID, event.ApplicationID = installation.MemberID, applicationID
-		event.Resource = audit.Resource{Type: "installation", ID: installation.ID, SpaceID: installation.SpaceID}
+		event.Resource = audit.Resource{Type: "installation", ID: installation.ID, SpaceID: installation.SpaceID, GroupID: installation.AnchorGroupID.String}
 		if err := audit.WriteSecurityEvent(ctx, q, event); err != nil {
 			return err
 		}
@@ -248,8 +248,8 @@ func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID
 		if err != nil {
 			return err
 		}
-		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID, ResourceGroup: row.AnchorGroupID.String,
 		})
 		if err != nil {
 			return err
@@ -282,6 +282,7 @@ func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID
 			return installationResult(row, row.Status, &out)
 		}
 		permissionIDs := make([]string, 0, len(manifest))
+		added := make([]string, 0, len(manifest))
 		for _, key := range manifest {
 			if slices.Contains(approved, key) {
 				continue
@@ -301,9 +302,15 @@ func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID
 				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The application cannot receive a manifest permission.", Details: map[string]string{"permission": key}}
 			}
 			permissionIDs = append(permissionIDs, permission.ID)
+			added = append(added, key)
 		}
-		if err := s.Authorization.ApproveApplicationRoleTx(ctx, q, actorMemberID, row.MemberID, row.SpaceID, row.RoleID, permissionIDs); err != nil {
+		if err := s.Authorization.CoverApplicationManifestTx(ctx, q, actorMemberID, row.MemberID, row.SpaceID, row.Scope, row.AnchorGroupID.String, added); err != nil {
 			return err
+		}
+		for _, permissionID := range permissionIDs {
+			if err := q.GrantRolePermission(ctx, db.GrantRolePermissionParams{RoleID: row.RoleID, PermissionID: permissionID}); err != nil {
+				return err
+			}
 		}
 		updated, err := q.SetInstallationApprovedPermissions(ctx, db.SetInstallationApprovedPermissionsParams{
 			InstallationID: installationID, ApprovedPermissions: app.ManifestPermissions,
@@ -319,7 +326,7 @@ func (s *Service) ApproveInstallationManifest(ctx context.Context, actorMemberID
 				return err
 			}
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.installation.approve", installationID, "success"); err != nil {
+		if err := writeInstallationAuditTx(ctx, q, actorMemberID, row.MemberID, row.ApplicationID, row.SpaceID, row.AnchorGroupID.String, installationID, "application.installation.approve"); err != nil {
 			return err
 		}
 		row.ApprovedPermissions = app.ManifestPermissions

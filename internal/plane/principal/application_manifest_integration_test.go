@@ -410,7 +410,7 @@ func TestManifestShrinkSerializesConcurrentKeyCreation(t *testing.T) {
 func TestSpaceTreeManifestApprovalRequiresSubtreeAssignmentRight(t *testing.T) {
 	ctx := context.Background()
 	st, authz, apps, actorID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check"})
-	installed, err := apps.Install(ctx, actorID, appID, spaceID, "space_tree")
+	installed, err := apps.Install(ctx, actorID, appID, spaceID, "space_tree", "")
 	if err != nil {
 		t.Fatal(err)
 	}

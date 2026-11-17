@@ -64,7 +64,7 @@ func (s *Service) ListKeyInstallations(ctx context.Context, key Key, cursor stri
 		}
 		page.Installations = append(page.Installations, Installation{
 			ID: row.ID, ApplicationID: row.ApplicationID, ApplicationName: row.ApplicationName,
-			SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope,
+			SpaceID: row.SpaceID, MemberID: row.MemberID, Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String,
 			ApprovedPermissions: permissions, Status: row.Status, CreatedAt: row.CreatedAt.Time,
 		})
 	}

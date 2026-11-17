@@ -369,9 +369,9 @@ func (s *Service) AuthenticateKeyTx(ctx context.Context, q *db.Queries, raw stri
 		Scopes: scopes, RestrictTo: restrictions, AllowedIPCIDRs: allowedIPCIDRs, AllowSubjectAssertion: row.AllowSubjectAssertion}, nil
 }
 
-// ResolveKeyInstallation finds the application member whose current authority
-// covers the requested Space. A key restriction is checked before the
-// installation so a restricted key cannot reveal another installation.
+// ResolveKeyInstallation finds the installation present in the requested Space.
+// Its member's authority must still be checked against the actual resource node.
+// A key restriction is checked first so a key cannot reveal other installations.
 func (s *Service) ResolveKeyInstallation(ctx context.Context, key Key, targetSpaceID string) (string, string, error) {
 	if s == nil || s.Store == nil {
 		return "", "", apierr.New("UNAVAILABLE", "application installations are unavailable")

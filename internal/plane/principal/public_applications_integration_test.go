@@ -128,7 +128,7 @@ func TestPublicApplicationNeedsApprovalBeforeCrossSpaceInstallation(t *testing.T
 		t.Fatal(err)
 	}
 	seedTestInlineGrant(t, st, treeSpace.ID, treeActor.ID, treeActor.ID, "auth.applications:manage")
-	if _, err := apps.Install(ctx, treeActor.ID, registered.ID, treeSpace.ID, "space_tree"); err != nil {
+	if _, err := apps.Install(ctx, treeActor.ID, registered.ID, treeSpace.ID, "space_tree", ""); err != nil {
 		t.Fatalf("approved public tree installation: %v", err)
 	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id)

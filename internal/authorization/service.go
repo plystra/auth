@@ -1813,6 +1813,18 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 }
 
+// CheckNodeTx stabilizes the actor chain and target ancestry before a mutation.
+// The decision uses the same facts and engine as CheckTx.
+func (s *Service) CheckNodeTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
+	if err := lockAuthorizationMembersTx(ctx, q, in.MemberID); err != nil {
+		return engine.Decision{}, err
+	}
+	if err := lockAuthorizationNodesTx(ctx, q, in.ResourceSpace, in.ResourceGroup); err != nil {
+		return engine.Decision{}, err
+	}
+	return s.CheckTx(ctx, q, in)
+}
+
 func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, targetMemberID string, extraSpaceIDs ...string) error {
 	if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
 		return err

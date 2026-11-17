@@ -232,10 +232,10 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 
 const createApplicationInstallation = `-- name: CreateApplicationInstallation :one
 INSERT INTO application_installations (
-    id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by
+    id, application_id, space_id, member_id, role_id, scope, anchor_group_id, approved_permissions, installed_by
 ) VALUES (
     $1, $2, $3, $4,
-    $5, $6, $7, $8
+    $5, $6, $7, $8, $9
 )
 RETURNING id, application_id, space_id, member_id, role_id, scope, anchor_group_id,
           approved_permissions, status, installed_by, created_at
@@ -248,6 +248,7 @@ type CreateApplicationInstallationParams struct {
 	MemberID            string      `json:"member_id"`
 	RoleID              string      `json:"role_id"`
 	Scope               string      `json:"scope"`
+	AnchorGroupID       pgtype.Text `json:"anchor_group_id"`
 	ApprovedPermissions []byte      `json:"approved_permissions"`
 	InstalledBy         pgtype.Text `json:"installed_by"`
 }
@@ -260,6 +261,7 @@ func (q *Queries) CreateApplicationInstallation(ctx context.Context, arg CreateA
 		arg.MemberID,
 		arg.RoleID,
 		arg.Scope,
+		arg.AnchorGroupID,
 		arg.ApprovedPermissions,
 		arg.InstalledBy,
 	)
@@ -465,7 +467,7 @@ JOIN applications a ON a.id = i.application_id
 JOIN members m ON m.id = i.member_id
 WHERE i.application_id = $1
   AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
-  AND ((i.scope = 'space' AND i.space_id = $2) OR i.scope = 'space_tree')
+  AND (i.space_id = $2 OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1
 `
@@ -656,19 +658,24 @@ func (q *Queries) GetInstallationApplicationIdentity(ctx context.Context, arg Ge
 	return i, err
 }
 
-const getInstallationTargetSpace = `-- name: GetInstallationTargetSpace :one
-SELECT space_id FROM application_installations WHERE id = $1
+const getInstallationTarget = `-- name: GetInstallationTarget :one
+SELECT space_id, anchor_group_id FROM application_installations WHERE id = $1
 `
 
-type GetInstallationTargetSpaceParams struct {
+type GetInstallationTargetParams struct {
 	InstallationID string `json:"installation_id"`
 }
 
-func (q *Queries) GetInstallationTargetSpace(ctx context.Context, arg GetInstallationTargetSpaceParams) (string, error) {
-	row := q.db.QueryRow(ctx, getInstallationTargetSpace, arg.InstallationID)
-	var space_id string
-	err := row.Scan(&space_id)
-	return space_id, err
+type GetInstallationTargetRow struct {
+	SpaceID       string      `json:"space_id"`
+	AnchorGroupID pgtype.Text `json:"anchor_group_id"`
+}
+
+func (q *Queries) GetInstallationTarget(ctx context.Context, arg GetInstallationTargetParams) (GetInstallationTargetRow, error) {
+	row := q.db.QueryRow(ctx, getInstallationTarget, arg.InstallationID)
+	var i GetInstallationTargetRow
+	err := row.Scan(&i.SpaceID, &i.AnchorGroupID)
+	return i, err
 }
 
 const getOAuthClientByID = `-- name: GetOAuthClientByID :one
@@ -904,7 +911,7 @@ WITH RECURSIVE allowed_spaces AS (
     FROM spaces child JOIN allowed_spaces parent ON child.parent_id = parent.id
     WHERE child.status = 'active' AND parent.include_descendants
 )
-SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope,
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope, i.anchor_group_id,
        i.approved_permissions, i.status, i.created_at, a.name AS application_name
 FROM application_installations i
 JOIN applications a ON a.id = i.application_id
@@ -932,6 +939,7 @@ type ListKeyInstallationsRow struct {
 	SpaceID             string             `json:"space_id"`
 	MemberID            string             `json:"member_id"`
 	Scope               string             `json:"scope"`
+	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
 	ApprovedPermissions []byte             `json:"approved_permissions"`
 	Status              string             `json:"status"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
@@ -958,6 +966,7 @@ func (q *Queries) ListKeyInstallations(ctx context.Context, arg ListKeyInstallat
 			&i.SpaceID,
 			&i.MemberID,
 			&i.Scope,
+			&i.AnchorGroupID,
 			&i.ApprovedPermissions,
 			&i.Status,
 			&i.CreatedAt,
@@ -1033,7 +1042,7 @@ func (q *Queries) ListManagedAPIKeys(ctx context.Context, arg ListManagedAPIKeys
 }
 
 const listManifestInstallationMembers = `-- name: ListManifestInstallationMembers :many
-SELECT id, member_id, space_id FROM application_installations
+SELECT id, member_id, space_id, anchor_group_id FROM application_installations
 WHERE application_id = $1 AND status <> 'uninstalled'
 ORDER BY space_id, id
 `
@@ -1043,9 +1052,10 @@ type ListManifestInstallationMembersParams struct {
 }
 
 type ListManifestInstallationMembersRow struct {
-	ID       string `json:"id"`
-	MemberID string `json:"member_id"`
-	SpaceID  string `json:"space_id"`
+	ID            string      `json:"id"`
+	MemberID      string      `json:"member_id"`
+	SpaceID       string      `json:"space_id"`
+	AnchorGroupID pgtype.Text `json:"anchor_group_id"`
 }
 
 func (q *Queries) ListManifestInstallationMembers(ctx context.Context, arg ListManifestInstallationMembersParams) ([]ListManifestInstallationMembersRow, error) {
@@ -1057,7 +1067,12 @@ func (q *Queries) ListManifestInstallationMembers(ctx context.Context, arg ListM
 	items := []ListManifestInstallationMembersRow{}
 	for rows.Next() {
 		var i ListManifestInstallationMembersRow
-		if err := rows.Scan(&i.ID, &i.MemberID, &i.SpaceID); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.MemberID,
+			&i.SpaceID,
+			&i.AnchorGroupID,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1194,7 +1209,7 @@ JOIN applications a ON a.id = i.application_id
 JOIN members m ON m.id = i.member_id
 WHERE i.application_id = $1
   AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
-  AND ((i.scope = 'space' AND i.space_id = $2) OR i.scope = 'space_tree')
+  AND (i.space_id = $2 OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1
 FOR SHARE OF i, m, a
@@ -1272,7 +1287,7 @@ func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicat
 
 const lockInstallationForLifecycle = `-- name: LockInstallationForLifecycle :one
 SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
-       i.approved_permissions, i.status, i.created_at,
+       i.anchor_group_id, i.approved_permissions, i.status, i.created_at,
        a.name AS application_name, a.status AS application_status,
        m.status AS member_status
 FROM application_installations i
@@ -1294,6 +1309,7 @@ type LockInstallationForLifecycleRow struct {
 	MemberID            string             `json:"member_id"`
 	RoleID              string             `json:"role_id"`
 	Scope               string             `json:"scope"`
+	AnchorGroupID       pgtype.Text        `json:"anchor_group_id"`
 	ApprovedPermissions []byte             `json:"approved_permissions"`
 	Status              string             `json:"status"`
 	CreatedAt           pgtype.Timestamptz `json:"created_at"`
@@ -1312,6 +1328,7 @@ func (q *Queries) LockInstallationForLifecycle(ctx context.Context, arg LockInst
 		&i.MemberID,
 		&i.RoleID,
 		&i.Scope,
+		&i.AnchorGroupID,
 		&i.ApprovedPermissions,
 		&i.Status,
 		&i.CreatedAt,

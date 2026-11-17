@@ -65,28 +65,32 @@ func (s *Service) CoverApplicationInstallationTx(ctx context.Context, q *db.Quer
 	return s.coverPositiveGrantDeltaForActorTx(ctx, q, change, actorMemberID, memberID, "application", spaceID, true, map[string]struct{}{})
 }
 
-// ApproveApplicationRoleTx adds the newly approved catalog permissions to an
-// installation role and covers only the authority gained by that change.
-func (s *Service) ApproveApplicationRoleTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, spaceID, roleID string, permissionIDs []string) error {
-	before, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
-	if err != nil {
-		return err
-	}
-	for _, permissionID := range permissionIDs {
-		if err := q.GrantRolePermission(ctx, db.GrantRolePermissionParams{RoleID: roleID, PermissionID: permissionID}); err != nil {
-			return err
-		}
-	}
-	after, err := s.grantAuthoritySnapshotTx(ctx, q, memberID, spaceID, "application")
-	if err != nil {
-		return err
-	}
-	change, err := delta.Evaluate(before, after, delta.Graph{})
-	if err != nil {
-		return err
-	}
-	if len(change.Permissions) == 0 && len(change.Rights) == 0 {
+// CoverApplicationManifestTx checks every newly approved manifest permission,
+// including those excluded by an envelope. Effective snapshots alone would
+// silently omit those entries and approve an incomplete manifest. The recipient
+// remains a Space member; an anchor does not relocate it into a group.
+func (s *Service) CoverApplicationManifestTx(ctx context.Context, q *db.Queries, actorMemberID, memberID, spaceID, scope, anchorGroupID string, permissions []string) error {
+	if len(permissions) == 0 {
 		return nil
+	}
+	anchor := spaceID
+	if anchorGroupID != "" {
+		anchor = anchorGroupID
+	}
+	position, err := memberPositionTx(ctx, q, memberID, spaceID)
+	if err != nil {
+		return err
+	}
+	after := delta.Snapshot{Permissions: make([]delta.Permission, 0, len(permissions))}
+	for _, key := range permissions {
+		after.Permissions = append(after.Permissions, delta.Permission{
+			Subject: memberID, Position: position,
+			Key: key, Scope: delta.Scope{Kind: delta.ScopeKind(scope), Anchor: anchor},
+		})
+	}
+	change, err := delta.Evaluate(delta.Snapshot{}, after, delta.Graph{})
+	if err != nil {
+		return err
 	}
 	if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, memberID, spaceID); err != nil {
 		return err

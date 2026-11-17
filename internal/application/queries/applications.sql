@@ -83,7 +83,7 @@ WHERE i.application_id = sqlc.arg(application_id) AND i.status <> 'uninstalled'
   AND NOT (sqlc.arg(manifest_permissions)::jsonb ? p.key);
 
 -- name: ListManifestInstallationMembers :many
-SELECT id, member_id, space_id FROM application_installations
+SELECT id, member_id, space_id, anchor_group_id FROM application_installations
 WHERE application_id = sqlc.arg(application_id) AND status <> 'uninstalled'
 ORDER BY space_id, id;
 
@@ -150,10 +150,10 @@ SELECT EXISTS (
 
 -- name: CreateApplicationInstallation :one
 INSERT INTO application_installations (
-    id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by
+    id, application_id, space_id, member_id, role_id, scope, anchor_group_id, approved_permissions, installed_by
 ) VALUES (
     sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(space_id), sqlc.arg(member_id),
-    sqlc.arg(role_id), sqlc.arg(scope), sqlc.arg(approved_permissions), sqlc.arg(installed_by)
+    sqlc.arg(role_id), sqlc.arg(scope), sqlc.narg(anchor_group_id), sqlc.arg(approved_permissions), sqlc.arg(installed_by)
 )
 RETURNING id, application_id, space_id, member_id, role_id, scope, anchor_group_id,
           approved_permissions, status, installed_by, created_at;
@@ -167,8 +167,8 @@ JOIN applications a ON a.id = i.application_id
 WHERE i.space_id = sqlc.arg(space_id) AND i.status <> 'uninstalled'
 ORDER BY i.created_at, i.id;
 
--- name: GetInstallationTargetSpace :one
-SELECT space_id FROM application_installations WHERE id = sqlc.arg(installation_id);
+-- name: GetInstallationTarget :one
+SELECT space_id, anchor_group_id FROM application_installations WHERE id = sqlc.arg(installation_id);
 
 -- name: ListKeyInstallations :many
 WITH RECURSIVE allowed_spaces AS (
@@ -180,7 +180,7 @@ WITH RECURSIVE allowed_spaces AS (
     FROM spaces child JOIN allowed_spaces parent ON child.parent_id = parent.id
     WHERE child.status = 'active' AND parent.include_descendants
 )
-SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope,
+SELECT i.id, i.application_id, i.space_id, i.member_id, i.scope, i.anchor_group_id,
        i.approved_permissions, i.status, i.created_at, a.name AS application_name
 FROM application_installations i
 JOIN applications a ON a.id = i.application_id
@@ -196,7 +196,7 @@ LIMIT sqlc.arg(limit_count);
 
 -- name: LockInstallationForLifecycle :one
 SELECT i.id, i.application_id, i.space_id, i.member_id, i.role_id, i.scope,
-       i.approved_permissions, i.status, i.created_at,
+       i.anchor_group_id, i.approved_permissions, i.status, i.created_at,
        a.name AS application_name, a.status AS application_status,
        m.status AS member_status
 FROM application_installations i
@@ -233,7 +233,7 @@ JOIN applications a ON a.id = i.application_id
 JOIN members m ON m.id = i.member_id
 WHERE i.application_id = sqlc.arg(application_id)
   AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
-  AND ((i.scope = 'space' AND i.space_id = sqlc.arg(target_space_id)) OR i.scope = 'space_tree')
+  AND (i.space_id = sqlc.arg(target_space_id) OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1;
 
@@ -253,7 +253,7 @@ JOIN applications a ON a.id = i.application_id
 JOIN members m ON m.id = i.member_id
 WHERE i.application_id = sqlc.arg(application_id)
   AND i.status = 'active' AND a.status = 'active' AND m.status = 'active'
-  AND ((i.scope = 'space' AND i.space_id = sqlc.arg(target_space_id)) OR i.scope = 'space_tree')
+  AND (i.space_id = sqlc.arg(target_space_id) OR i.scope = 'space_tree')
 ORDER BY ancestors.depth
 LIMIT 1
 FOR SHARE OF i, m, a;

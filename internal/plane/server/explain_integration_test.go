@@ -25,7 +25,7 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 		{"envelope", "ENVELOPE_EXCLUDED", "envelope"},
 		{"scope", "SCOPE_OUT_OF_BOUNDS", "scope"},
 		{"closest_scope", "SCOPE_OUT_OF_BOUNDS", "scope"},
-		{"resource_group", "RESOURCE_GROUP_NOT_FOUND", "resource_group"},
+		{"resource_group", "RESOURCE_GROUP_NOT_FOUND", "application.resource_group"},
 		{"key_scope", "KEY_SCOPE_EXCLUDED", "application"},
 		{"installation", "APPLICATION_NOT_INSTALLED", "application"},
 		{"owner_excluded", "OWNER_ENVELOPE_EXCLUDED", "owner_envelope"},
@@ -163,6 +163,9 @@ func TestExplainHTTPReportsEvaluatedStagesWithoutPrivateFacts(t *testing.T) {
 				}
 				if scenario.code == "PRINCIPAL_KIND_NOT_ALLOWED" && slices.ContainsFunc(explain.Trace, func(step ExplainStep) bool { return step.Step == "permission" }) {
 					t.Fatal("catalog principal-kind restriction was checked after grant matching")
+				}
+				if scenario.name == "resource_group" && slices.ContainsFunc(explain.Trace, func(step ExplainStep) bool { return !strings.HasPrefix(step.Step, "application.") }) {
+					t.Fatal("missing resource group proceeded beyond installation authorization")
 				}
 			} else {
 				for _, name := range []string{"application", "catalog", "subject", "subject_space", "resource_space", "permission", "principal_kind", "envelope", "scope"} {

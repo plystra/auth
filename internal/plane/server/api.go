@@ -330,7 +330,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		}
 		spaceID = resolved.SpaceID
 	}
-	keyDecision, keyVersion, err := a.keyOperationDecision(ctx, key, requiredScope, spaceID)
+	keyDecision, keyVersion, err := a.keyOperationDecision(ctx, key, requiredScope, spaceID, body.Resource.GroupID, body.Resource.OwnerMemberID)
 	if err != nil {
 		return authorizationEvaluation{}, err
 	}
@@ -349,7 +349,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		}
 	}
 	if resolved.SpaceID != "" && resolved.SpaceID != spaceID {
-		subjectDecision, _, err := a.keyOperationDecision(ctx, key, requiredScope, resolved.SpaceID)
+		subjectDecision, _, err := a.keyOperationDecision(ctx, key, requiredScope, resolved.SpaceID, "", "")
 		if err != nil {
 			return authorizationEvaluation{}, err
 		}
@@ -386,7 +386,7 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	return authorizationEvaluation{decision: decision, policyVersion: policyVersion, memberID: memberID, spaceID: spaceID, userID: resolved.UserID}, nil
 }
 
-func (a *API) keyOperationDecision(ctx context.Context, key application.Key, permission, spaceID string) (engine.Decision, int64, error) {
+func (a *API) keyOperationDecision(ctx context.Context, key application.Key, permission, spaceID, groupID, ownerID string) (engine.Decision, int64, error) {
 	if !contains(key.Scopes, permission) {
 		return engine.Decision{}, 0, apierr.New("PERMISSION_DENIED", "API key is not scoped for this operation.")
 	}
@@ -406,6 +406,7 @@ func (a *API) keyOperationDecision(ctx context.Context, key application.Key, per
 	}
 	return a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: memberID, Permission: permission, ResourceSpace: spaceID,
+		ResourceGroup: groupID, ResourceOwner: ownerID,
 	})
 }
 
@@ -558,7 +559,7 @@ func (a *API) introspect(ctx context.Context, in *IntrospectInput) (*IntrospectO
 		if spaceID == "" {
 			spaceID = key.SpaceID
 		}
-		decision, _, err := a.keyOperationDecision(ctx, key, "auth.tokens:introspect", spaceID)
+		decision, _, err := a.keyOperationDecision(ctx, key, "auth.tokens:introspect", spaceID, "", "")
 		if err != nil {
 			return nil, err
 		}

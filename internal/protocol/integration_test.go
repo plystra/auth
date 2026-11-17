@@ -266,6 +266,17 @@ func TestOAuthUserinfoReturnsUserAndAgentSubjects(t *testing.T) {
 }
 
 func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
+	testOAuthAuthorizationCodeInstallation(t, "space")
+}
+
+func TestOAuthAuthorizationCodeWithGroupInstallations(t *testing.T) {
+	for _, scope := range []string{"group", "group_tree"} {
+		t.Run(scope, func(t *testing.T) { testOAuthAuthorizationCodeInstallation(t, scope) })
+	}
+}
+
+func testOAuthAuthorizationCodeInstallation(t *testing.T, installationScope string) {
+	t.Helper()
 	ctx := context.Background()
 	database, err := protocolDB.Clone(ctx)
 	if err != nil {
@@ -341,15 +352,17 @@ func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, granted_by)
-		VALUES ('grt_oauth_code_application', $1, 'rol_oauth_code_application', 'mem_oauth_code_application', 'space', $1, $2)
-	`, owner.SpaceID, owner.ID); err != nil {
+		INSERT INTO authorization_grants (id, space_id, role_id, grantee_member_id, scope, anchor_space_id, anchor_group_id, granted_by)
+		VALUES ('grt_oauth_code_application', $1, 'rol_oauth_code_application', 'mem_oauth_code_application', $3,
+		        CASE WHEN $3::text = 'space' THEN $1::text END, CASE WHEN $3::text <> 'space' THEN 'grp_oauth_scope' END, $2)
+	`, owner.SpaceID, owner.ID, installationScope); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO application_installations (id, application_id, space_id, member_id, role_id, scope, approved_permissions, installed_by)
-		VALUES ('ins_oauth_code_protocol', 'app_oauth_code_protocol', $1, 'mem_oauth_code_application', 'rol_oauth_code_application', 'space', '["oauth.group:read"]'::jsonb, $2)
-	`, owner.SpaceID, owner.ID); err != nil {
+		INSERT INTO application_installations (id, application_id, space_id, member_id, role_id, scope, anchor_group_id, approved_permissions, installed_by)
+		VALUES ('ins_oauth_code_protocol', 'app_oauth_code_protocol', $1, 'mem_oauth_code_application', 'rol_oauth_code_application', $3,
+		        CASE WHEN $3::text <> 'space' THEN 'grp_oauth_scope' END, '["oauth.group:read"]'::jsonb, $2)
+	`, owner.SpaceID, owner.ID, installationScope); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
