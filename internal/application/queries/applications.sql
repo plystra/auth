@@ -350,12 +350,17 @@ WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
 RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidrs, expires_at,
           last_used_at, revoked_at, created_at, allow_subject_assertion;
 
--- name: LockManagedAPIKeyForRotation :one
+-- name: LockManagedAPIKey :one
 SELECT id, application_id, name, prefix, secret_hash, hash_scheme, scopes, restrict_to,
        allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 FROM api_keys
 WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
 FOR UPDATE;
+
+-- name: UpdateManagedAPIKeyGrants :execrows
+UPDATE api_keys SET scopes = sqlc.arg(scopes)
+WHERE id = sqlc.arg(key_id) AND application_id = sqlc.arg(application_id)
+  AND revoked_at IS NULL AND expires_at > now();
 
 -- name: PreserveAPIKeySecretForGrace :exec
 INSERT INTO api_key_grace_secrets (key_id, secret_hash, valid_until)

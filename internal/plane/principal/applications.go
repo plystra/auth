@@ -76,6 +76,15 @@ type revokeApplicationKeyInput struct {
 	KeyID         string `path:"key_id"`
 }
 
+type updateApplicationKeyGrantsInput struct {
+	Authorization string `header:"Authorization"`
+	ApplicationID string `path:"app_id"`
+	KeyID         string `path:"key_id"`
+	Body          struct {
+		Grants []string `json:"grants" maxItems:"100" nullable:"false"`
+	}
+}
+
 type rotateApplicationKeyInput struct {
 	Authorization string `header:"Authorization"`
 	ApplicationID string `path:"app_id"`
@@ -99,6 +108,7 @@ func (a *API) registerApplicationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("installations.uninstall", "POST", "/v1/spaces/{id}/installations/{ins_id}/uninstall", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.uninstallInstallation)
 	route.Register(api, route.NewSpec("applications.keys.list", "GET", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplicationKeys)
 	route.Register(api, route.NewSpec("applications.keys.create", "POST", "/v1/applications/{app_id}/api-keys", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.createApplicationKey)
+	route.Register(api, route.NewSpec("applications.keys.grants.replace", "PUT", "/v1/applications/{app_id}/api-keys/{key_id}/grants", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.updateApplicationKeyGrants)
 	route.Register(api, route.NewSpec("applications.keys.rotate", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/rotate", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateApplicationKey)
 	route.Register(api, route.NewSpec("applications.keys.revoke", "POST", "/v1/applications/{app_id}/api-keys/{key_id}/revoke", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.revokeApplicationKey)
 }
@@ -161,6 +171,20 @@ func (a *API) createApplicationKey(ctx context.Context, in *createApplicationKey
 	}
 	out := &authorizationDataOutput[applicationKeyCreation]{}
 	out.Body.Data = applicationKeyCreation{Key: key, Secret: raw}
+	return out, nil
+}
+
+func (a *API) updateApplicationKeyGrants(ctx context.Context, in *updateApplicationKeyGrantsInput) (*authorizationDataOutput[application.ManagedKey], error) {
+	actorID, ctx, err := a.applicationKeyActor(ctx, in.Authorization, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := a.Applications.UpdateManagedKeyGrants(ctx, actorID, in.ApplicationID, in.KeyID, in.Body.Grants)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[application.ManagedKey]{}
+	out.Body.Data = key
 	return out, nil
 }
 

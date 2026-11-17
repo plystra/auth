@@ -1124,6 +1124,26 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			t.Fatal("customer cannot correlate its public manifest narrowing audit")
 		}
 	})
+	t.Run("APIKeyGrantReplacement", func(t *testing.T) {
+		path := "/v1/applications/" + appResult.Data.ID + "/api-keys/" + keyResult.Data.Key.ID + "/grants"
+		narrowed := slices.DeleteFunc(slices.Clone(keyScopes), func(permission string) bool { return permission == "auth.authz:check" })
+		updated := mvpData[application.ManagedKey](t, mvpJSON(t, principalHandler, http.MethodPut, path, publisher.token,
+			map[string]any{"grants": narrowed}))
+		if slices.Contains(updated.Grants, "auth.authz:check") || updated.ID != keyResult.Data.Key.ID {
+			t.Fatal("key grant replacement did not preserve identity and remove permission")
+		}
+		if denied := check(keyResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:read"); denied.Code != http.StatusForbidden || !strings.Contains(denied.Body.String(), "PERMISSION_DENIED") {
+			t.Fatalf("narrowed key retained check authority: status=%d", denied.Code)
+		}
+		if allowed := check(unrestrictedResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:read"); allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
+			t.Fatalf("replacing one key affected another: status=%d", allowed.Code)
+		}
+		mvpData[application.ManagedKey](t, mvpJSON(t, principalHandler, http.MethodPut, path, publisher.token,
+			map[string]any{"grants": keyScopes}))
+		if allowed := check(keyResult.Data.Secret, customer.memberID, customer.spaceID, "invoice:read"); allowed.Code != http.StatusOK || !strings.Contains(allowed.Body.String(), `"decision":"allow"`) {
+			t.Fatalf("explicit key grant restoration failed: status=%d", allowed.Code)
+		}
+	})
 	suspended := principalRequest("/v1/spaces/"+customer.spaceID+"/installations/"+installationResult.Data.ID+"/suspend", customer.token, "")
 	if suspended.Code != http.StatusOK {
 		t.Fatalf("customer application suspension = %d %s", suspended.Code, suspended.Body.String())

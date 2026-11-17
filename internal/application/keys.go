@@ -266,6 +266,92 @@ func (s *Service) RevokeManagedKey(ctx context.Context, actorMemberID, applicati
 	return out, err
 }
 
+func (s *Service) UpdateManagedKeyGrants(ctx context.Context, actorMemberID, applicationID, keyID string, grants []string) (ManagedKey, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
+		return ManagedKey{}, apierr.New("UNAVAILABLE", "application key management is unavailable")
+	}
+	if grants == nil || len(grants) > 100 {
+		return ManagedKey{}, apierr.New("VALIDATION_FAILED", "API key grants must be an array of up to 100 permissions")
+	}
+	grants = slices.Clone(grants)
+	slices.Sort(grants)
+	for i, grant := range grants {
+		if grant == "" || strings.TrimSpace(grant) != grant || (i > 0 && grant == grants[i-1]) {
+			return ManagedKey{}, apierr.New("VALIDATION_FAILED", "API key grants contain an invalid or duplicate permission")
+		}
+	}
+	var out ManagedKey
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		// Manifest reviews, key rotation and revocation use this same lock order.
+		app, err := s.managedApplicationTx(ctx, q, actorMemberID, applicationID)
+		if err != nil {
+			return err
+		}
+		if app.Status != "active" {
+			return apierr.New("CONFLICT", "application is not active")
+		}
+		previous, err := q.LockManagedAPIKey(ctx, db.LockManagedAPIKeyParams{ApplicationID: applicationID, KeyID: keyID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("NOT_FOUND", "API key was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if previous.RevokedAt.Valid || !previous.ExpiresAt.Valid || !previous.ExpiresAt.Time.After(time.Now()) {
+			return apierr.New("CONFLICT", "API key is revoked or expired")
+		}
+		var manifest []string
+		if err := json.Unmarshal(app.ManifestPermissions, &manifest); err != nil {
+			return err
+		}
+		for _, grant := range grants {
+			if !slices.Contains(manifest, grant) {
+				return apierr.New("GRANT_EXCEEDS_OWNER", "API key grant is outside the application manifest")
+			}
+			permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: grant})
+			if errors.Is(err, pgx.ErrNoRows) || (err == nil && permission.Status == "disabled") {
+				return apierr.New("PERMISSION_DISABLED", "API key grant is disabled")
+			}
+			if err != nil {
+				return err
+			}
+		}
+		scopes, err := json.Marshal(grants)
+		if err != nil {
+			return err
+		}
+		changed, err := q.UpdateManagedAPIKeyGrants(ctx, db.UpdateManagedAPIKeyGrantsParams{
+			ApplicationID: applicationID, KeyID: keyID, Scopes: scopes,
+		})
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return apierr.New("CONFLICT", "API key is revoked or expired")
+		}
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			ApplicationID: applicationID, Action: "application.key.grants.replace", Outcome: "success",
+			Permission: "auth.applications:manage", Resource: audit.Resource{Type: "api_key", ID: keyID, SpaceID: app.SpaceID},
+			Metadata: map[string]string{"previous_grants": string(previous.Scopes), "grants": string(scopes)},
+		}); err != nil {
+			return err
+		}
+		var restrictions []KeyRestriction
+		var allowedIPCIDRs []string
+		if err := json.Unmarshal(previous.RestrictTo, &restrictions); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(previous.AllowedIpCidrs, &allowedIPCIDRs); err != nil {
+			return err
+		}
+		out = managedKey(previous.ID, previous.ApplicationID, previous.Name, previous.Prefix, previous.ExpiresAt,
+			previous.LastUsedAt, previous.RevokedAt, previous.CreatedAt, previous.AllowSubjectAssertion, grants, restrictions, allowedIPCIDRs)
+		return nil
+	})
+	return out, err
+}
+
 func (s *Service) RotateManagedKey(ctx context.Context, actorMemberID, applicationID, keyID string) (ManagedKey, secret.String, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil || len(s.HMACKeys) == 0 {
 		return ManagedKey{}, "", apierr.New("UNAVAILABLE", "application key management is unavailable")
@@ -283,7 +369,7 @@ func (s *Service) RotateManagedKey(ctx context.Context, actorMemberID, applicati
 		if application.Status != "active" {
 			return apierr.New("CONFLICT", "application is not active")
 		}
-		previous, err := q.LockManagedAPIKeyForRotation(ctx, db.LockManagedAPIKeyForRotationParams{
+		previous, err := q.LockManagedAPIKey(ctx, db.LockManagedAPIKeyParams{
 			ApplicationID: applicationID, KeyID: keyID,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {

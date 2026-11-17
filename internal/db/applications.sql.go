@@ -1354,7 +1354,7 @@ func (q *Queries) LockLegacyAPIKeyHashes(ctx context.Context) ([]LockLegacyAPIKe
 	return items, nil
 }
 
-const lockManagedAPIKeyForRotation = `-- name: LockManagedAPIKeyForRotation :one
+const lockManagedAPIKey = `-- name: LockManagedAPIKey :one
 SELECT id, application_id, name, prefix, secret_hash, hash_scheme, scopes, restrict_to,
        allowed_ip_cidrs, expires_at, last_used_at, revoked_at, created_at, allow_subject_assertion
 FROM api_keys
@@ -1362,12 +1362,12 @@ WHERE id = $1 AND application_id = $2
 FOR UPDATE
 `
 
-type LockManagedAPIKeyForRotationParams struct {
+type LockManagedAPIKeyParams struct {
 	KeyID         string `json:"key_id"`
 	ApplicationID string `json:"application_id"`
 }
 
-type LockManagedAPIKeyForRotationRow struct {
+type LockManagedAPIKeyRow struct {
 	ID                    string             `json:"id"`
 	ApplicationID         string             `json:"application_id"`
 	Name                  string             `json:"name"`
@@ -1384,9 +1384,9 @@ type LockManagedAPIKeyForRotationRow struct {
 	AllowSubjectAssertion bool               `json:"allow_subject_assertion"`
 }
 
-func (q *Queries) LockManagedAPIKeyForRotation(ctx context.Context, arg LockManagedAPIKeyForRotationParams) (LockManagedAPIKeyForRotationRow, error) {
-	row := q.db.QueryRow(ctx, lockManagedAPIKeyForRotation, arg.KeyID, arg.ApplicationID)
-	var i LockManagedAPIKeyForRotationRow
+func (q *Queries) LockManagedAPIKey(ctx context.Context, arg LockManagedAPIKeyParams) (LockManagedAPIKeyRow, error) {
+	row := q.db.QueryRow(ctx, lockManagedAPIKey, arg.KeyID, arg.ApplicationID)
+	var i LockManagedAPIKeyRow
 	err := row.Scan(
 		&i.ID,
 		&i.ApplicationID,
@@ -1874,6 +1874,26 @@ func (q *Queries) UpdateApplication(ctx context.Context, arg UpdateApplicationPa
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const updateManagedAPIKeyGrants = `-- name: UpdateManagedAPIKeyGrants :execrows
+UPDATE api_keys SET scopes = $1
+WHERE id = $2 AND application_id = $3
+  AND revoked_at IS NULL AND expires_at > now()
+`
+
+type UpdateManagedAPIKeyGrantsParams struct {
+	Scopes        []byte `json:"scopes"`
+	KeyID         string `json:"key_id"`
+	ApplicationID string `json:"application_id"`
+}
+
+func (q *Queries) UpdateManagedAPIKeyGrants(ctx context.Context, arg UpdateManagedAPIKeyGrantsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateManagedAPIKeyGrants, arg.Scopes, arg.KeyID, arg.ApplicationID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const validGraceAPIKeySecret = `-- name: ValidGraceAPIKeySecret :one
