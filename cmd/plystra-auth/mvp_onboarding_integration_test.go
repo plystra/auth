@@ -831,6 +831,20 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		if other := query(publisher.token); other.Code == http.StatusOK || strings.Contains(other.Body.String(), event.ID) {
 			t.Fatal("publisher could read the customer's OAuth credential audit")
 		}
+		path = strings.Replace(path, "action=agent.oauth_refresh.create", "action=agent.access.issue", 1)
+		response = query(customer.token)
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &page) != nil || len(page.Data) != 1 {
+			t.Fatal("OAuth access issuance audit is not uniquely correlated to code exchange")
+		}
+		event = page.Data[0]
+		if event.MemberID != oauthAgent.ID || event.ActorID != oauthAgent.ID || event.UserID != customerClaims.Subject || event.ApplicationID != appResult.Data.ID ||
+			event.SpaceID != customer.spaceID || event.ResourceGroupID != oauthAgent.HomeGroupID || event.CredentialType != "oauth_authorization_code" ||
+			event.Plane != "principal" || event.RequestID != tokenResponse.Header().Get("X-Request-ID") || len(event.OwnerChain) != 1 || event.OwnerChain[0].MemberID != customer.memberID {
+			t.Fatal("OAuth access issuance audit lost its authenticated user or application")
+		}
+		if other := query(publisher.token); other.Code == http.StatusOK || strings.Contains(other.Body.String(), event.ID) {
+			t.Fatal("publisher could read the customer's OAuth access issuance audit")
+		}
 		for _, credential := range []string{oauthToken.AccessToken, oauthToken.RefreshToken, customer.token, keyResult.Data.Secret, callback.Query().Get("code"), verifier, authorizedBody.RequestID} {
 			var leaked bool
 			if err := st.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM audit_logs WHERE to_jsonb(audit_logs)::text LIKE '%' || $1 || '%')`, credential).Scan(&leaked); err != nil {

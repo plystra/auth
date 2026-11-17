@@ -19,6 +19,7 @@ import (
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/store"
 )
@@ -270,14 +271,30 @@ func (s *Service) CreateAgentAccess(ctx context.Context, memberID, spaceID, audi
 }
 
 // CreateAgentDelegatedAccess issues a token for an existing child Agent. The
-// optional actor and upper expiry bound are carried from the parent token so a
+// actor and optional upper expiry bound are carried from the parent token so a
 // delegated token cannot outlive the delegation step that produced it.
 func (s *Service) CreateAgentDelegatedAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
 	return s.createAgentAccess(ctx, memberID, spaceID, audience, actor, scopes, notAfter)
 }
 
-func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, _ string, scopes []string, notAfter int64) (Tokens, error) {
-	agent, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
+	var tokens Tokens
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := member.LockChainsTx(ctx, q, memberID, actor); err != nil {
+			return err
+		}
+		var err error
+		tokens, err = s.agentAccessTx(ctx, q, memberID, spaceID, audience, actor, scopes, notAfter)
+		return err
+	})
+	if err != nil {
+		return Tokens{}, err
+	}
+	return tokens, nil
+}
+
+func (s *Service) agentAccessTx(ctx context.Context, q *db.Queries, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
+	agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Tokens{}, apierr.New("invalid_grant", "agent credential is invalid or expired")
 	}
@@ -286,6 +303,9 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	}
 	if agent.SpaceID != spaceID || agent.Status != "active" || agent.GroupStatus != "active" || !agent.ExpiresAt.Valid || !agent.ExpiresAt.Time.After(time.Now().UTC()) {
 		return Tokens{}, apierr.New("invalid_grant", "agent credential is invalid or expired")
+	}
+	if actor != "" && (!agent.OwnerMemberID.Valid || agent.OwnerMemberID.String != actor) {
+		return Tokens{}, apierr.New("invalid_grant", "actor token is not delegated by the subject")
 	}
 	st, err := s.Settings(ctx)
 	if err != nil {
@@ -309,7 +329,7 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if strings.TrimSpace(audience) == "" {
 		audience = security.DefaultApplicationAudience
 	}
-	ownerChain, expiresAt, err := s.agentOwnerClaimAt(ctx, memberID, map[string]struct{}{}, 0, now, expiresAt)
+	ownerChain, expiresAt, err := s.agentOwnerClaimAt(ctx, q, memberID, map[string]struct{}{}, 0, now, expiresAt)
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -320,10 +340,20 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if err != nil {
 		return Tokens{}, err
 	}
+	action, actorID := "agent.access.issue", memberID
+	if actor != "" {
+		action, actorID = "agent.token.exchange", actor
+	}
+	if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		ActorType: "member", ActorID: actorID, Action: action, Outcome: "success", MemberID: memberID,
+		Metadata: map[string]string{"expires_at": expiresAt.UTC().Format(time.RFC3339)},
+	}); err != nil {
+		return Tokens{}, err
+	}
 	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(expiresAt.Sub(now) / time.Second)}, nil
 }
 
-func (s *Service) agentOwnerClaimAt(ctx context.Context, memberID string, seen map[string]struct{}, depth int, now, expiresAt time.Time) (*security.ActorClaim, time.Time, error) {
+func (s *Service) agentOwnerClaimAt(ctx context.Context, q *db.Queries, memberID string, seen map[string]struct{}, depth int, now, expiresAt time.Time) (*security.ActorClaim, time.Time, error) {
 	if depth >= 64 {
 		return nil, time.Time{}, apierr.New("OWNER_INACTIVE", "the Agent owner chain exceeds the supported depth")
 	}
@@ -331,7 +361,7 @@ func (s *Service) agentOwnerClaimAt(ctx context.Context, memberID string, seen m
 		return nil, time.Time{}, apierr.New("OWNER_INACTIVE", "the Agent owner chain contains a cycle")
 	}
 	seen[memberID] = struct{}{}
-	agent, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
 	}
@@ -347,7 +377,7 @@ func (s *Service) agentOwnerClaimAt(ctx context.Context, memberID string, seen m
 	if !agent.OwnerMemberID.Valid || strings.TrimSpace(agent.OwnerMemberID.String) == "" {
 		return nil, time.Time{}, apierr.New("OWNER_INACTIVE", "the Agent owner is missing")
 	}
-	owner, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
+	owner, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: agent.OwnerMemberID.String})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, apierr.New("OWNER_INACTIVE", "the Agent owner member was not found")
 	}
@@ -359,7 +389,7 @@ func (s *Service) agentOwnerClaimAt(ctx context.Context, memberID string, seen m
 	}
 	claim := &security.ActorClaim{Subject: owner.ID, MemberID: owner.ID, Type: owner.Type}
 	if owner.Type == "agent" {
-		claim.Actor, expiresAt, err = s.agentOwnerClaimAt(ctx, owner.ID, seen, depth+1, now, expiresAt)
+		claim.Actor, expiresAt, err = s.agentOwnerClaimAt(ctx, q, owner.ID, seen, depth+1, now, expiresAt)
 		if err != nil {
 			return nil, time.Time{}, err
 		}

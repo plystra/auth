@@ -204,7 +204,7 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, apierr.New("invalid_grant", "refresh token is invalid or expired"))
 			return
 		}
-		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), credential.MemberID, credential.SpaceID, resource)
+		tokens, err := h.Sessions.CreateAgentAccess(ctx, credential.MemberID, credential.SpaceID, resource)
 		if err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
 			return
@@ -230,7 +230,8 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, apierr.New("invalid_grant", "agent credential is invalid"))
 			return
 		}
-		tokens, err := h.Sessions.CreateAgentAccess(r.Context(), c.MemberID, c.SpaceID, r.Form.Get("resource"))
+		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_key"})
+		tokens, err := h.Sessions.CreateAgentAccess(ctx, c.MemberID, c.SpaceID, r.Form.Get("resource"))
 		if err != nil {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent token exchange is unavailable"))
 			return
@@ -308,12 +309,12 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_grant", "authorization code is invalid or expired"))
 		return
 	}
-	tokens, err := h.Sessions.CreateAgentAccess(r.Context(), consumed.MemberID, agentMember.SpaceID, resource)
+	ctx := audit.WithCaller(r.Context(), audit.Caller{UserID: consumed.UserID, ApplicationID: client.ID, CredentialType: "oauth_authorization_code"})
+	tokens, err := h.Sessions.CreateAgentAccess(ctx, consumed.MemberID, agentMember.SpaceID, resource)
 	if err != nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
-	ctx := audit.WithCaller(r.Context(), audit.Caller{UserID: consumed.UserID, ApplicationID: client.ID, CredentialType: "oauth_authorization_code"})
 	refresh, err := h.Agents.CreateOAuthRefreshCredential(ctx, consumed.MemberID, time.Time{})
 	if err != nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
@@ -481,7 +482,8 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
 		return
 	}
-	tokens, err := h.Sessions.CreateAgentDelegatedAccess(r.Context(), actor.MemberID, actor.SpaceID, r.Form.Get("resource"), parentClaims.Subject, requested, parentClaims.ExpiresAt)
+	ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_token_exchange"})
+	tokens, err := h.Sessions.CreateAgentDelegatedAccess(ctx, actor.MemberID, actor.SpaceID, r.Form.Get("resource"), parentClaims.Subject, requested, parentClaims.ExpiresAt)
 	if err != nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
 		return

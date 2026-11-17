@@ -314,6 +314,9 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 		if event.MemberID == child.Agent.ID && (len(event.OwnerChain) != 2 || event.OwnerChain[0].MemberID != parent.Agent.ID || event.OwnerChain[1].MemberID != scenario.UserMemberID) {
 			t.Fatal("public child audit omitted its complete delegation chain")
 		}
+		if event.Action == "agent.token.exchange" && (event.ActorID != parent.Agent.ID || event.MemberID != child.Agent.ID || event.CredentialType != "agent_token_exchange" || event.SpaceID != scenario.SpaceID || event.ResourceGroupID != child.Agent.HomeGroupID) {
+			t.Fatal("public Token Exchange audit omitted the delegator or child location")
+		}
 		if event.DecisionID != "" {
 			deniedDecisions = slices.DeleteFunc(deniedDecisions, func(id string) bool { return id == event.DecisionID })
 		}
@@ -327,7 +330,7 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			}
 		}
 	}
-	for _, action := range []string{"agent.create", "grant.replace", "grant.inline.create", "grant.revoke", "group.member.add", "group.member.remove", "agent.stop", "authz.check", "authz.explain"} {
+	for _, action := range []string{"agent.create", "agent.token.exchange", "grant.replace", "grant.inline.create", "grant.revoke", "group.member.add", "group.member.remove", "agent.stop", "authz.check", "authz.explain"} {
 		if !seen[action] {
 			t.Fatalf("public delegation audit omitted %s", action)
 		}

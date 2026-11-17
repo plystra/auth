@@ -485,6 +485,19 @@ func TestAgentAccessTokenExpiryIsBoundedByDelegation(t *testing.T) {
 	delegationExpiry := now.Add(40 * time.Second)
 	tokens, err = sessions.CreateAgentDelegatedAccess(ctx, child.ID, space.ID, "app_expiry", parent.ID, []string{"invoice:read"}, delegationExpiry.Unix())
 	assertExpiry(tokens, err, delegationExpiry)
+	t.Run("DelegatorMustBeDirectOwner", func(t *testing.T) {
+		for _, actor := range []string{owner.ID, "mem_other"} {
+			denied, err := sessions.CreateAgentDelegatedAccess(ctx, child.ID, space.ID, "app_expiry", actor, []string{"invoice:read"}, delegationExpiry.Unix())
+			var public *apierr.Error
+			if !errors.As(err, &public) || public.Code != "invalid_grant" || denied.AccessToken != "" {
+				t.Fatalf("invalid delegator received a token: error=%v", err)
+			}
+		}
+	})
+	t.Run("OptionalUpperBoundUsesAgentLifetime", func(t *testing.T) {
+		tokens, err := sessions.CreateAgentDelegatedAccess(ctx, child.ID, space.ID, "app_expiry", parent.ID, []string{"invoice:read"}, 0)
+		assertExpiry(tokens, err, child.ExpiresAt)
+	})
 	assertOwnerInactive := func(reason string) {
 		t.Helper()
 		_, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, "app_expiry")
