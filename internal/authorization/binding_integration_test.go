@@ -82,8 +82,8 @@ func TestGroupMembershipAndParentStayWithinSpace(t *testing.T) {
 	secondGroupID := "grp_integrity_second"
 	otherGroupID := "grp_integrity_other"
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO groups (id, space_id, name) VALUES
-		($1, $4, 'First'), ($2, $4, 'Second'), ($3, $5, 'Other')
+		INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		($1, $4, 'First', NULL), ($2, $4, 'Second', $1), ($3, $5, 'Other', NULL)
 	`, firstGroupID, secondGroupID, otherGroupID, spaceID, otherSpaceID); err != nil {
 		t.Fatal(err)
 	}

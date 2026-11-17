@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -95,8 +96,10 @@ func TestGroupMovePositiveDeltaRequiresAssignmentCoverageAndRollsBack(t *testing
 	const sourceID = "grp_move_source_denied"
 	const parentID = "grp_move_parent_denied"
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO groups (id, space_id, name, kind, status)
-		VALUES ($1, $3, 'Move source', 'standard', 'active'), ($2, $3, 'Move parent', 'standard', 'active')
+		INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		('grp_move_root_denied', $3, 'Root', NULL),
+		($1, $3, 'Move source', 'grp_move_root_denied'),
+		($2, $3, 'Move parent', 'grp_move_root_denied')
 	`, sourceID, parentID, spaceID); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +146,7 @@ func TestGroupMovePositiveDeltaRequiresAssignmentCoverageAndRollsBack(t *testing
 	if err := st.Pool.QueryRow(ctx, `SELECT coalesce(parent_id, '') FROM groups WHERE id = $1`, sourceID).Scan(&parent); err != nil {
 		t.Fatal(err)
 	}
-	if parent != "" {
+	if parent != "grp_move_root_denied" {
 		t.Fatalf("rejected group move persisted parent %q", parent)
 	}
 }
@@ -155,12 +158,12 @@ func TestGroupMoveUsesUnifiedDeltaCoverage(t *testing.T) {
 	const parentID = "grp_move_parent_allowed"
 	const childID = "grp_move_child_allowed"
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO groups (id, space_id, name, kind, status)
-		VALUES ($1, $4, 'Move source', 'standard', 'active'), ($2, $4, 'Move parent', 'standard', 'active'), ($3, $4, 'Move child', 'standard', 'active')
+		INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		('grp_move_root_allowed', $4, 'Root', NULL),
+		($1, $4, 'Move source', 'grp_move_root_allowed'),
+		($2, $4, 'Move parent', 'grp_move_root_allowed'),
+		($3, $4, 'Move child', $1)
 	`, sourceID, parentID, childID, spaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET parent_id = $1 WHERE id = $2`, sourceID, childID); err != nil {
 		t.Fatal(err)
 	}
 	target, err := svc.CreateMember(ctx, actor.ID, "", spaceID, "Move target", "human", "single")
@@ -221,5 +224,68 @@ func TestGroupMoveUsesUnifiedDeltaCoverage(t *testing.T) {
 	}
 	if decision.Effect != engine.Allow {
 		t.Fatalf("moved member decision = %+v, want allow", decision)
+	}
+}
+
+func TestGroupMoveEnforcesSpaceCycleAndSubtreeDepthBoundaries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	st, svc, actor, spaceID := newBindingFixture(t)
+	create := func(space, name, parent string) Group {
+		t.Helper()
+		group, err := svc.CreateGroup(ctx, actor.ID, space, name, parent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return group
+	}
+	root := create(spaceID, "Root", "")
+	moving := create(spaceID, "Moving", root.ID)
+	leaf := create(spaceID, "Moving leaf", moving.ID)
+	parents := []Group{root}
+	for depth := 2; depth <= 15; depth++ {
+		parents = append(parents, create(spaceID, "Level "+strconv.Itoa(depth), parents[len(parents)-1].ID))
+	}
+	other, otherActor, err := svc.CreateSpace(ctx, "usr_binding_actor", "Other tree", "other-move-tree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRoot, err := svc.CreateGroup(ctx, otherActor.ID, other.ID, "Other root", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() string {
+		t.Helper()
+		var out string
+		if err := st.Pool.QueryRow(ctx, `SELECT jsonb_build_object(
+			'groups', (SELECT jsonb_agg(to_jsonb(g) ORDER BY id) FROM groups g),
+			'versions', (SELECT jsonb_agg(policy_version ORDER BY id) FROM spaces),
+			'audits', (SELECT count(*) FROM audit_logs))::text`).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	for _, invalid := range []struct{ name, group, parent, code string }{
+		{"cross_space", moving.ID, otherRoot.ID, "NOT_FOUND"},
+		{"cycle", moving.ID, leaf.ID, "VALIDATION_FAILED"},
+		{"subtree_exceeds_depth_16", moving.ID, parents[14].ID, "VALIDATION_FAILED"},
+	} {
+		t.Run(invalid.name, func(t *testing.T) {
+			before := snapshot()
+			assertAPIErrorCode(t, svc.MoveGroup(ctx, actor.ID, spaceID, invalid.group, invalid.parent), invalid.code)
+			if snapshot() != before {
+				t.Fatal("rejected move changed the tree, policy version, or audit")
+			}
+		})
+	}
+	if err := svc.MoveGroup(ctx, actor.ID, spaceID, moving.ID, parents[13].ID); err != nil {
+		t.Fatalf("move placing subtree leaf at depth 16 failed: %v", err)
+	}
+	var depth int
+	if err := st.Pool.QueryRow(ctx, `WITH RECURSIVE chain AS (
+		SELECT id, parent_id, 1 AS depth FROM groups WHERE id = $1
+		UNION ALL SELECT g.id, g.parent_id, c.depth + 1 FROM groups g JOIN chain c ON g.id = c.parent_id
+	) SELECT max(depth) FROM chain`, leaf.ID).Scan(&depth); err != nil || depth != 16 {
+		t.Fatalf("moved subtree leaf depth = %d, want 16: %v", depth, err)
 	}
 }

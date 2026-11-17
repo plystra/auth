@@ -64,7 +64,10 @@ func TestManagementAndCheckChooseClosestGrantFailure(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE grantee_member_id = $1`, actor.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ('grp_candidate_excluded', $1, 'Excluded'), ('grp_candidate_outside', $1, 'Outside')`, spaceID); err != nil {
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		('grp_candidate_root', $1, 'Root', NULL),
+		('grp_candidate_excluded', $1, 'Excluded', 'grp_candidate_root'),
+		('grp_candidate_outside', $1, 'Outside', 'grp_candidate_root')`, spaceID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO group_envelopes (group_id) VALUES ('grp_candidate_excluded')`); err != nil {

@@ -20,8 +20,7 @@ const maxGroupDepth = 16
 // CreateGroup creates a standard group in a Space. The Space or requested
 // parent is resolved and locked before the authorization decision, so a
 // caller cannot authorize one node and write another. Root creation is
-// serialized by the Space row lock; the database-level unique-root invariant
-// remains a separate schema task tracked in the roadmap.
+// serialized by the Space row lock and backed by a partial unique index.
 func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name, parentGroupID string) (Group, error) {
 	actorMemberID = strings.TrimSpace(actorMemberID)
 	spaceID = strings.TrimSpace(spaceID)
@@ -330,7 +329,7 @@ func (s *Service) MoveGroup(ctx context.Context, actorMemberID, spaceID, groupID
 			}{typeName: member.Type, snapshot: snapshot}
 		}
 		if err := q.UpdateGroupParent(ctx, db.UpdateGroupParentParams{GroupID: groupID, SpaceID: spaceID, ParentID: pgtype.Text{String: parentGroupID, Valid: parentGroupID != ""}}); err != nil {
-			return err
+			return normalizeDBError(err)
 		}
 		for _, member := range members {
 			after, err := s.grantAuthoritySnapshotTx(ctx, q, member.ID, spaceID, member.Type)

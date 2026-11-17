@@ -193,11 +193,11 @@ func TestAgentGroupGrantAdministratorRequiresCoveringRightsAndAnchorEnvelope(t *
 					t.Fatal(err)
 				}
 			}
-			for _, groupID := range []string{"grp_administrator_before", "grp_administrator_after"} {
-				if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, kind)
-					VALUES ($1, $2, $1, 'standard')`, groupID, anchorSpace); err != nil {
-					t.Fatal(err)
-				}
+			if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, parent_id) VALUES
+				('grp_administrator_root', $1, 'Root', NULL),
+				('grp_administrator_before', $1, 'Before', 'grp_administrator_root'),
+				('grp_administrator_after', $1, 'After', 'grp_administrator_root')`, anchorSpace); err != nil {
+				t.Fatal(err)
 			}
 			agents := &agent.Service{Store: st}
 			created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "managed-group-agent"})

@@ -32,8 +32,10 @@ func TestTokenScopeValidationUsesLiveResourceAuthority(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			exec(`INSERT INTO groups (id, space_id, name, kind) VALUES
-				('grp_scope_root', $1, 'Root', 'standard'), ('grp_scope_other', $1, 'Other', 'standard')`, spaceID)
+			exec(`INSERT INTO groups (id, space_id, name, parent_id) VALUES
+				('grp_scope_common', $1, 'Common root', NULL),
+				('grp_scope_root', $1, 'Scoped branch', 'grp_scope_common'),
+				('grp_scope_other', $1, 'Other', 'grp_scope_common')`, spaceID)
 			exec(`INSERT INTO groups (id, space_id, name, kind, parent_id)
 				VALUES ('grp_scope_leaf', $1, 'Leaf', 'standard', 'grp_scope_root')`, spaceID)
 			exec(`INSERT INTO authorization_grants

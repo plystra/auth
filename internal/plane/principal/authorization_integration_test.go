@@ -278,8 +278,10 @@ func TestGroupMoveManagementEndpointUsesTargetFacts(t *testing.T) {
 	const sourceID = "grp_endpoint_move_source"
 	const parentID = "grp_endpoint_move_parent"
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO groups (id, space_id, name, kind, status)
-		VALUES ($1, $3, 'Endpoint move source', 'standard', 'active'), ($2, $3, 'Endpoint move parent', 'standard', 'active')
+		INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		('grp_endpoint_move_root', $3, 'Root', NULL),
+		($1, $3, 'Endpoint move source', 'grp_endpoint_move_root'),
+		($2, $3, 'Endpoint move parent', 'grp_endpoint_move_root')
 	`, sourceID, parentID, spaceID); err != nil {
 		t.Fatal(err)
 	}
@@ -811,9 +813,10 @@ func TestMemberInMultipleGroupsRequiresSpaceWideManagement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `
-		INSERT INTO groups (id, space_id, name, kind, status) VALUES
-		('grp_a_scope', $1, 'Scoped', 'standard', 'active'),
-		('grp_z_other', $1, 'Other', 'standard', 'active')
+		INSERT INTO groups (id, space_id, name, parent_id) VALUES
+		('grp_multiple_root', $1, 'Root', NULL),
+		('grp_a_scope', $1, 'Scoped', 'grp_multiple_root'),
+		('grp_z_other', $1, 'Other', 'grp_multiple_root')
 	`, spaceID); err != nil {
 		t.Fatal(err)
 	}

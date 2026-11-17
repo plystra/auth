@@ -174,10 +174,7 @@ func TestParentGroupSuspensionDeniesChildGroupResource(t *testing.T) {
 	ctx := context.Background()
 	st, svc, actor, spaceID := newBindingFixture(t)
 	parentID, childID := "grp_suspension_parent", "grp_suspension_child"
-	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name) VALUES ($1, $3, 'Parent'), ($2, $3, 'Child')`, parentID, childID, spaceID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET parent_id = $1 WHERE id = $2`, parentID, childID); err != nil {
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO groups (id, space_id, name, parent_id) VALUES ($1, $3, 'Parent', NULL), ($2, $3, 'Child', $1)`, parentID, childID, spaceID); err != nil {
 		t.Fatal(err)
 	}
 	request := CheckRequest{MemberID: actor.ID, Permission: "auth.members:manage", ResourceSpace: spaceID, ResourceGroup: childID}
