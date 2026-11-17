@@ -139,8 +139,8 @@ func (h HTTP) consent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "authorization decision body is invalid"))
 		return
 	}
-	redirectTo, err := (application.OAuthConsent{Applications: h.Applications, Agents: h.Agents, Authorization: h.Authorization}).Decide(r.Context(), application.OAuthConsentInput{
-		RequestID: secret.New(body.RequestID), UserID: claims.Subject, Decision: body.Decision,
+	redirectTo, err := (application.OAuthConsent{Applications: h.Applications, Agents: h.Agents, Authorization: h.Authorization, Sessions: h.Sessions}).Decide(r.Context(), application.OAuthConsentInput{
+		RequestID: secret.New(body.RequestID), AccessToken: secret.New(strings.Fields(r.Header.Get("Authorization"))[1]), UserID: claims.Subject, Decision: body.Decision,
 		MemberID: body.MemberID, Permissions: body.Permissions,
 	})
 	if err != nil {

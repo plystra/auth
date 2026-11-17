@@ -73,7 +73,7 @@ func (s *Service) LockOAuthAuthorizationRequestTx(ctx context.Context, q *db.Que
 	}
 	hash := sha256.Sum256([]byte(handle.Value()))
 	row, err := q.LockOAuthAuthorizationRequest(ctx, db.LockOAuthAuthorizationRequestParams{RequestHash: hash[:]})
-	if errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && !row.ExpiresAt.Time.After(time.Now().UTC()) {
 		return OAuthAuthorizationRequest{}, apierr.New("invalid_request", "authorization request is invalid or expired")
 	}
 	if err != nil {

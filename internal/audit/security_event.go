@@ -89,6 +89,21 @@ func WriteSecurityEvent(ctx context.Context, q *db.Queries, in SecurityEvent) er
 	if in.Resource.ID == "" {
 		in.Resource.ID = in.MemberID
 	}
+	return appendSecurityEvent(ctx, q, in, chain[0].MemberType, owners, chain[len(chain)-1].MemberType != "agent")
+}
+
+// WriteAccountEvent records an authenticated account operation that has no
+// selected member. Require the actual resource location rather than inventing
+// a membership or deriving tenant visibility from the account's other bindings.
+func WriteAccountEvent(ctx context.Context, q *db.Queries, in SecurityEvent) error {
+	if in.ActorType != "user" || in.UserID == "" || in.ActorID != in.UserID || in.MemberID != "" ||
+		in.Resource.Type == "" || in.Resource.ID == "" || in.Resource.SpaceID == "" {
+		return errors.New("account audit requires a user identity and explicit resource")
+	}
+	return appendSecurityEvent(ctx, q, in, "", []MemberSnapshot{}, true)
+}
+
+func appendSecurityEvent(ctx context.Context, q *db.Queries, in SecurityEvent, memberType string, owners []MemberSnapshot, chainComplete bool) error {
 	caller, _ := ctx.Value(callerKey{}).(Caller)
 	if in.UserID == "" {
 		in.UserID = caller.UserID
@@ -111,7 +126,7 @@ func WriteSecurityEvent(ctx context.Context, q *db.Queries, in SecurityEvent) er
 		metadata[key] = value
 	}
 	metadata["plane"], metadata["credential_type"] = info.Plane, in.CredentialType
-	metadata["owner_chain_complete"] = chain[len(chain)-1].MemberType != "agent"
+	metadata["owner_chain_complete"] = chainComplete
 	if caller.KeyID != "" {
 		metadata["api_key_id"] = caller.KeyID
 	}
@@ -131,7 +146,7 @@ func WriteSecurityEvent(ctx context.Context, q *db.Queries, in SecurityEvent) er
 		Action: in.Action, ResourceType: auditText(in.Resource.Type), ResourceID: auditText(in.Resource.ID), Outcome: in.Outcome,
 		RequestID: auditText(info.ID), Metadata: metadataJSON, Plane: info.Plane, CredentialType: in.CredentialType,
 		SpaceID: auditText(in.Resource.SpaceID), ResourceGroupID: auditText(in.Resource.GroupID),
-		MemberID: auditText(in.MemberID), MemberType: auditText(chain[0].MemberType), UserID: auditText(in.UserID),
+		MemberID: auditText(in.MemberID), MemberType: auditText(memberType), UserID: auditText(in.UserID),
 		ApplicationID: auditText(in.ApplicationID), OwnerChain: ownersJSON, PermissionKey: auditText(in.Permission),
 		PolicyVersion: pgtype.Int8{Int64: in.PolicyVersion, Valid: in.PolicyVersion != 0},
 	})

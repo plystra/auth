@@ -310,13 +310,13 @@ INSERT INTO oauth_authorization_requests (
 SELECT id, application_id, redirect_uri, code_challenge, scope, state, nonce, resource, expires_at
 FROM oauth_authorization_requests
 WHERE request_hash = sqlc.arg(request_hash)
-  AND status = 'pending' AND expires_at > now()
+  AND status = 'pending' AND expires_at > clock_timestamp()
 FOR UPDATE;
 
 -- name: FinishOAuthAuthorizationRequest :execrows
 UPDATE oauth_authorization_requests
-SET status = sqlc.arg(status), consumed_at = now()
-WHERE id = sqlc.arg(id) AND status = 'pending' AND expires_at > now();
+SET status = sqlc.arg(status), consumed_at = clock_timestamp()
+WHERE id = sqlc.arg(id) AND status = 'pending' AND expires_at > clock_timestamp();
 
 -- name: ConsumeAuthorizationCode :one
 UPDATE authorization_codes

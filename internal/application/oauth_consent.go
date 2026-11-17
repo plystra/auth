@@ -20,11 +20,14 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/session"
 )
 
 type OAuthConsentInput struct {
 	RequestID   secret.String
+	AccessToken secret.String
 	UserID      string
 	Decision    string
 	MemberID    string
@@ -35,12 +38,13 @@ type OAuthConsent struct {
 	Applications  *Service
 	Agents        *agent.Service
 	Authorization *authorization.Service
+	Sessions      *session.Service
 }
 
 // Decide locks and consumes a consent request in the same transaction as the
 // Agent, its grant, the authorization code, and the audit record.
 func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string, error) {
-	if s.Applications == nil || s.Applications.Store == nil || s.Agents == nil || s.Authorization == nil {
+	if s.Applications == nil || s.Applications.Store == nil || s.Agents == nil || s.Authorization == nil || s.Sessions == nil {
 		return "", apierr.New("temporarily_unavailable", "authorization is unavailable")
 	}
 	if in.UserID == "" || (in.Decision != "approve" && in.Decision != "deny") {
@@ -51,6 +55,10 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 	}
 	if in.Decision == "deny" && (in.MemberID != "" || len(in.Permissions) != 0) {
 		return "", apierr.New("invalid_request", "denial must not select a member or permissions")
+	}
+	claims, err := s.Sessions.VerifyAccess(in.AccessToken.Value())
+	if err != nil || claims.Type != "user" || claims.Subject != in.UserID || claims.SessionID == "" {
+		return "", apierr.New("invalid_token", "an authenticated user session is required")
 	}
 	permissions := uniqueConsentPermissions(in.Permissions)
 	if in.Decision == "approve" && len(permissions) != len(in.Permissions) {
@@ -66,13 +74,43 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		}
 	}
 	var redirectTo string
-	err := s.Applications.Store.InTx(ctx, func(q *db.Queries) error {
+	err = s.Applications.Store.InTx(ctx, func(q *db.Queries) error {
 		request, err := s.Applications.LockOAuthAuthorizationRequestTx(ctx, q, in.RequestID)
 		if err != nil {
 			return err
 		}
 		client, err := s.Applications.OAuthClientByIDTx(ctx, q, request.ApplicationID)
 		if err != nil {
+			return err
+		}
+		user, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: in.UserID})
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && user.Status != "active" {
+			return apierr.New("invalid_token", "an active user account is required")
+		}
+		if err != nil {
+			return err
+		}
+		// Binding revocation locks members before sessions. Keep that order for
+		// the bearer member as well as a separately selected consent member.
+		if err := member.LockChainsTx(ctx, q, claims.MemberID, in.MemberID); err != nil {
+			return err
+		}
+		if _, err := q.LockSessionForStepUp(ctx, db.LockSessionForStepUpParams{ID: claims.SessionID}); errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("invalid_token", "an authenticated user session is required")
+		} else if err != nil {
+			return err
+		}
+		validateSession := func() error {
+			currentClaims, active, err := s.Sessions.IntrospectTx(ctx, q, in.AccessToken.Value(), claims.Audience)
+			if err != nil {
+				return err
+			}
+			if !active || currentClaims.Type != "user" || currentClaims.Subject != in.UserID {
+				return apierr.New("invalid_token", "an authenticated user session is required")
+			}
+			return nil
+		}
+		if err := validateSession(); err != nil {
 			return err
 		}
 		if !slices.Contains(client.RedirectURIs, request.RedirectURI) {
@@ -91,10 +129,22 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		query.Set("state", request.State)
 		if in.Decision == "deny" {
 			query.Set("error", "access_denied")
+			publisher, err := q.LockSpaceForAuthorization(ctx, db.LockSpaceForAuthorizationParams{ID: client.SpaceID})
+			if err != nil {
+				return err
+			}
+			if err := validateSession(); err != nil {
+				return err
+			}
 			if err := s.Applications.FinishOAuthAuthorizationRequestTx(ctx, q, request.ID, "denied"); err != nil {
 				return err
 			}
-			if err := audit.Write(ctx, q, "user", in.UserID, "oauth.consent.deny", client.ID, "success"); err != nil {
+			if err := audit.WriteAccountEvent(ctx, q, audit.SecurityEvent{
+				ActorType: "user", ActorID: in.UserID, UserID: in.UserID, ApplicationID: client.ID,
+				Action: "oauth.consent.deny", Outcome: "success", CredentialType: "user_access_token", PolicyVersion: publisher.PolicyVersion,
+				Resource: audit.Resource{Type: "application", ID: client.ID, SpaceID: client.SpaceID},
+				Metadata: map[string]string{"authorization_request_id": request.ID, "subject_selection": "none"},
+			}); err != nil {
 				return err
 			}
 			redirect.RawQuery = query.Encode()
@@ -199,11 +249,25 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		}); err != nil {
 			return err
 		}
+		// Time-based identity validity can change while waiting for resource
+		// locks even though account, member, binding, and session rows are held.
+		if err := validateSession(); err != nil {
+			return err
+		}
+		if binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC()) {
+			return apierr.New("invalid_request", "member_id is not bound to the authenticated user")
+		}
 		if err := s.Applications.FinishOAuthAuthorizationRequestTx(ctx, q, request.ID, "approved"); err != nil {
+			return err
+		}
+		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: member.SpaceID})
+		if err != nil {
 			return err
 		}
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "user", ActorID: in.UserID, Action: "oauth.consent.approve", Outcome: "success", MemberID: current.ID,
+			PolicyVersion: space.PolicyVersion,
+			Metadata:      map[string]string{"authorization_request_id": request.ID, "owner_member_id": member.ID},
 		}); err != nil {
 			return err
 		}

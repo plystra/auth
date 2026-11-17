@@ -373,8 +373,8 @@ func (q *Queries) CreateOAuthAuthorizationRequest(ctx context.Context, arg Creat
 
 const finishOAuthAuthorizationRequest = `-- name: FinishOAuthAuthorizationRequest :execrows
 UPDATE oauth_authorization_requests
-SET status = $1, consumed_at = now()
-WHERE id = $2 AND status = 'pending' AND expires_at > now()
+SET status = $1, consumed_at = clock_timestamp()
+WHERE id = $2 AND status = 'pending' AND expires_at > clock_timestamp()
 `
 
 type FinishOAuthAuthorizationRequestParams struct {
@@ -1430,7 +1430,7 @@ const lockOAuthAuthorizationRequest = `-- name: LockOAuthAuthorizationRequest :o
 SELECT id, application_id, redirect_uri, code_challenge, scope, state, nonce, resource, expires_at
 FROM oauth_authorization_requests
 WHERE request_hash = $1
-  AND status = 'pending' AND expires_at > now()
+  AND status = 'pending' AND expires_at > clock_timestamp()
 FOR UPDATE
 `
 

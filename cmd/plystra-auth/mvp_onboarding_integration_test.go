@@ -790,6 +790,89 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err != nil || oauthAgent.ID != claims.Subject {
 		t.Fatalf("customer OAuth Agent identity = %+v err=%v", oauthAgent, err)
 	}
+	t.Run("OAuthConsentAudit", func(t *testing.T) {
+		user := mvpData[account.User](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/me", customer.token, nil))
+		approvedRequestID := oauthApproved.Header().Get("X-Request-ID")
+		if approvedRequestID == "" {
+			t.Fatal("OAuth approval omitted its request identifier")
+		}
+		approvedQuery := url.Values{"request_id": {approvedRequestID}, "action": {"oauth.consent.approve"}, "member_id": {customer.memberID}}.Encode()
+		approvedResponse := mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+customer.spaceID+"/audit-logs?"+approvedQuery, customer.token, nil)
+		approvedEvents := mvpData[[]audit.Event](t, approvedResponse)
+		if len(approvedEvents) != 1 || approvedEvents[0].MemberID != oauthAgent.ID || approvedEvents[0].MemberType != "agent" ||
+			approvedEvents[0].ResourceID != oauthAgent.ID || approvedEvents[0].SpaceID != customer.spaceID || approvedEvents[0].UserID != user.ID ||
+			approvedEvents[0].ApplicationID != appResult.Data.ID || approvedEvents[0].PolicyVersion <= 0 ||
+			len(approvedEvents[0].OwnerChain) != 1 || approvedEvents[0].OwnerChain[0].MemberID != customer.memberID {
+			t.Fatal("public OAuth approval audit lost its user, Agent, owner, client, or version")
+		}
+		start := httptest.NewRecorder()
+		principalHandler.ServeHTTP(start, httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+authorizeQuery.Encode(), nil))
+		var pending struct {
+			RequestID string `json:"request_id"`
+		}
+		if start.Code != http.StatusOK || json.Unmarshal(start.Body.Bytes(), &pending) != nil || pending.RequestID == "" {
+			t.Fatal("new OAuth consent request failed")
+		}
+		if invalid := mvpJSON(t, principalHandler, http.MethodPost, "/oauth/authorize", customer.token,
+			map[string]string{"request_id": pending.RequestID, "decision": "deny", "member_id": customer.memberID}); invalid.Code != http.StatusBadRequest {
+			t.Fatal("denial accepted a selected member")
+		}
+		denied := mvpJSON(t, principalHandler, http.MethodPost, "/oauth/authorize", customer.token,
+			map[string]string{"request_id": pending.RequestID, "decision": "deny"})
+		var denial struct {
+			RedirectTo string `json:"redirect_to"`
+		}
+		if denied.Code != http.StatusOK || json.Unmarshal(denied.Body.Bytes(), &denial) != nil {
+			t.Fatal("corrected OAuth denial failed")
+		}
+		redirect, err := url.Parse(denial.RedirectTo)
+		if err != nil || redirect.Query().Get("error") != "access_denied" || redirect.Query().Get("state") != "mvp-state" || redirect.Query().Get("code") != "" {
+			t.Fatal("OAuth denial returned an invalid callback")
+		}
+		deniedRequestID := denied.Header().Get("X-Request-ID")
+		if deniedRequestID == "" {
+			t.Fatal("OAuth denial omitted its request identifier")
+		}
+		deniedQuery := url.Values{"request_id": {deniedRequestID}, "action": {"oauth.consent.deny"}}.Encode()
+		deniedResponse := mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+publisher.spaceID+"/audit-logs?"+deniedQuery, publisher.token, nil)
+		deniedEvents := mvpData[[]audit.Event](t, deniedResponse)
+		if len(deniedEvents) != 1 {
+			t.Fatal("public OAuth denial did not produce one publisher audit event")
+		}
+		event := deniedEvents[0]
+		if event.ActorID != user.ID || event.UserID != user.ID || event.ActorType != "user" || event.ApplicationID != appResult.Data.ID ||
+			event.ResourceType != "application" || event.ResourceID != appResult.Data.ID || event.SpaceID != publisher.spaceID ||
+			event.MemberID != "" || event.MemberType != "" || len(event.OwnerChain) != 0 || event.ResourceGroupID != "" ||
+			event.PolicyVersion <= 0 || event.CredentialType != "user_access_token" || event.Plane != "principal" {
+			t.Fatal("denial audit invented a membership or lost its authenticated user and publisher")
+		}
+		var metadata map[string]any
+		if json.Unmarshal(event.Metadata, &metadata) != nil || metadata["subject_selection"] != "none" {
+			t.Fatal("denial did not identify the absence of subject selection")
+		}
+		if replay := mvpJSON(t, principalHandler, http.MethodPost, "/oauth/authorize", customer.token,
+			map[string]string{"request_id": pending.RequestID, "decision": "deny"}); replay.Code != http.StatusBadRequest {
+			t.Fatal("denied consent request was replayed")
+		}
+		customerEvents := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+customer.spaceID+"/audit-logs?"+deniedQuery, customer.token, nil))
+		if len(customerEvents) != 0 {
+			t.Fatal("unselected customer Space received publisher denial events")
+		}
+		for _, response := range []*httptest.ResponseRecorder{approvedResponse, deniedResponse} {
+			for _, private := range []string{pending.RequestID, authorizedBody.RequestID, oauthToken.AccessToken, oauthToken.RefreshToken,
+				customer.token, publisher.token, user.Email, callback.Query().Get("code"), "mvp-state", "mvp-nonce"} {
+				if private != "" && strings.Contains(response.Body.String(), private) {
+					t.Fatal("consent audit leaked a private protocol value")
+				}
+			}
+		}
+		check := mvpJSON(t, serverHandler, http.MethodPost, "/server/v1/authz/check", keyResult.Data.Secret,
+			map[string]any{"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice:read",
+				"resource": map[string]string{"type": "invoice", "id": "inv_consent_audit", "space_id": customer.spaceID}})
+		if check.Code != http.StatusOK || !strings.Contains(check.Body.String(), `"decision":"allow"`) {
+			t.Fatal("denial of a new request changed the previously authorized Agent")
+		}
+	})
 	t.Run("BusinessAudit", func(t *testing.T) {
 		body, err := json.Marshal(map[string]any{
 			"subject": map[string]string{"token": oauthToken.AccessToken}, "action": "invoice.approve", "outcome": "deny",
