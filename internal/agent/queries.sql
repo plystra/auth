@@ -145,6 +145,15 @@ JOIN members m ON m.id = c.member_id
 WHERE c.prefix = sqlc.arg(prefix)
 LIMIT 1;
 
+-- name: LockAgentCredentialByPrefix :one
+SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
+       c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
+       m.type, m.home_group_id, m.created_by_member_id, m.oauth_client_id
+FROM agent_credentials c
+JOIN members m ON m.id = c.member_id
+WHERE c.prefix = sqlc.arg(prefix)
+FOR UPDATE OF c;
+
 -- name: LockOAuthRefreshCredentialByHash :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,

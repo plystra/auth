@@ -191,15 +191,9 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 		if credential == "" {
 			credential = r.Form.Get("subject_token")
 		}
-		c, err := h.Agents.AuthenticateKey(r.Context(), credential)
+		tokens, err := (tokenService{agents: h.Agents, sessions: h.Sessions}).agentKey(r.Context(), secret.New(credential), r.Form.Get("resource"))
 		if err != nil {
-			writeErr(w, apierr.New("invalid_grant", "agent credential is invalid"))
-			return
-		}
-		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_key"})
-		tokens, err := h.Sessions.CreateAgentAccess(ctx, c.MemberID, c.SpaceID, r.Form.Get("resource"))
-		if err != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "agent token exchange is unavailable"))
+			writeOAuthErr(w, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn})
@@ -343,62 +337,14 @@ func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
-	if h.Agents == nil || h.Sessions == nil {
+	if h.Agents == nil || h.Sessions == nil || h.Authorization == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
 		return
 	}
-	actor, err := h.Agents.AuthenticateKey(r.Context(), r.Form.Get("actor_token"))
+	tokens, err := (tokenService{agents: h.Agents, sessions: h.Sessions, authorization: h.Authorization}).delegated(
+		r.Context(), secret.New(r.Form.Get("subject_token")), secret.New(r.Form.Get("actor_token")), strings.Fields(r.Form.Get("scope")), r.Form.Get("resource"))
 	if err != nil {
-		writeErr(w, apierr.New("invalid_grant", "actor token is invalid"))
-		return
-	}
-	if err := h.Agents.ValidateActive(r.Context(), actor.MemberID); err != nil {
-		writeErr(w, apierr.New("invalid_grant", "actor token is invalid"))
-		return
-	}
-	parentClaims, active, err := h.Sessions.Introspect(r.Context(), r.Form.Get("subject_token"), security.DefaultApplicationAudience)
-	if err != nil || !active || parentClaims.Type != "agent" {
-		writeErr(w, apierr.New("invalid_grant", "subject token is invalid"))
-		return
-	}
-	owner, err := h.Agents.Owner(r.Context(), actor.MemberID)
-	if err != nil || owner != parentClaims.Subject {
-		writeErr(w, apierr.New("invalid_grant", "actor token is not delegated by the subject"))
-		return
-	}
-	if h.Authorization == nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
-		return
-	}
-	requested := uniqueScopes(strings.Fields(r.Form.Get("scope")))
-	parentScopes := uniqueScopes(parentClaims.Scopes)
-	if len(requested) == 0 && len(parentScopes) > 0 {
-		// An omitted scope inherits the parent token's restriction. It must
-		// never turn a previously narrowed delegation back into an unscoped
-		// token.
-		requested = parentScopes
-	}
-	if len(parentScopes) > 0 {
-		for _, permission := range requested {
-			if !scopeContains(parentScopes, permission) {
-				writeErr(w, apierr.New("invalid_scope", "requested scope exceeds the subject token scope"))
-				return
-			}
-		}
-	}
-	allowed, err := h.Authorization.ValidateTokenScopes(r.Context(), actor.MemberID, requested)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "authorization is unavailable"))
-		return
-	}
-	if !allowed {
-		writeErr(w, apierr.New("invalid_scope", "requested scope is not held by the delegated Agent"))
-		return
-	}
-	ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_token_exchange"})
-	tokens, err := h.Sessions.CreateAgentDelegatedAccess(ctx, actor.MemberID, actor.SpaceID, r.Form.Get("resource"), parentClaims.Subject, requested, parentClaims.ExpiresAt)
-	if err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
+		writeOAuthErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"})

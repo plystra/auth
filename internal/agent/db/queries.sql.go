@@ -787,6 +787,63 @@ func (q *Queries) ListExpiredAgentRoots(ctx context.Context) ([]ListExpiredAgent
 	return items, nil
 }
 
+const lockAgentCredentialByPrefix = `-- name: LockAgentCredentialByPrefix :one
+SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
+       c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,
+       m.type, m.home_group_id, m.created_by_member_id, m.oauth_client_id
+FROM agent_credentials c
+JOIN members m ON m.id = c.member_id
+WHERE c.prefix = $1
+FOR UPDATE OF c
+`
+
+type LockAgentCredentialByPrefixParams struct {
+	Prefix string `json:"prefix"`
+}
+
+type LockAgentCredentialByPrefixRow struct {
+	ID                string             `json:"id"`
+	MemberID          string             `json:"member_id"`
+	Kind              string             `json:"kind"`
+	Prefix            string             `json:"prefix"`
+	SecretHash        []byte             `json:"secret_hash"`
+	FamilyID          pgtype.Text        `json:"family_id"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt         pgtype.Timestamptz `json:"revoked_at"`
+	LastUsedAt        pgtype.Timestamptz `json:"last_used_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	SpaceID           string             `json:"space_id"`
+	MemberStatus      string             `json:"member_status"`
+	Type              string             `json:"type"`
+	HomeGroupID       pgtype.Text        `json:"home_group_id"`
+	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
+	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
+}
+
+func (q *Queries) LockAgentCredentialByPrefix(ctx context.Context, arg LockAgentCredentialByPrefixParams) (LockAgentCredentialByPrefixRow, error) {
+	row := q.db.QueryRow(ctx, lockAgentCredentialByPrefix, arg.Prefix)
+	var i LockAgentCredentialByPrefixRow
+	err := row.Scan(
+		&i.ID,
+		&i.MemberID,
+		&i.Kind,
+		&i.Prefix,
+		&i.SecretHash,
+		&i.FamilyID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.LastUsedAt,
+		&i.CreatedAt,
+		&i.SpaceID,
+		&i.MemberStatus,
+		&i.Type,
+		&i.HomeGroupID,
+		&i.CreatedByMemberID,
+		&i.OauthClientID,
+	)
+	return i, err
+}
+
 const lockOAuthRefreshCredentialByHash = `-- name: LockOAuthRefreshCredentialByHash :one
 SELECT c.id, c.member_id, c.kind, c.prefix, c.secret_hash, c.family_id, c.expires_at,
        c.revoked_at, c.last_used_at, c.created_at, m.space_id, m.status AS member_status,

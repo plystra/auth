@@ -286,6 +286,15 @@ func (s *Service) CreateAgentDelegatedAccess(ctx context.Context, memberID, spac
 	return s.createAgentAccess(ctx, memberID, spaceID, audience, actor, scopes, notAfter)
 }
 
+// CreateAgentDelegatedAccessTx keeps delegated signing and audit in the same
+// transaction as credential authentication and current authority validation.
+func (s *Service) CreateAgentDelegatedAccessTx(ctx context.Context, q *db.Queries, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
+	if err := member.LockChainsTx(ctx, q, memberID, actor); err != nil {
+		return Tokens{}, err
+	}
+	return s.agentAccessTx(ctx, q, memberID, spaceID, audience, actor, scopes, notAfter)
+}
+
 func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audience, actor string, scopes []string, notAfter int64) (Tokens, error) {
 	var tokens Tokens
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -469,17 +478,23 @@ func (s *Service) VerifyAccess(token string) (security.Claims, error) {
 // access tokens are intentionally short lived but session revocation is meant
 // to take effect immediately for online callers.
 func (s *Service) Introspect(ctx context.Context, token, audience string) (security.Claims, bool, error) {
+	return s.IntrospectTx(ctx, s.Store.Queries(), token, audience)
+}
+
+// IntrospectTx reads live identity through the supplied queries. Mutations must
+// first lock the relevant member/owner chains to stabilize status and epochs.
+func (s *Service) IntrospectTx(ctx context.Context, q *db.Queries, token, audience string) (security.Claims, bool, error) {
 	claims, err := s.Signer.Verify(token, time.Now().UTC(), audience)
 	if err != nil || (claims.Type != "user" && claims.Type != "access" && claims.Type != "agent") {
 		return security.Claims{}, false, nil
 	}
 	if claims.Type == "agent" {
-		return s.introspectAgent(ctx, claims)
+		return s.introspectAgent(ctx, q, claims)
 	}
 	if claims.SessionID == "" {
 		return security.Claims{}, false, nil
 	}
-	sess, err := s.Store.Queries().GetSession(ctx, db.GetSessionParams{ID: claims.SessionID})
+	sess, err := q.GetSession(ctx, db.GetSessionParams{ID: claims.SessionID})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return security.Claims{}, false, nil
@@ -489,7 +504,7 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 	if sess.UserID != claims.Subject || sess.RevokedAt.Valid || !sess.ExpiresAt.Valid || !sess.ExpiresAt.Time.After(time.Now().UTC()) {
 		return security.Claims{}, false, nil
 	}
-	user, err := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
+	user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return security.Claims{}, false, nil
@@ -503,7 +518,7 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 		return security.Claims{}, false, nil
 	}
 	if claims.MemberID != "" {
-		spaceID, permitted, err := boundMemberSpace(ctx, s.Store.Queries(), claims.Subject, claims.MemberID, time.Now().UTC())
+		spaceID, permitted, err := boundMemberSpace(ctx, q, claims.Subject, claims.MemberID, time.Now().UTC())
 		if err != nil {
 			return security.Claims{}, false, err
 		}
@@ -548,12 +563,12 @@ func boundMemberSpace(ctx context.Context, q *db.Queries, userID, memberID strin
 	return member.SpaceID, member.Status == "active" && member.Type == "human", nil
 }
 
-func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (security.Claims, bool, error) {
+func (s *Service) introspectAgent(ctx context.Context, q *db.Queries, claims security.Claims) (security.Claims, bool, error) {
 	if claims.Subject == "" {
 		return security.Claims{}, false, nil
 	}
 	now := time.Now().UTC()
-	row, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: claims.Subject})
+	row, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: claims.Subject})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return security.Claims{}, false, nil

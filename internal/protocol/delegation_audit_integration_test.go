@@ -252,7 +252,7 @@ func TestAgentTokenIssuanceHTTPRechecksOwnersAfterWaitingForLocks(t *testing.T) 
 		t.Fatal(err)
 	}
 	out := <-response
-	if out.Code != http.StatusServiceUnavailable || strings.Contains(out.Body.String(), "access_token") {
+	if out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "invalid_scope") || strings.Contains(out.Body.String(), "access_token") {
 		t.Fatalf("token issued using an inactive owner: status=%d", out.Code)
 	}
 	var count int

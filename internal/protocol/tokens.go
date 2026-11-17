@@ -14,15 +14,98 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 )
 
 type tokenService struct {
-	applications *application.Service
-	agents       *agent.Service
-	sessions     *session.Service
+	applications  *application.Service
+	agents        *agent.Service
+	sessions      *session.Service
+	authorization *authorization.Service
+}
+
+func (s tokenService) agentKey(ctx context.Context, raw secret.String, resource string) (session.Tokens, error) {
+	var tokens session.Tokens
+	err := s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+		credential, err := s.agents.AuthenticateKeyTx(ctx, q, raw.Value())
+		if err != nil {
+			return exchangeCredentialError(err)
+		}
+		ctx = audit.WithCaller(ctx, audit.Caller{CredentialType: "agent_key"})
+		tokens, err = s.sessions.CreateAgentAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource)
+		return err
+	})
+	if err != nil {
+		return session.Tokens{}, err
+	}
+	return tokens, nil
+}
+
+func (s tokenService) delegated(ctx context.Context, subject, actor secret.String, requested []string, resource string) (session.Tokens, error) {
+	var tokens session.Tokens
+	err := s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+		credential, err := s.agents.AuthenticateKeyTx(ctx, q, actor.Value())
+		if err != nil {
+			return exchangeCredentialError(err)
+		}
+		if err := s.agents.ValidateActiveTx(ctx, q, credential.MemberID); err != nil {
+			return exchangeCredentialError(err)
+		}
+		// The authenticated child's persisted owner chain is locked before
+		// reading the parent JWT's current revocation epoch and authority.
+		parent, active, err := s.sessions.IntrospectTx(ctx, q, subject.Value(), security.DefaultApplicationAudience)
+		if err != nil {
+			return err
+		}
+		if !active || parent.Type != "agent" {
+			return apierr.New("invalid_grant", "subject token is invalid")
+		}
+		child, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: credential.MemberID})
+		if err != nil {
+			return err
+		}
+		if child.OwnerMemberID.String != parent.Subject {
+			return apierr.New("invalid_grant", "actor token is not delegated by the subject")
+		}
+		requested = uniqueScopes(requested)
+		parentScopes := uniqueScopes(parent.Scopes)
+		if len(requested) == 0 && len(parentScopes) > 0 {
+			requested = parentScopes
+		}
+		if len(parentScopes) > 0 {
+			for _, permission := range requested {
+				if !scopeContains(parentScopes, permission) {
+					return apierr.New("invalid_scope", "requested scope exceeds the subject token scope")
+				}
+			}
+		}
+		allowed, err := s.authorization.ValidateTokenScopesTx(ctx, q, credential.MemberID, requested)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return apierr.New("invalid_scope", "requested scope is not held by the delegated Agent")
+		}
+		ctx = audit.WithCaller(ctx, audit.Caller{CredentialType: "agent_token_exchange"})
+		tokens, err = s.sessions.CreateAgentDelegatedAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource, parent.Subject, requested, parent.ExpiresAt)
+		return err
+	})
+	if err != nil {
+		return session.Tokens{}, err
+	}
+	return tokens, nil
+}
+
+func exchangeCredentialError(err error) error {
+	var public *apierr.Error
+	if errors.As(err, &public) && public.Code == "UNAUTHENTICATED" {
+		return apierr.New("invalid_grant", "agent credential is invalid")
+	}
+	return err
 }
 
 type codeExchangeInput struct {

@@ -847,27 +847,51 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, s
 }
 
 func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, error) {
+	var credential Credential
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		credential, err = s.AuthenticateKeyTx(ctx, q, raw)
+		return err
+	})
+	if err != nil {
+		return Credential{}, err
+	}
+	return credential, nil
+}
+
+// AuthenticateKeyTx locks members before credentials, matching rotation and
+// subtree revocation. Credential usage commits with the caller's operation.
+// Owner validity remains an authorization fact for the shared engine.
+func (s *Service) AuthenticateKeyTx(ctx context.Context, q *db.Queries, raw string) (Credential, error) {
 	parts := strings.SplitN(strings.TrimSpace(raw), ".", 2)
 	if len(parts) != 2 || !strings.HasPrefix(parts[0], "ply_ag_") || parts[1] == "" {
 		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
 	}
-	row, err := s.Store.Queries().GetAgentCredentialByPrefix(ctx, db.GetAgentCredentialByPrefixParams{Prefix: parts[0]})
+	identity, err := q.GetAgentCredentialByPrefix(ctx, db.GetAgentCredentialByPrefixParams{Prefix: parts[0]})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
 		}
 		return Credential{}, err
 	}
-	if !s.matchesCredentialHash(parts[1], row.SecretHash) || row.RevokedAt.Valid || !row.ExpiresAt.Time.After(time.Now().UTC()) || row.MemberStatus != "active" {
+	if !s.matchesCredentialHash(parts[1], identity.SecretHash) || identity.Kind != "key" {
 		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
 	}
-	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		return q.TouchAgentCredential(ctx, db.TouchAgentCredentialParams{ID: row.ID})
-	}); err != nil {
+	if err := member.LockChainsTx(ctx, q, identity.MemberID); err != nil {
 		return Credential{}, err
 	}
-	if row.Kind != "key" {
+	row, err := q.LockAgentCredentialByPrefix(ctx, db.LockAgentCredentialByPrefixParams{Prefix: parts[0]})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
+	}
+	if err != nil {
+		return Credential{}, err
+	}
+	if row.Kind != "key" || !s.matchesCredentialHash(parts[1], row.SecretHash) || row.RevokedAt.Valid || !row.ExpiresAt.Time.After(time.Now().UTC()) || row.MemberStatus != "active" {
+		return Credential{}, apierr.New("UNAUTHENTICATED", "agent credential is invalid")
+	}
+	if err := q.TouchAgentCredential(ctx, db.TouchAgentCredentialParams{ID: row.ID}); err != nil {
+		return Credential{}, err
 	}
 	return Credential{ID: row.ID, MemberID: row.MemberID, SpaceID: row.SpaceID, Kind: row.Kind, Prefix: row.Prefix, SecretHash: row.SecretHash, ExpiresAt: row.ExpiresAt.Time, MemberState: row.MemberStatus, HomeGroupID: row.HomeGroupID.String}, nil
 }
@@ -877,8 +901,18 @@ func (s *Service) AuthenticateKey(ctx context.Context, raw string) (Credential, 
 // authentication intentionally keeps its historical semantics so callers
 // that need to report authorization facts can do so through the engine.
 func (s *Service) ValidateActive(ctx context.Context, memberID string) error {
-	member, err := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
-	if errors.Is(err, pgx.ErrNoRows) || err != nil || member.Status != "active" || member.GroupStatus != "active" || (member.ExpiresAt.Valid && !member.ExpiresAt.Time.After(time.Now().UTC())) {
+	return s.ValidateActiveTx(ctx, s.Store.Queries(), memberID)
+}
+
+func (s *Service) ValidateActiveTx(ctx context.Context, q *db.Queries, memberID string) error {
+	member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("UNAUTHENTICATED", "agent credential is invalid")
+	}
+	if err != nil {
+		return err
+	}
+	if member.Status != "active" || member.GroupStatus != "active" || (member.ExpiresAt.Valid && !member.ExpiresAt.Time.After(time.Now().UTC())) {
 		return apierr.New("UNAUTHENTICATED", "agent credential is invalid")
 	}
 	return nil
