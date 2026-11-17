@@ -345,6 +345,7 @@ type Member struct {
 	OauthClientID     pgtype.Text        `json:"oauth_client_id"`
 	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
 	DeletedAt         pgtype.Timestamptz `json:"deleted_at"`
+	TokenEpoch        int64              `json:"token_epoch"`
 }
 
 type MemberRole struct {

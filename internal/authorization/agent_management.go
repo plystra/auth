@@ -17,6 +17,10 @@ func (s *Service) AuthorizeAgentMutationTx(ctx context.Context, q *db.Queries, a
 	if s == nil {
 		return apierr.New("UNAVAILABLE", "Agent management authorization is unavailable")
 	}
+	return s.authorizeMemberMutationTx(ctx, q, actorID, targetID, permission)
+}
+
+func (s *Service) authorizeMemberMutationTx(ctx context.Context, q *db.Queries, actorID, targetID, permission string) error {
 	if err := lockAuthorizationMembersTx(ctx, q, actorID, targetID); err != nil {
 		return err
 	}
@@ -25,7 +29,7 @@ func (s *Service) AuthorizeAgentMutationTx(ctx context.Context, q *db.Queries, a
 	}
 	target, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: targetID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return apierr.New("NOT_FOUND", "Agent management target was not found")
+		return apierr.New("NOT_FOUND", "management target was not found")
 	}
 	if err != nil {
 		return err
@@ -47,7 +51,7 @@ func (s *Service) AuthorizeAgentMutationTx(ctx context.Context, q *db.Queries, a
 		return err
 	}
 	if decision.Effect != engine.Allow {
-		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this Agent operation.", Details: map[string]string{"permission": permission}}
+		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this member operation.", Details: map[string]string{"permission": permission}}
 	}
 	return nil
 }

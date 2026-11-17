@@ -15,6 +15,9 @@ FROM users WHERE id = sqlc.arg(id) LIMIT 1;
 SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 FROM users WHERE id = sqlc.arg(id) FOR UPDATE;
 
+-- name: LockUserForAuthorization :one
+SELECT id, status FROM users WHERE id = sqlc.arg(id) FOR NO KEY UPDATE;
+
 -- name: MarkEmailVerified :one
 UPDATE users SET email_verified_at = now(), status = 'active', updated_at = now()
 WHERE id = sqlc.arg(id) AND status = 'pending'

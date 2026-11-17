@@ -903,6 +903,9 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 			}
 			return err
 		}
+		if err := suspendBindingAgentsTx(ctx, q, actorMemberID, "", memberID, userID); err != nil {
+			return err
+		}
 		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err
 		}
@@ -915,49 +918,10 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "member.binding.revoke", memberID, "success")
-	})
-}
-
-// RevokeOwnBinding removes only the calling user's binding to the current
-// member. Unlike administrative binding revocation, this self-service path
-// does not require auth.bindings:manage and does not revoke the user's other
-// member bindings.
-func (s *Service) RevokeOwnBinding(ctx context.Context, userID, memberID string) error {
-	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("NOT_FOUND", "member was not found")
-		}
-		if err != nil {
-			return err
-		}
-		binding, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
-		if errors.Is(err, pgx.ErrNoRows) || (err == nil && binding.Status != "active") {
-			return apierr.New("NOT_FOUND", "active user binding was not found")
-		}
-		if err != nil {
-			return err
-		}
-		suspendedAgents, err := q.SuspendAgentsCreatedByBinding(ctx, db.SuspendAgentsCreatedByBindingParams{UserID: pgtype.Text{String: userID, Valid: true}, MemberID: pgtype.Text{String: memberID, Valid: true}})
-		if err != nil {
-			return err
-		}
-		for _, suspended := range suspendedAgents {
-			if err := q.RevokeAgentCredentialsForMember(ctx, db.RevokeAgentCredentialsForMemberParams{MemberID: suspended}); err != nil {
-				return err
-			}
-			if err := audit.Write(ctx, q, "member", memberID, "agent.binding.suspend", suspended, "success"); err != nil {
-				return err
-			}
-		}
-		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
-			return err
-		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: member.SpaceID}); err != nil {
-			return err
-		}
-		return audit.Write(ctx, q, "member", memberID, "member.binding.self_revoke", memberID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, Action: "member.binding.revoke", Outcome: "success", MemberID: memberID,
+			Permission: "auth.bindings:manage", Metadata: map[string]string{"binding_user_id": userID},
+		})
 	})
 }
 

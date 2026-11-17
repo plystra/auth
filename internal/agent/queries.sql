@@ -54,7 +54,7 @@ VALUES (sqlc.arg(group_id), sqlc.arg(member_id), 'manual')
 ON CONFLICT (group_id, member_id) DO NOTHING;
 
 -- name: GetAgentMember :one
-SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version, m.token_epoch,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
        m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
        g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status

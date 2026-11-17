@@ -1084,7 +1084,7 @@ func (q *Queries) GetAgentCredentialByPrefix(ctx context.Context, arg GetAgentCr
 }
 
 const getAgentMember = `-- name: GetAgentMember :one
-SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version,
+SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.version, m.token_epoch,
        m.home_group_id, m.created_by_user_id, m.created_by_member_id, m.source,
        m.oauth_client_id, m.expires_at, m.deleted_at, m.created_at,
        g.owner_member_id, g.parent_id AS group_parent_id, g.status AS group_status
@@ -1105,6 +1105,7 @@ type GetAgentMemberRow struct {
 	BindingPolicy     string             `json:"binding_policy"`
 	Status            string             `json:"status"`
 	Version           int64              `json:"version"`
+	TokenEpoch        int64              `json:"token_epoch"`
 	HomeGroupID       pgtype.Text        `json:"home_group_id"`
 	CreatedByUserID   pgtype.Text        `json:"created_by_user_id"`
 	CreatedByMemberID pgtype.Text        `json:"created_by_member_id"`
@@ -1129,6 +1130,7 @@ func (q *Queries) GetAgentMember(ctx context.Context, arg GetAgentMemberParams) 
 		&i.BindingPolicy,
 		&i.Status,
 		&i.Version,
+		&i.TokenEpoch,
 		&i.HomeGroupID,
 		&i.CreatedByUserID,
 		&i.CreatedByMemberID,

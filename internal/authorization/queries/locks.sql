@@ -16,19 +16,14 @@ FROM members
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
 
--- name: SuspendAgentsCreatedByBinding :many
-UPDATE members
-SET status = 'suspended', version = version + 1
+-- name: ListAgentsCreatedByBinding :many
+SELECT id
+FROM members
 WHERE type = 'agent'
   AND created_by_user_id = sqlc.arg(user_id)
   AND created_by_member_id = sqlc.arg(member_id)
-  AND status = 'active'
-RETURNING id;
-
--- name: RevokeAgentCredentialsForMember :exec
-UPDATE agent_credentials
-SET revoked_at = now()
-WHERE member_id = sqlc.arg(member_id) AND revoked_at IS NULL;
+  AND status <> 'removed'
+ORDER BY id;
 
 -- name: CountStandardRootGroups :one
 SELECT count(*)::bigint

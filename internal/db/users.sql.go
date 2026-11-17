@@ -156,6 +156,26 @@ func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (GetUs
 	return i, err
 }
 
+const lockUserForAuthorization = `-- name: LockUserForAuthorization :one
+SELECT id, status FROM users WHERE id = $1 FOR NO KEY UPDATE
+`
+
+type LockUserForAuthorizationParams struct {
+	ID string `json:"id"`
+}
+
+type LockUserForAuthorizationRow struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+func (q *Queries) LockUserForAuthorization(ctx context.Context, arg LockUserForAuthorizationParams) (LockUserForAuthorizationRow, error) {
+	row := q.db.QueryRow(ctx, lockUserForAuthorization, arg.ID)
+	var i LockUserForAuthorizationRow
+	err := row.Scan(&i.ID, &i.Status)
+	return i, err
+}
+
 const lockUserForStatus = `-- name: LockUserForStatus :one
 SELECT id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at
 FROM users WHERE id = $1 FOR UPDATE

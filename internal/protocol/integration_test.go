@@ -849,7 +849,7 @@ func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T)
 	parentToken, err := signer.Sign(security.Claims{
 		Issuer: signer.Issuer(), Subject: parent.ID, MemberID: parent.ID, SpaceID: owner.SpaceID,
 		Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(5 * time.Minute).Unix(),
-		IssuedAt: now.Unix(), JWTID: "jti_token_exchange_parent", Type: "agent",
+		IssuedAt: now.Unix(), JWTID: "jti_token_exchange_parent", Type: "agent", AgentTokenEpoch: 1,
 		Scopes: []string{"auth.members:read"},
 	})
 	if err != nil {
@@ -920,7 +920,7 @@ func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T)
 	manageParent, err := signer.Sign(security.Claims{
 		Issuer: signer.Issuer(), Subject: parent.ID, MemberID: parent.ID, SpaceID: owner.SpaceID,
 		Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(5 * time.Minute).Unix(),
-		IssuedAt: now.Unix(), JWTID: "jti_token_exchange_manage_parent", Type: "agent",
+		IssuedAt: now.Unix(), JWTID: "jti_token_exchange_manage_parent", Type: "agent", AgentTokenEpoch: 1,
 		Scopes: []string{"auth.groups:manage"},
 	})
 	if err != nil {
@@ -936,7 +936,7 @@ func TestOAuthTokenExchangeRestrictsScopeToParentAndChildAuthority(t *testing.T)
 	expiredParent, err := signer.Sign(security.Claims{
 		Issuer: signer.Issuer(), Subject: parent.ID, MemberID: parent.ID, SpaceID: owner.SpaceID,
 		Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(-time.Minute).Unix(),
-		IssuedAt: now.Add(-2 * time.Minute).Unix(), JWTID: "jti_token_exchange_expired_parent", Type: "agent",
+		IssuedAt: now.Add(-2 * time.Minute).Unix(), JWTID: "jti_token_exchange_expired_parent", Type: "agent", AgentTokenEpoch: 1,
 		Scopes: []string{"auth.members:read"},
 	})
 	if err != nil {

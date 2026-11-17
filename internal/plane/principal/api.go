@@ -663,11 +663,7 @@ func (a *API) removeCurrentMember(ctx context.Context, in *BearerInput) (*Generi
 			return nil, err
 		}
 	} else {
-		member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
-		if err != nil {
-			return nil, err
-		}
-		if err := a.Authorization.RevokeOwnBinding(ctx, userID, member.ID); err != nil {
+		if err := a.Authorization.RevokeOwnBinding(ctx, userID, memberID); err != nil {
 			return nil, err
 		}
 	}

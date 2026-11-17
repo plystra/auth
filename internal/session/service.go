@@ -316,7 +316,7 @@ func (s *Service) createAgentAccess(ctx context.Context, memberID, spaceID, audi
 	if expiresAt.Unix() <= now.Unix() {
 		return Tokens{}, apierr.New("invalid_grant", "delegated token would already be expired")
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: ownerChain, Scopes: scopes, Type: "agent"})
+	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: ownerChain, Scopes: scopes, Type: "agent", AgentTokenEpoch: agent.TokenEpoch})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -521,7 +521,7 @@ func (s *Service) introspectAgent(ctx context.Context, claims security.Claims) (
 		}
 		return security.Claims{}, false, err
 	}
-	if (claims.SpaceID != "" && claims.SpaceID != row.SpaceID) || row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
+	if claims.AgentTokenEpoch != row.TokenEpoch || (claims.SpaceID != "" && claims.SpaceID != row.SpaceID) || row.Status != "active" || row.GroupStatus != "active" || (row.ExpiresAt.Valid && !row.ExpiresAt.Time.After(now)) {
 		return security.Claims{}, false, nil
 	}
 	// Owner-chain validity is an authorization fact. Keeping the token

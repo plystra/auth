@@ -107,11 +107,11 @@ func TestJWTVerificationRejectsAlgorithmIssuerAudienceTypeAndExpiryMismatches(t 
 }
 
 func TestJWTClaimsUseStableJSONNames(t *testing.T) {
-	payload, err := json.Marshal(Claims{Issuer: "i", Subject: "s", MemberID: "m", SpaceID: "p", Audience: "a", ExpiresAt: 1, IssuedAt: 1, JWTID: "j", SessionID: "sid", Assurance: 1, AMR: []string{"pwd"}, Actor: &ActorClaim{Subject: "a", MemberID: "a", Type: "agent"}, Type: "agent", Scopes: []string{"read"}})
+	payload, err := json.Marshal(Claims{Issuer: "i", Subject: "s", MemberID: "m", SpaceID: "p", Audience: "a", ExpiresAt: 1, IssuedAt: 1, JWTID: "j", SessionID: "sid", Assurance: 1, AMR: []string{"pwd"}, Actor: &ActorClaim{Subject: "a", MemberID: "a", Type: "agent"}, Type: "agent", Scopes: []string{"read"}, AgentTokenEpoch: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{`"iss"`, `"sub"`, `"mid"`, `"spc"`, `"aud"`, `"exp"`, `"iat"`, `"jti"`, `"sid"`, `"aal"`, `"amr"`, `"act"`, `"typ"`, `"scp"`} {
+	for _, field := range []string{`"iss"`, `"sub"`, `"mid"`, `"spc"`, `"aud"`, `"exp"`, `"iat"`, `"jti"`, `"sid"`, `"aal"`, `"amr"`, `"act"`, `"typ"`, `"scp"`, `"aep"`} {
 		if !strings.Contains(string(payload), field) {
 			t.Fatalf("claims JSON missing %s: %s", field, payload)
 		}

@@ -22,20 +22,21 @@ import (
 )
 
 type Claims struct {
-	Issuer    string      `json:"iss"`
-	Subject   string      `json:"sub"`
-	MemberID  string      `json:"mid,omitempty"`
-	SpaceID   string      `json:"spc,omitempty"`
-	Audience  string      `json:"aud"`
-	ExpiresAt int64       `json:"exp"`
-	IssuedAt  int64       `json:"iat"`
-	JWTID     string      `json:"jti"`
-	SessionID string      `json:"sid"`
-	Assurance int         `json:"aal"`
-	AMR       []string    `json:"amr"`
-	Actor     *ActorClaim `json:"act,omitempty"`
-	Type      string      `json:"typ,omitempty"`
-	Scopes    []string    `json:"scp,omitempty"`
+	Issuer          string      `json:"iss"`
+	Subject         string      `json:"sub"`
+	MemberID        string      `json:"mid,omitempty"`
+	SpaceID         string      `json:"spc,omitempty"`
+	Audience        string      `json:"aud"`
+	ExpiresAt       int64       `json:"exp"`
+	IssuedAt        int64       `json:"iat"`
+	JWTID           string      `json:"jti"`
+	SessionID       string      `json:"sid"`
+	Assurance       int         `json:"aal"`
+	AMR             []string    `json:"amr"`
+	Actor           *ActorClaim `json:"act,omitempty"`
+	Type            string      `json:"typ,omitempty"`
+	Scopes          []string    `json:"scp,omitempty"`
+	AgentTokenEpoch int64       `json:"aep,omitempty"`
 }
 
 // ActorClaim records the member that delegated an Agent token and recursively

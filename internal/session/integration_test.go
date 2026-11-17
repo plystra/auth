@@ -372,6 +372,25 @@ func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
 	if claims.Type != "agent" || claims.Subject != child.ID || claims.MemberID != child.ID {
 		t.Fatalf("Agent access claims = %+v, want typ agent with child sub/mid", claims)
 	}
+	t.Run("TokenEpochRejectsMissingOrWrongGeneration", func(t *testing.T) {
+		for _, epoch := range []int64{0, claims.AgentTokenEpoch + 1} {
+			altered := claims
+			altered.AgentTokenEpoch = epoch
+			token, err := signer.Sign(altered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, active, err := sessions.Introspect(ctx, token, security.DefaultApplicationAudience); err != nil || active {
+				t.Fatalf("incorrect Agent token generation: active=%v error=%v", active, err)
+			}
+		}
+	})
+	if _, err := st.Pool.Exec(ctx, `UPDATE members SET version = version + 1 WHERE id = $1`, child.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, active, err := sessions.Introspect(ctx, tokens.AccessToken, security.DefaultApplicationAudience); err != nil || !active {
+		t.Fatalf("authority version change invalidated the Agent identity: active=%v error=%v", active, err)
+	}
 	if claims.Actor == nil || claims.Actor.Subject != parent.ID || claims.Actor.MemberID != parent.ID || claims.Actor.Type != "agent" {
 		t.Fatalf("Agent actor claim = %+v, want parent Agent", claims.Actor)
 	}
@@ -385,6 +404,18 @@ func TestAgentAccessTokenContainsNestedOwnerChain(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `UPDATE members SET status = 'active' WHERE id = $1`, child.ID); err != nil {
 		t.Fatal(err)
 	}
+	t.Run("RevokedTokensDoNotRevive", func(t *testing.T) {
+		if _, active, err := sessions.Introspect(ctx, tokens.AccessToken, security.DefaultApplicationAudience); err != nil || active {
+			t.Fatalf("resume revalidated a pre-suspension token: active=%v error=%v", active, err)
+		}
+		fresh, err := sessions.CreateAgentAccess(ctx, child.ID, space.ID, security.DefaultApplicationAudience)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, active, err := sessions.Introspect(ctx, fresh.AccessToken, security.DefaultApplicationAudience); err != nil || !active {
+			t.Fatalf("fresh token after resume is not valid: active=%v error=%v", active, err)
+		}
+	})
 	if _, err := st.Pool.Exec(ctx, `UPDATE groups SET status = 'suspended' WHERE id = $1`, child.HomeGroupID); err != nil {
 		t.Fatal(err)
 	}
