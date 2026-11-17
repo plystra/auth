@@ -1615,13 +1615,25 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 			}
 			return err
 		}
+		// The grantee is immutable, but its position and revocation state can
+		// change while waiting for locks. Resolve both under the mutation locks.
+		targetMemberID := row.GranteeMemberID.String
+		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
+			return err
+		}
+		if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
+			return err
+		}
+		row, err = q.GetGrantInSpace(ctx, db.GetGrantInSpaceParams{ID: grantID, SpaceID: spaceID})
+		if err != nil {
+			return err
+		}
 		// Resolve the grant's actual grantee before checking authorization. A
 		// group-scoped manager may revoke grants for that group, while a
 		// Space-wide grant is required for members in multiple groups or with no
 		// unique group. This keeps revoke decisions on the same resource facts as
 		// create and other target-specific management operations.
 		resourceGroup := ""
-		var targetMemberID string
 		if row.GranteeGroupID.Valid {
 			if _, err := q.GetGroupInSpace(ctx, db.GetGroupInSpaceParams{ID: row.GranteeGroupID.String, SpaceID: spaceID}); err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -1639,9 +1651,6 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 		} else {
 			return apierr.New("NOT_FOUND", "grant grantee was not found")
 		}
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, targetMemberID); err != nil {
-			return err
-		}
 		if err := lockAuthorizationNodesTx(ctx, q, spaceID, resourceGroup); err != nil {
 			return err
 		}
@@ -1653,6 +1662,9 @@ func (s *Service) RevokeGrant(ctx context.Context, actorMemberID, spaceID, grant
 		}
 		if decision.Effect != engine.Allow {
 			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.grants:assign"}}
+		}
+		if row.RevokedAt.Valid {
+			return nil
 		}
 		if err := q.RevokeGrant(ctx, db.RevokeGrantParams{ID: grantID}); err != nil {
 			return err

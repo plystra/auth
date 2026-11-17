@@ -226,6 +226,25 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 		}
 		deniedDecisions = append(deniedDecisions, result.DecisionID)
 	}
+	restoredGrant := mvpData[authorization.Grant](t, principal(http.MethodPost, spacePath+"/grants", scenario.UserToken, map[string]any{
+		"grantee": map[string]string{"member_id": parent.Agent.ID}, "permissions": []string{"invoice:read"},
+		"scope": "group_tree", "anchor_group_id": project.ID,
+	}))
+	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
+		if result := check(handler, "check", childToken.AccessToken, project.ID); result.Decision != "allow" {
+			t.Fatalf("new member grant did not restore delegated authority: %s", result.DenyCode)
+		}
+	}
+	for range 2 {
+		mvpData[json.RawMessage](t, principal(http.MethodDelete, spacePath+"/grants/"+restoredGrant.ID, scenario.UserToken, nil))
+	}
+	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
+		result := check(handler, "explain", childToken.AccessToken, project.ID)
+		if result.Decision != "deny" || result.DenyCode != "OWNER_ENVELOPE_EXCLUDED" || result.DecisionID == "" {
+			t.Fatalf("direct grant revocation did not invalidate the delegated token: %s", result.DenyCode)
+		}
+		deniedDecisions = append(deniedDecisions, result.DecisionID)
+	}
 	mvpData[json.RawMessage](t, principal(http.MethodPost, "/v1/me/agents/"+parent.Agent.ID+"/stop", scenario.UserToken, nil))
 	for _, credential := range []string{parent.Key, child.Key, childToken.AccessToken} {
 		identity := mvpData[server.IntrospectIdentity](t, mvpJSON(t, scenario.Observer, http.MethodPost, "/server/v1/tokens/introspect", scenario.ServerKey, map[string]string{"token": credential}))
@@ -246,9 +265,16 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 	}
 	events := mvpData[[]audit.Event](t, principal(http.MethodGet, spacePath+"/audit-logs?member_id="+parent.Agent.ID+"&limit=100", scenario.UserToken, nil))
 	seen := map[string]bool{}
+	revocationEvents := 0
 	for _, event := range events {
 		seen[event.Action] = true
 		seen[event.MemberID+":"+event.Action] = true
+		if event.Action == "grant.revoke" && event.ResourceID == restoredGrant.ID {
+			revocationEvents++
+			if event.MemberID != parent.Agent.ID || event.ActorID != scenario.UserMemberID || event.SpaceID != scenario.SpaceID {
+				t.Fatal("direct grant revocation audit omitted the affected parent or actor")
+			}
+		}
 		if event.MemberID == child.Agent.ID && (len(event.OwnerChain) != 2 || event.OwnerChain[0].MemberID != parent.Agent.ID || event.OwnerChain[1].MemberID != scenario.UserMemberID) {
 			t.Fatal("public child audit omitted its complete delegation chain")
 		}
@@ -265,7 +291,7 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			}
 		}
 	}
-	for _, action := range []string{"agent.create", "grant.replace", "group.member.add", "group.member.remove", "agent.stop", "authz.check", "authz.explain"} {
+	for _, action := range []string{"agent.create", "grant.replace", "grant.inline.create", "grant.revoke", "group.member.add", "group.member.remove", "agent.stop", "authz.check", "authz.explain"} {
 		if !seen[action] {
 			t.Fatalf("public delegation audit omitted %s", action)
 		}
@@ -279,6 +305,9 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 	}
 	if len(deniedDecisions) != 0 {
 		t.Fatal("public audit could not correlate every revoked check and explanation")
+	}
+	if revocationEvents != 1 {
+		t.Fatalf("repeated direct revocation produced %d audit events, want one", revocationEvents)
 	}
 	return root.ID
 }
