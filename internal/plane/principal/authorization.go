@@ -503,7 +503,7 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 		if err != nil {
 			return nil, err
 		}
-		grant, err := a.Authorization.CreateGroupGrant(ctx, actor.ID, in.ID, in.Body.Grantee.GroupID, authorization.GroupGrantInput{
+		grant, err := a.Authorization.CreateGroupGrant(ctx, actor.ID, in.ID, in.Body.Grantee.GroupID, authorization.GrantInput{
 			RoleID: in.Body.RoleID, Permissions: in.Body.Permissions, Scope: in.Body.Scope,
 			AnchorSpaceID: in.Body.AnchorSpaceID, AnchorGroupID: in.Body.AnchorGroupID,
 		})
@@ -515,7 +515,20 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 		return out, nil
 	}
 	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
-		return nil, apierr.New("UNAVAILABLE", "member grants with group resource scopes are not yet available")
+		actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+		if err != nil {
+			return nil, err
+		}
+		grant, err := a.Authorization.CreateMemberGroupGrant(ctx, actor.ID, in.ID, in.Body.Grantee.MemberID, authorization.GrantInput{
+			RoleID: in.Body.RoleID, Permissions: in.Body.Permissions, Scope: in.Body.Scope,
+			AnchorSpaceID: in.Body.AnchorSpaceID, AnchorGroupID: in.Body.AnchorGroupID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := &authorizationDataOutput[authorization.Grant]{}
+		out.Body.Data = grant
+		return out, nil
 	}
 	actor, ctx, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.Grantee.MemberID)
 	if err != nil {

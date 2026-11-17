@@ -19,7 +19,7 @@ import (
 	"github.com/plystra/auth/internal/security"
 )
 
-func groupGrantHTTP(f groupRemovalFixture, token, groupID string, input authorization.GroupGrantInput) *httptest.ResponseRecorder {
+func groupGrantHTTP(f groupRemovalFixture, token, groupID string, input authorization.GrantInput) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]any{
 		"grantee": map[string]string{"group_id": groupID}, "role_id": input.RoleID, "permissions": input.Permissions,
 		"scope": input.Scope, "anchor_space_id": input.AnchorSpaceID, "anchor_group_id": input.AnchorGroupID,
@@ -44,7 +44,7 @@ func TestGroupGrantHTTPInheritsAcrossSubtreeAndHonorsResourceScopes(t *testing.T
 					INSERT INTO group_members (group_id, member_id, space_id, source) VALUES ('grp_grant_child', 'mem_grant_descendant', $1, 'manual'), ('grp_remove_b', 'mem_grant_outsider', $1, 'manual')`, pgx.QueryExecModeSimpleProtocol, f.spaceID); err != nil {
 					t.Fatal(err)
 				}
-				input := authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: scope}
+				input := authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: scope}
 				if source == "role" {
 					role, err := f.authz.CreateRole(ctx, f.owner.ID, f.spaceID, "Project manager", "", input.Permissions)
 					if err != nil {
@@ -186,7 +186,7 @@ func TestGroupGrantHTTPUsesUnifiedActorAndOwnerAuthority(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				out := groupGrantHTTP(f, token, groupID, authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group_tree", AnchorGroupID: anchor})
+				out := groupGrantHTTP(f, token, groupID, authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group_tree", AnchorGroupID: anchor})
 				if scenario == "allow" {
 					if decision.Effect != engine.Allow || out.Code != http.StatusOK {
 						t.Fatalf("group grant diverged: engine=%s status=%d body=%s", decision.Code, out.Code, out.Body.String())
@@ -218,7 +218,7 @@ func TestEmptyGroupGrantDoesNotBypassFutureJoinCoverage(t *testing.T) {
 		UPDATE assign_rights SET revoked_at = now() WHERE holder_member_id = $2`, pgx.QueryExecModeSimpleProtocol, f.spaceID, f.owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	input := authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group_tree", AnchorGroupID: "grp_grant_empty"}
+	input := authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group_tree", AnchorGroupID: "grp_grant_empty"}
 	if out := groupGrantHTTP(f, f.token, "grp_grant_empty", input); out.Code != http.StatusOK {
 		t.Fatalf("empty group has no effective positive delta: status=%d body=%s", out.Code, out.Body.String())
 	}
@@ -241,7 +241,7 @@ func TestGroupGrantDescendantSpaceAnchorsUseActualAncestryAndEnvelopes(t *testin
 				INSERT INTO groups (id, space_id, name) VALUES ('grp_grant_downstream', 'spc_grant_child', 'Downstream')`, pgx.QueryExecModeSimpleProtocol, f.spaceID); err != nil {
 				t.Fatal(err)
 			}
-			input := authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: scope}
+			input := authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: scope}
 			if scope == "space" || scope == "space_tree" {
 				input.AnchorSpaceID = "spc_grant_child"
 			} else {
@@ -278,14 +278,14 @@ func TestGroupGrantRejectsInvalidCatalogAnchorsAndRollsBackAuditFailure(t *testi
 	}
 	for _, test := range []struct {
 		name, group, code string
-		input             authorization.GroupGrantInput
+		input             authorization.GrantInput
 	}{
-		{"foreign_grantee", "grp_grant_foreign", "NOT_FOUND", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}}},
-		{"foreign_role", "grp_remove_a", "NOT_FOUND", authorization.GroupGrantInput{RoleID: "rol_grant_foreign"}},
-		{"foreign_anchor", "grp_remove_a", "SCOPE_OUT_OF_BOUNDS", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group", AnchorGroupID: "grp_grant_foreign"}},
-		{"missing_anchor", "grp_remove_a", "VALIDATION_FAILED", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group"}},
-		{"global", "grp_remove_a", "VALIDATION_FAILED", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}, Scope: "global"}},
-		{"unknown_permission", "grp_remove_a", "AUTHORITY_DELTA_NOT_COVERED", authorization.GroupGrantInput{Permissions: []string{"unknown:action"}}},
+		{"foreign_grantee", "grp_grant_foreign", "NOT_FOUND", authorization.GrantInput{Permissions: []string{"auth.members:manage"}}},
+		{"foreign_role", "grp_remove_a", "NOT_FOUND", authorization.GrantInput{RoleID: "rol_grant_foreign"}},
+		{"foreign_anchor", "grp_remove_a", "SCOPE_OUT_OF_BOUNDS", authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group", AnchorGroupID: "grp_grant_foreign"}},
+		{"missing_anchor", "grp_remove_a", "VALIDATION_FAILED", authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: "group"}},
+		{"global", "grp_remove_a", "VALIDATION_FAILED", authorization.GrantInput{Permissions: []string{"auth.members:manage"}, Scope: "global"}},
+		{"unknown_permission", "grp_remove_a", "AUTHORITY_DELTA_NOT_COVERED", authorization.GrantInput{Permissions: []string{"unknown:action"}}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if out := groupGrantHTTP(f, f.token, test.group, test.input); out.Code < http.StatusBadRequest || !strings.Contains(out.Body.String(), test.code) {
@@ -297,7 +297,7 @@ func TestGroupGrantRejectsInvalidCatalogAnchorsAndRollsBackAuditFailure(t *testi
 		if _, err := f.store.Pool.Exec(ctx, `UPDATE permissions SET status = $1 WHERE key = 'auth.members:manage'`, status); err != nil {
 			t.Fatal(err)
 		}
-		if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}}); out.Code != http.StatusForbidden || !strings.Contains(out.Body.String(), "AUTHORITY_DELTA_NOT_COVERED") {
+		if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GrantInput{Permissions: []string{"auth.members:manage"}}); out.Code != http.StatusForbidden || !strings.Contains(out.Body.String(), "AUTHORITY_DELTA_NOT_COVERED") {
 			t.Fatalf("new %s permission granted: status=%d", status, out.Code)
 		}
 	}
@@ -311,7 +311,7 @@ func TestGroupGrantRejectsInvalidCatalogAnchorsAndRollsBackAuditFailure(t *testi
 	if err := f.store.Pool.QueryRow(ctx, `SELECT policy_version FROM spaces WHERE id = $1`, f.spaceID).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GroupGrantInput{Permissions: []string{"auth.members:manage"}}); out.Code != http.StatusServiceUnavailable {
+	if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GrantInput{Permissions: []string{"auth.members:manage"}}); out.Code != http.StatusServiceUnavailable {
 		t.Fatalf("unaudited grant succeeded: status=%d", out.Code)
 	}
 	var count int
@@ -356,7 +356,7 @@ func TestGroupGrantConcurrentJoinCannotEscapeRecipientSnapshot(t *testing.T) {
 	}
 	granted := make(chan error, 1)
 	go func() {
-		_, err := f.authz.CreateGroupGrant(ctx, f.owner.ID, f.spaceID, "grp_remove_a", authorization.GroupGrantInput{
+		_, err := f.authz.CreateGroupGrant(ctx, f.owner.ID, f.spaceID, "grp_remove_a", authorization.GrantInput{
 			Permissions: []string{"auth.members:manage"}, Scope: "group_tree", AnchorGroupID: "grp_remove_a",
 		})
 		granted <- err
@@ -402,7 +402,7 @@ func TestInstallationRoleCannotBeReusedForMemberOrGroupGrant(t *testing.T) {
 		VALUES ('ins_role_reuse', 'app_role_reuse', $1, 'mem_role_reuse', 'rol_installation_only', 'space', '[]', $2)`, pgx.QueryExecModeSimpleProtocol, f.spaceID, f.owner.ID); err != nil {
 		t.Fatal(err)
 	}
-	if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GroupGrantInput{RoleID: "rol_installation_only"}); out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "VALIDATION_FAILED") {
+	if out := groupGrantHTTP(f, f.token, "grp_remove_a", authorization.GrantInput{RoleID: "rol_installation_only"}); out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "VALIDATION_FAILED") {
 		t.Fatalf("group reused an installation's independently approved role: status=%d", out.Code)
 	}
 	_, err := f.authz.CreateGrant(ctx, f.owner.ID, f.spaceID, f.target.ID, "rol_installation_only", "space", f.spaceID)

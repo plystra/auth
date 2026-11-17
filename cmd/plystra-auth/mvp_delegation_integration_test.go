@@ -131,7 +131,10 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			"permissions": permissions, "scope": scope, "anchor_group_id": project.ID,
 		}))
 	}
-	replace(scenario.UserToken, parent.Agent.ID, "group_tree", []string{"invoice:read", "invoice:approve"})
+	mvpData[authorization.Grant](t, principal(http.MethodPost, spacePath+"/grants", scenario.UserToken, map[string]any{
+		"grantee": map[string]string{"member_id": parent.Agent.ID}, "permissions": []string{"invoice:read", "invoice:approve"},
+		"scope": "group_tree", "anchor_group_id": project.ID,
+	}))
 	var parentToken struct {
 		AccessToken string `json:"access_token"`
 	}

@@ -16,7 +16,7 @@ import (
 	"github.com/plystra/auth/internal/ids"
 )
 
-type GroupGrantInput struct {
+type GrantInput struct {
 	RoleID        string
 	Permissions   []string
 	Scope         string
@@ -27,7 +27,7 @@ type GroupGrantInput struct {
 // CreateGroupGrant grants authority to the current group subtree. Later joins
 // still pass the membership delta check; an empty group is not an authorization
 // shortcut for admitting members after the assigner's rights have been revoked.
-func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, groupID string, in GroupGrantInput) (Grant, error) {
+func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, groupID string, in GrantInput) (Grant, error) {
 	in.Permissions = uniqueSorted(in.Permissions)
 	if actorMemberID == "" || spaceID == "" || groupID == "" || (in.RoleID == "") == (len(in.Permissions) == 0) || len(in.Permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "a group grant requires exactly one role or permission set")
@@ -56,26 +56,9 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 	}
 	var out Grant
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		permissions := in.Permissions
-		if in.RoleID != "" {
-			role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: in.RoleID, SpaceID: spaceID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("NOT_FOUND", "role was not found in this Space")
-			}
-			if err != nil {
-				return err
-			}
-			if err := validateOrdinaryGrantRoleTx(ctx, q, role.ID); err != nil {
-				return err
-			}
-			rows, err := q.ListRolePermissions(ctx, db.ListRolePermissionsParams{RoleID: role.ID})
-			if err != nil {
-				return err
-			}
-			permissions = make([]string, 0, len(rows))
-			for _, row := range rows {
-				permissions = append(permissions, row.Key)
-			}
+		permissions, err := grantPermissionSourceTx(ctx, q, spaceID, in)
+		if err != nil {
+			return err
 		}
 		members, err := q.ListMembersInGroupSubtree(ctx, db.ListMembersInGroupSubtreeParams{GroupID: groupID, SpaceID: spaceID})
 		if err != nil {
@@ -126,14 +109,8 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 		if !slices.EqualFunc(members, current, func(a, b db.ListMembersInGroupSubtreeRow) bool { return a.ID == b.ID }) {
 			return apierr.New("CONFLICT", "group membership changed; retry the grant")
 		}
-		for _, key := range permissions {
-			permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
-			if errors.Is(err, pgx.ErrNoRows) || err == nil && permission.Status != "active" {
-				return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The permission cannot be newly granted.", Details: map[string]string{"permission": key}}
-			}
-			if err != nil {
-				return err
-			}
+		if err := validateNewGrantPermissionsTx(ctx, q, permissions); err != nil {
+			return err
 		}
 		position := delta.Node{Kind: delta.Group, ID: groupID}
 		before := make(map[string]delta.Snapshot, len(current))
@@ -244,6 +221,44 @@ func validateOrdinaryGrantRoleTx(ctx context.Context, q *db.Queries, roleID stri
 	}
 	if installation {
 		return apierr.New("VALIDATION_FAILED", "installation roles cannot be reused in ordinary grants")
+	}
+	return nil
+}
+
+func grantPermissionSourceTx(ctx context.Context, q *db.Queries, spaceID string, in GrantInput) ([]string, error) {
+	if in.RoleID == "" {
+		return in.Permissions, nil
+	}
+	role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: in.RoleID, SpaceID: spaceID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apierr.New("NOT_FOUND", "role was not found in this Space")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := validateOrdinaryGrantRoleTx(ctx, q, role.ID); err != nil {
+		return nil, err
+	}
+	rows, err := q.ListRolePermissions(ctx, db.ListRolePermissionsParams{RoleID: role.ID})
+	if err != nil {
+		return nil, err
+	}
+	permissions := make([]string, 0, len(rows))
+	for _, row := range rows {
+		permissions = append(permissions, row.Key)
+	}
+	return permissions, nil
+}
+
+func validateNewGrantPermissionsTx(ctx context.Context, q *db.Queries, permissions []string) error {
+	for _, key := range permissions {
+		permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && permission.Status != "active" {
+			return &apierr.Error{Code: "AUTHORITY_DELTA_NOT_COVERED", Message: "The permission cannot be newly granted.", Details: map[string]string{"permission": key}}
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
