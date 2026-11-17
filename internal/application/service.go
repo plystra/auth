@@ -154,7 +154,11 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.register", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: row.ID,
+			Action: "application.register", Outcome: "success", Permission: "auth.applications:manage",
+			Resource: audit.Resource{Type: "application", ID: row.ID, SpaceID: row.SpaceID},
+		}); err != nil {
 			return err
 		}
 		out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,

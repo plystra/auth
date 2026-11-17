@@ -180,7 +180,11 @@ func (s *Service) CreateManagedKey(ctx context.Context, actorMemberID, applicati
 		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.key.create", keyID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
+			Action: "application.key.create", Outcome: "success", Permission: "auth.applications:manage",
+			Resource: audit.Resource{Type: "api_key", ID: keyID, SpaceID: application.SpaceID},
+		}); err != nil {
 			return err
 		}
 		out = managedKey(row.ID, row.ApplicationID, row.Name, row.Prefix, row.ExpiresAt,
@@ -234,7 +238,8 @@ func (s *Service) RevokeManagedKey(ctx context.Context, actorMemberID, applicati
 	}
 	var out ManagedKey
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if _, err := s.managedApplicationTx(ctx, q, actorMemberID, applicationID); err != nil {
+		application, err := s.managedApplicationTx(ctx, q, actorMemberID, applicationID)
+		if err != nil {
 			return err
 		}
 		row, err := q.RevokeManagedAPIKey(ctx, db.RevokeManagedAPIKeyParams{ApplicationID: applicationID, KeyID: keyID})
@@ -244,7 +249,11 @@ func (s *Service) RevokeManagedKey(ctx context.Context, actorMemberID, applicati
 		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.key.revoke", keyID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
+			Action: "application.key.revoke", Outcome: "success", Permission: "auth.applications:manage",
+			Resource: audit.Resource{Type: "api_key", ID: keyID, SpaceID: application.SpaceID},
+		}); err != nil {
 			return err
 		}
 		var grants []string
@@ -403,7 +412,11 @@ func (s *Service) RotateManagedKey(ctx context.Context, actorMemberID, applicati
 		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.key.rotate", keyID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
+			Action: "application.key.rotate", Outcome: "success", Permission: "auth.applications:manage",
+			Resource: audit.Resource{Type: "api_key", ID: keyID, SpaceID: application.SpaceID},
+		}); err != nil {
 			return err
 		}
 		var grants []string

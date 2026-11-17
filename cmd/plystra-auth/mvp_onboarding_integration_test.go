@@ -521,6 +521,36 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err := json.Unmarshal(createdKey.Body.Bytes(), &keyResult); err != nil || !strings.HasPrefix(keyResult.Data.Secret, "ply_sk_") {
 		t.Fatal("application key creation omitted its one-time secret")
 	}
+	t.Run("PublisherCredentialAudit", func(t *testing.T) {
+		for _, item := range []struct{ requestID, action, resourceType, resourceID string }{
+			{registered.Header().Get("X-Request-ID"), "application.register", "application", appResult.Data.ID},
+			{createdKey.Header().Get("X-Request-ID"), "application.key.create", "api_key", keyResult.Data.Key.ID},
+		} {
+			if item.requestID == "" {
+				t.Fatal("publisher operation omitted its request identifier")
+			}
+			query := url.Values{"request_id": {item.requestID}, "action": {item.action}}.Encode()
+			response := mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+publisher.spaceID+"/audit-logs?"+query, publisher.token, nil)
+			events := mvpData[[]audit.Event](t, response)
+			if len(events) != 1 {
+				t.Fatal("empty-deployment publisher could not query its credential lifecycle event")
+			}
+			event := events[0]
+			if event.ActorID != publisher.memberID || event.MemberID != publisher.memberID || event.MemberType != "human" || event.UserID == "" || event.CredentialType != "user_access_token" || event.Plane != "principal" || event.SpaceID != publisher.spaceID || event.ResourceGroupID != "" || event.ApplicationID != appResult.Data.ID || event.ResourceType != item.resourceType || event.ResourceID != item.resourceID || event.PermissionKey != "auth.applications:manage" {
+				t.Fatal("publisher event omitted its verified identity or actual resource location")
+			}
+			for _, raw := range []string{publisher.token, keyResult.Data.Secret, secretValue, factorResult.Data.Secret} {
+				if raw == "" || strings.Contains(response.Body.String(), raw) {
+					t.Fatal("publisher credential audit exposed a secret")
+				}
+			}
+			customerEvents := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet,
+				"/v1/spaces/"+customer.spaceID+"/audit-logs?"+query, customer.token, nil))
+			if len(customerEvents) != 0 {
+				t.Fatal("customer installation exposed the publisher's credential lifecycle")
+			}
+		}
+	})
 	overreach := map[string]any{
 		"name": "overreach", "grants": []string{"auth.audit:read"}, "expires_at": expiresAt,
 	}

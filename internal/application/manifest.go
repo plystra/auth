@@ -157,7 +157,11 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "application.update", applicationID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
+			Action: "application.update", Outcome: "success", Permission: "auth.applications:manage",
+			Resource: audit.Resource{Type: "application", ID: applicationID, SpaceID: updated.SpaceID},
+		}); err != nil {
 			return err
 		}
 		out = PublishedApplication{ID: updated.ID, SpaceID: updated.SpaceID, Name: updated.Name, ClientID: updated.ClientID,
