@@ -98,10 +98,10 @@ type applicationKeyCreation struct {
 }
 
 func (a *API) registerApplicationRoutes(api huma.API) {
-	route.Register(api, route.NewSpec("applications.list", "GET", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.listApplications)
+	route.Register(api, route.NewSpec("applications.list", "GET", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.listApplications)
 	route.Register(api, route.NewSpec("applications.register", "POST", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.registerApplication)
 	route.Register(api, route.NewSpec("applications.update", "PATCH", "/v1/applications/{app_id}", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.updateApplication)
-	route.Register(api, route.NewSpec("installations.list", "GET", "/v1/spaces/{id}/installations", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}), a.listInstallations)
+	route.Register(api, route.NewSpec("installations.list", "GET", "/v1/spaces/{id}/installations", route.Principal, "auth.members:read", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.listInstallations)
 	route.Register(api, route.NewSpec("installations.create", "POST", "/v1/spaces/{id}/installations", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.installApplication)
 	route.Register(api, route.NewSpec("installations.approve", "PUT", "/v1/spaces/{id}/installations/{ins_id}/approvals", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.approveInstallation)
 	route.Register(api, route.NewSpec("installations.suspend", "POST", "/v1/spaces/{id}/installations/{ins_id}/suspend", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.suspendInstallation)
@@ -227,10 +227,11 @@ func (a *API) listInstallations(ctx context.Context, in *applicationsPathInput) 
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application installations are unavailable")
 	}
-	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read"); err != nil {
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.members:read")
+	if err != nil {
 		return nil, err
 	}
-	items, err := a.Applications.ListInstallations(ctx, in.ID)
+	items, err := a.Applications.ListInstallations(ctx, actor.ID, in.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -346,10 +347,11 @@ func (a *API) listApplications(ctx context.Context, in *applicationsPathInput) (
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application listing is unavailable")
 	}
-	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage"); err != nil {
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
+	if err != nil {
 		return nil, err
 	}
-	items, err := a.Applications.ListPublished(ctx, in.ID)
+	items, err := a.Applications.ListPublished(ctx, actor.ID, in.ID)
 	if err != nil {
 		return nil, err
 	}

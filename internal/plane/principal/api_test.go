@@ -136,6 +136,25 @@ func TestMultiStepSignInRoutesAndOpenAPIContract(t *testing.T) {
 	}
 }
 
+func TestApplicationListRoutesDeclareTransactionalHumanAgentChecks(t *testing.T) {
+	(&API{}).Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	want := map[string]string{"applications.list": "auth.applications:manage", "installations.list": "auth.members:read"}
+	for _, spec := range route.Specs() {
+		permission, ok := want[spec.Name]
+		if !ok {
+			continue
+		}
+		path := "/v1/spaces/{id}/" + strings.TrimSuffix(spec.Name, ".list")
+		if spec.Method != http.MethodGet || spec.Path != path || spec.Permission != permission || !spec.AuthoritativeCheck || spec.StepUp || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("list route %q must declare GET H/A %s with transactional authorization and no step-up: %+v", spec.Name, permission, spec)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("list routes missing: %v", want)
+	}
+}
+
 func TestAssignmentRightsRoutesDeclareHumanAgentAndMutationGuards(t *testing.T) {
 	api := &API{}
 	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))

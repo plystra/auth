@@ -72,7 +72,7 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	childSpace, _, childInstallation := manifestChildInstallation(t, st, authz, apps, appID, rootSpace)
+	childSpace, childActor, childInstallation := manifestChildInstallation(t, st, authz, apps, appID, rootSpace)
 	expires := time.Now().Add(time.Hour)
 	key, _, err := apps.CreateManagedKey(ctx, actorID, appID, application.CreateManagedKeyInput{
 		Name: "manifest-key", Grants: []string{checkPermission, introspectPermission}, ExpiresAt: expires,
@@ -99,9 +99,10 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 	}
 	for _, item := range []struct {
 		spaceID      string
+		actorID      string
 		installation application.Installation
 	}{
-		{rootSpace, rootInstallation}, {childSpace, childInstallation},
+		{rootSpace, actorID, rootInstallation}, {childSpace, childActor, childInstallation},
 	} {
 		decision, _, err := authz.Check(ctx, authorization.CheckRequest{
 			MemberID: item.installation.MemberID, Permission: introspectPermission, ResourceSpace: item.spaceID,
@@ -109,7 +110,7 @@ func TestManifestShrinkImmediatelyNarrowsEveryInstallationAndKey(t *testing.T) {
 		if err != nil || decision.Effect != engine.Deny {
 			t.Fatalf("shrunk installation at %s still held permission: %+v, %v", item.spaceID, decision, err)
 		}
-		installed, err := apps.ListInstallations(ctx, item.spaceID)
+		installed, err := apps.ListInstallations(ctx, item.actorID, item.spaceID)
 		if err != nil || len(installed) != 1 || !strings.EqualFold(strings.Join(installed[0].ApprovedPermissions, ","), checkPermission) {
 			t.Fatalf("installation approval after shrink at %s = %+v, %v", item.spaceID, installed, err)
 		}

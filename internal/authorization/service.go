@@ -1890,8 +1890,8 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 }
 
 // CheckNodeTx stabilizes the verified human account, actor chain, and target
-// ancestry before a mutation. Application services must acquire any existing
-// application's lock first, matching credential exchange and installation order.
+// ancestry before an authorized read or mutation. Services managing an existing
+// application must lock it first, matching credential exchange and installation order.
 func (s *Service) CheckNodeTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
 	if err := lockHumanActorAccountTx(ctx, q, in.MemberID); err != nil {
 		return engine.Decision{}, err

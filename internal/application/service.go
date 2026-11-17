@@ -175,34 +175,50 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 	return out, err
 }
 
-func (s *Service) ListPublished(ctx context.Context, spaceID string) ([]PublishedApplication, error) {
-	if s == nil || s.Store == nil {
+func (s *Service) ListPublished(ctx context.Context, actorMemberID, spaceID string) ([]PublishedApplication, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
 		return nil, apierr.New("UNAVAILABLE", "application listing is unavailable")
 	}
-	rows, err := s.Store.Queries().ListPublishedApplications(ctx, db.ListPublishedApplicationsParams{SpaceID: spaceID})
+	var applications []PublishedApplication
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: spaceID,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		}
+		rows, err := q.ListPublishedApplications(ctx, db.ListPublishedApplicationsParams{SpaceID: spaceID})
+		if err != nil {
+			return err
+		}
+		applications = make([]PublishedApplication, 0, len(rows))
+		for _, row := range rows {
+			var redirects, permissions []string
+			if err := json.Unmarshal(row.RedirectUris, &redirects); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(row.ManifestPermissions, &permissions); err != nil {
+				return err
+			}
+			var pending []string
+			if len(row.PendingManifestPermissions) > 0 {
+				if err := json.Unmarshal(row.PendingManifestPermissions, &pending); err != nil {
+					return err
+				}
+			}
+			applications = append(applications, PublishedApplication{ID: row.ID, SpaceID: row.SpaceID,
+				Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects,
+				ManifestPermissions: permissions, PendingManifestPermissions: pending,
+				Visibility: row.Visibility, ReviewStatus: row.ReviewStatus, Status: row.Status,
+				CreatedAt: row.CreatedAt.Time})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	applications := make([]PublishedApplication, 0, len(rows))
-	for _, row := range rows {
-		var redirects, permissions []string
-		if err := json.Unmarshal(row.RedirectUris, &redirects); err != nil {
-			return nil, err
-		}
-		if err := json.Unmarshal(row.ManifestPermissions, &permissions); err != nil {
-			return nil, err
-		}
-		var pending []string
-		if len(row.PendingManifestPermissions) > 0 {
-			if err := json.Unmarshal(row.PendingManifestPermissions, &pending); err != nil {
-				return nil, err
-			}
-		}
-		applications = append(applications, PublishedApplication{ID: row.ID, SpaceID: row.SpaceID,
-			Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects,
-			ManifestPermissions: permissions, PendingManifestPermissions: pending,
-			Visibility: row.Visibility, ReviewStatus: row.ReviewStatus, Status: row.Status,
-			CreatedAt: row.CreatedAt.Time})
 	}
 	return applications, nil
 }

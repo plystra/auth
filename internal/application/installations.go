@@ -166,23 +166,39 @@ func (s *Service) Install(ctx context.Context, actorMemberID, applicationID, spa
 	return out, err
 }
 
-func (s *Service) ListInstallations(ctx context.Context, spaceID string) ([]Installation, error) {
-	if s == nil || s.Store == nil {
+func (s *Service) ListInstallations(ctx context.Context, actorMemberID, spaceID string) ([]Installation, error) {
+	if s == nil || s.Store == nil || s.Authorization == nil {
 		return nil, apierr.New("UNAVAILABLE", "application installations are unavailable")
 	}
-	rows, err := s.Store.Queries().ListApplicationInstallationsInSpace(ctx, db.ListApplicationInstallationsInSpaceParams{SpaceID: spaceID})
+	var installations []Installation
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+			MemberID: actorMemberID, Permission: "auth.members:read", ResourceSpace: spaceID,
+		})
+		if err != nil {
+			return err
+		}
+		if decision.Effect != engine.Allow {
+			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		}
+		rows, err := q.ListApplicationInstallationsInSpace(ctx, db.ListApplicationInstallationsInSpaceParams{SpaceID: spaceID})
+		if err != nil {
+			return err
+		}
+		installations = make([]Installation, 0, len(rows))
+		for _, row := range rows {
+			var permissions []string
+			if err := json.Unmarshal(row.ApprovedPermissions, &permissions); err != nil {
+				return err
+			}
+			installations = append(installations, Installation{ID: row.ID, ApplicationID: row.ApplicationID,
+				ApplicationName: row.ApplicationName, SpaceID: row.SpaceID, MemberID: row.MemberID,
+				Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String, ApprovedPermissions: permissions, Status: row.Status, CreatedAt: row.CreatedAt.Time})
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	installations := make([]Installation, 0, len(rows))
-	for _, row := range rows {
-		var permissions []string
-		if err := json.Unmarshal(row.ApprovedPermissions, &permissions); err != nil {
-			return nil, err
-		}
-		installations = append(installations, Installation{ID: row.ID, ApplicationID: row.ApplicationID,
-			ApplicationName: row.ApplicationName, SpaceID: row.SpaceID, MemberID: row.MemberID,
-			Scope: row.Scope, AnchorGroupID: row.AnchorGroupID.String, ApprovedPermissions: permissions, Status: row.Status, CreatedAt: row.CreatedAt.Time})
 	}
 	return installations, nil
 }

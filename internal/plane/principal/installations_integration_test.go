@@ -438,7 +438,7 @@ func TestInstallationLifecycleHTTPRevokesAndRestoresApplicationAuthority(t *test
 	if memberStatus != "removed" || activeGrants != 0 {
 		t.Fatalf("uninstalled member status=%q active_grants=%d", memberStatus, activeGrants)
 	}
-	listed, err := apps.ListInstallations(ctx, spaceID)
+	listed, err := apps.ListInstallations(ctx, actorID, spaceID)
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("uninstalled installation remained listed: %+v, %v", listed, err)
 	}

@@ -474,7 +474,7 @@ func TestPublicManifestReviewNarrowsSuspendedAndTreeInstallations(t *testing.T) 
 		t.Fatal(err)
 	}
 	publicManifestAuthority(t, f, false, false)
-	items, err := f.applications.ListInstallations(ctx, f.owners[1].SpaceID)
+	items, err := f.applications.ListInstallations(ctx, f.owners[1].ID, f.owners[1].SpaceID)
 	if err != nil || len(items) != 1 || !slices.Equal(items[0].ApprovedPermissions, permissions) {
 		t.Fatal("resuming a suspended installation restored removed approvals")
 	}

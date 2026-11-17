@@ -53,7 +53,7 @@ func TestPublicManifestUpdateHTTPPreservesApprovedVersionAndChecksPublisher(t *t
 	if got := patchApplication(t, handler, appID, token, `{"name":"Must roll back","manifest_permissions":["auth.tokens:introspect"]}`); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("public manifest saved without durable audit: status=%d", got.Code)
 	}
-	listed, err := apps.ListPublished(ctx, spaceID)
+	listed, err := apps.ListPublished(ctx, ownerID, spaceID)
 	if err != nil || len(listed) != 1 || listed[0].Name != "Billing" || !slices.Equal(listed[0].PendingManifestPermissions, []string{"auth.audit:write", "auth.authz:check"}) {
 		t.Fatal("failed public update changed effective or pending metadata")
 	}
