@@ -1051,10 +1051,15 @@ func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, 
 		if err := addRolePermissions(ctx, q, row.ID, permissions); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "role.create", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "role.create", Outcome: "success", Permission: "auth.roles:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "role", ID: row.ID, SpaceID: row.SpaceID},
+		}); err != nil {
 			return err
 		}
 		out = Role{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, Managed: row.Managed, Permissions: permissions}
@@ -1137,10 +1142,15 @@ func (s *Service) UpdateRole(ctx context.Context, actorMemberID, spaceID, roleID
 		if _, err := q.UpdateRole(ctx, db.UpdateRoleParams{ID: role.ID, SpaceID: role.SpaceID, Name: name, Description: description}); err != nil {
 			return normalizeDBError(err)
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "role.update", role.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "role.update", Outcome: "success", Permission: "auth.roles:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "role", ID: role.ID, SpaceID: role.SpaceID},
+		}); err != nil {
 			return err
 		}
 		out = Role{ID: role.ID, SpaceID: role.SpaceID, Name: name, Description: description, Managed: role.Managed, Permissions: permissions}

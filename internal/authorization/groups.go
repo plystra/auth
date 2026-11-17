@@ -97,10 +97,16 @@ func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name,
 		if createErr != nil {
 			return normalizeDBError(createErr)
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: space.ID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: space.ID})
+		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "group.create", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "group.create", Outcome: "success", Permission: "auth.groups:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "group", ID: row.ID, SpaceID: row.SpaceID, GroupID: row.ID},
+			Metadata: map[string]string{"parent_group_id": parentGroupID},
+		}); err != nil {
 			return err
 		}
 		out = Group{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Kind: row.Kind, Status: row.Status}
@@ -353,10 +359,16 @@ func (s *Service) MoveGroup(ctx context.Context, actorMemberID, spaceID, groupID
 				return err
 			}
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "group.move", groupID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "group.move", Outcome: "success", Permission: "auth.groups:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "group", ID: groupID, SpaceID: spaceID, GroupID: groupID},
+			Metadata: map[string]string{"previous_parent_group_id": nullableID(target.ParentID), "parent_group_id": parentGroupID},
+		})
 	})
 }
 

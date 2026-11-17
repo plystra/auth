@@ -63,7 +63,7 @@ func TestSpaceAuditHTTPFiltersScopeBeforeCursorPagination(t *testing.T) {
 	var seen []string
 	cursor := ""
 	for page := 0; page < 4; page++ {
-		response := getAuditHTTP(handler, tokens.AccessToken, path+"?limit=1&cursor="+url.QueryEscape(cursor))
+		response := getAuditHTTP(handler, tokens.AccessToken, path+"?action=authz.check&limit=1&cursor="+url.QueryEscape(cursor))
 		result := decodeAuditPage(t, response)
 		if len(result.Body.Data) != 1 {
 			t.Fatalf("page %d contains %d entries, want one authorized entry", page, len(result.Body.Data))
@@ -100,7 +100,7 @@ func TestSpaceAuditHTTPFiltersScopeBeforeCursorPagination(t *testing.T) {
 	if response := getAuditHTTP(handler, agentToken.AccessToken, path+"?group_id="+sibling.ID); response.Code != http.StatusForbidden {
 		t.Fatalf("Agent read audit records outside its owner's group: %d", response.Code)
 	}
-	filtered := decodeAuditPage(t, getAuditHTTP(handler, tokens.AccessToken, path+"?group_id="+child.ID))
+	filtered := decodeAuditPage(t, getAuditHTTP(handler, tokens.AccessToken, path+"?action=authz.check&group_id="+child.ID))
 	if len(filtered.Body.Data) != 1 || filtered.Body.Data[0].ID != all[3] {
 		t.Fatalf("group filter returned unrelated records: %+v", filtered.Body.Data)
 	}

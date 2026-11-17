@@ -136,10 +136,16 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err != nil {
 			return normalizeDBError(err)
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: anchorSpace}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: anchorSpace})
+		if err != nil {
 			return err
 		}
-		if err := audit.Write(ctx, q, "member", actorMemberID, "assign_right.create", row.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "assign_right.create", Outcome: "success", Permission: "auth.assign_rights:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "assign_right", ID: row.ID, SpaceID: anchorSpace, GroupID: anchorGroup},
+			Metadata: map[string]string{"holder_member_id": row.HolderMemberID, "parent_assignment_right_id": row.ParentID.String},
+		}); err != nil {
 			return err
 		}
 		out = assignmentRightFromRow(row, permissions)
@@ -270,10 +276,16 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err := q.RevokeAssignRight(ctx, db.RevokeAssignRightParams{ID: rightID}); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: anchorSpace}); err != nil {
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: anchorSpace})
+		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "member", actorMemberID, "assign_right.revoke", rightID, "success")
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "assign_right.revoke", Outcome: "success", Permission: "auth.assign_rights:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "assign_right", ID: rightID, SpaceID: anchorSpace, GroupID: row.AnchorGroupID.String},
+			Metadata: map[string]string{"holder_member_id": row.HolderMemberID, "parent_assignment_right_id": row.ParentID.String},
+		})
 	})
 }
 
