@@ -1139,7 +1139,7 @@ func TestAgentCanCreateSpaceOnBehalfOfOwnerUser(t *testing.T) {
 	if out.Body.Data.Member.Kind != "human" {
 		t.Fatalf("created administrator kind = %q, want human owner membership", out.Body.Data.Member.Kind)
 	}
-	bindings, err := authz.ListBindings(ctx, out.Body.Data.Member.ID)
+	bindings, err := authz.ListBindings(ctx, out.Body.Data.Member.ID, out.Body.Data.Space.ID, out.Body.Data.Member.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

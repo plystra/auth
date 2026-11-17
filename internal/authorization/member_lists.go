@@ -16,6 +16,9 @@ func (s *Service) ListMembers(ctx context.Context, actorMemberID, spaceID, membe
 	}
 	out := make([]Member, 0)
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:read", spaceID); err != nil {
 			return err
 		}
@@ -34,7 +37,7 @@ func (s *Service) ListMembers(ctx context.Context, actorMemberID, spaceID, membe
 func (s *Service) ListGroupMembers(ctx context.Context, actorMemberID, spaceID, groupID string) ([]Member, error) {
 	out := make([]Member, 0)
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID); err != nil {

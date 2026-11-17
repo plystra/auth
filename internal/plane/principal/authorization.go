@@ -361,13 +361,11 @@ func (a *API) setMemberStatus(ctx context.Context, in *memberPathInput, status s
 }
 
 func (a *API) listBindings(ctx context.Context, in *memberPathInput) (*authorizationDataOutput[[]authorization.Binding], error) {
-	if _, _, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.members:read", in.MemberID); err != nil {
+	actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+	if err != nil {
 		return nil, err
 	}
-	if _, err := a.Authorization.GetMember(ctx, in.MemberID, in.ID); err != nil {
-		return nil, err
-	}
-	bindings, err := a.Authorization.ListBindings(ctx, in.MemberID)
+	bindings, err := a.Authorization.ListBindings(ctx, actor.ID, in.ID, in.MemberID)
 	if err != nil {
 		return nil, err
 	}
@@ -451,11 +449,11 @@ func (a *API) moveGroup(ctx context.Context, in *groupMoveInput) (*authorization
 }
 
 func (a *API) listRoles(ctx context.Context, in *spacePathInput) (*authorizationDataOutput[[]authorization.Role], error) {
-	_, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.roles:manage")
+	actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
 	if err != nil {
 		return nil, err
 	}
-	roles, err := a.Authorization.ListRoles(ctx, in.ID)
+	roles, err := a.Authorization.ListRoles(ctx, actor.ID, in.ID)
 	if err != nil {
 		return nil, err
 	}

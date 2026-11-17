@@ -814,6 +814,9 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 	}
 	var out Member
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.members:manage", spaceID); err != nil {
 			return err
 		}
@@ -843,20 +846,29 @@ func (s *Service) CreateMember(ctx context.Context, actorMemberID, userID, space
 	return out, err
 }
 
-func (s *Service) ListBindings(ctx context.Context, memberID string) ([]Binding, error) {
-	rows, err := s.Store.Queries().ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: memberID})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Binding, 0, len(rows))
-	for _, row := range rows {
-		binding := Binding{UserID: row.UserID, MemberID: row.MemberID, Email: row.Email, Status: row.Status}
-		if row.ExpiresAt.Valid {
-			binding.ExpiresAt = row.ExpiresAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+func (s *Service) ListBindings(ctx context.Context, actorMemberID, spaceID, memberID string) ([]Binding, error) {
+	out := make([]Binding, 0)
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
 		}
-		out = append(out, binding)
-	}
-	return out, nil
+		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.members:read", spaceID, memberID); err != nil {
+			return err
+		}
+		rows, err := q.ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: memberID})
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			binding := Binding{UserID: row.UserID, MemberID: row.MemberID, Email: row.Email, Status: row.Status}
+			if row.ExpiresAt.Valid {
+				binding.ExpiresAt = row.ExpiresAt.Time.UTC().Format("2006-01-02T15:04:05Z07:00")
+			}
+			out = append(out, binding)
+		}
+		return nil
+	})
+	return out, err
 }
 
 func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
@@ -864,6 +876,9 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 		return apierr.New("VALIDATION_FAILED", "user_id is required")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
@@ -885,6 +900,9 @@ func (s *Service) BindUser(ctx context.Context, actorMemberID, spaceID, memberID
 
 func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, memberID, userID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
@@ -931,6 +949,9 @@ func (s *Service) SetBindingPolicy(ctx context.Context, actorMemberID, spaceID, 
 		return apierr.New("VALIDATION_FAILED", "binding_policy must be single or shared")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.bindings:manage", spaceID, memberID); err != nil {
 			return err
 		}
@@ -965,6 +986,9 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 		return apierr.New("VALIDATION_FAILED", "member status is invalid")
 	}
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTargetTx(ctx, q, actorMemberID, "auth.members:manage", spaceID, memberID); err != nil {
 			return err
 		}
@@ -1013,24 +1037,33 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 	})
 }
 
-func (s *Service) ListRoles(ctx context.Context, spaceID string) ([]Role, error) {
-	rows, err := s.Store.Queries().ListRolesInSpace(ctx, db.ListRolesInSpaceParams{SpaceID: spaceID})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]Role, 0, len(rows))
-	for _, row := range rows {
-		permissions, err := s.Store.Queries().ListRolePermissions(ctx, db.ListRolePermissionsParams{RoleID: row.ID})
+func (s *Service) ListRoles(ctx context.Context, actorMemberID, spaceID string) ([]Role, error) {
+	out := make([]Role, 0)
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
+		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.roles:manage", spaceID); err != nil {
+			return err
+		}
+		rows, err := q.ListRolesInSpace(ctx, db.ListRolesInSpaceParams{SpaceID: spaceID})
 		if err != nil {
-			return nil, err
+			return err
 		}
-		keys := make([]string, 0, len(permissions))
-		for _, p := range permissions {
-			keys = append(keys, p.Key)
+		for _, row := range rows {
+			permissions, err := q.ListRolePermissions(ctx, db.ListRolePermissionsParams{RoleID: row.ID})
+			if err != nil {
+				return err
+			}
+			keys := make([]string, 0, len(permissions))
+			for _, p := range permissions {
+				keys = append(keys, p.Key)
+			}
+			out = append(out, Role{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, Managed: row.Managed, Permissions: keys})
 		}
-		out = append(out, Role{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Description: row.Description, Managed: row.Managed, Permissions: keys})
-	}
-	return out, nil
+		return nil
+	})
+	return out, err
 }
 
 func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, description string, permissions []string) (Role, error) {
