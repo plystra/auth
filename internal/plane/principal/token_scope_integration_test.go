@@ -57,6 +57,7 @@ func TestPrincipalManagementEnforcesNarrowedTokenScope(t *testing.T) {
 		{http.MethodPost, "/v1/me/agents/" + parent.ID + "/rotate", ""},
 		{http.MethodPost, "/v1/me/agents/" + parent.ID + "/stop", ""},
 		{http.MethodDelete, "/v1/me/agents/" + parent.ID, ""},
+		{http.MethodDelete, "/v1/me/member", ""},
 		{http.MethodDelete, "/v1/spaces/" + spaceID + "/grants/" + grant.ID, ""},
 	} {
 		response := request(tc.method, tc.path, tc.body)

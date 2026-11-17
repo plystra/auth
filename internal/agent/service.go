@@ -90,8 +90,10 @@ type agentsGroup struct {
 	OwnerMemberID pgtype.Text
 }
 
+// Create provisions trusted fixtures. Runtime management uses CreateManaged;
+// lint forbids this primitive in production callers.
 func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, error) {
-	return s.create(ctx, in, true)
+	return s.create(ctx, in, true, nil)
 }
 
 // CreateOAuth creates an OAuth Agent without provisioning a direct Agent key.
@@ -99,16 +101,16 @@ func (s *Service) Create(ctx context.Context, in CreateInput) (Agent, string, er
 // hidden key would create an untracked credential that the consent flow never
 // returns to the caller.
 func (s *Service) CreateOAuth(ctx context.Context, in CreateInput) (Agent, error) {
-	out, _, err := s.create(ctx, in, false)
+	out, _, err := s.create(ctx, in, false, nil)
 	return out, err
 }
 
 // CreateOAuthTx participates in the caller's consent transaction.
 func (s *Service) CreateOAuthTx(ctx context.Context, q *db.Queries, in CreateInput) (Agent, error) {
-	return s.createTx(ctx, q, in, false, "", nil)
+	return s.createTx(ctx, q, in, false, "", nil, nil)
 }
 
-func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bool) (Agent, string, error) {
+func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bool, authority MutationAuthorizer) (Agent, string, error) {
 	var raw, prefix string
 	var hash []byte
 	var err error
@@ -120,7 +122,7 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 	}
 	var out Agent
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		out, err = s.createTx(ctx, q, in, issueCredential, prefix, hash)
+		out, err = s.createTx(ctx, q, in, issueCredential, prefix, hash, authority)
 		return err
 	})
 	if err != nil {
@@ -129,24 +131,7 @@ func (s *Service) create(ctx context.Context, in CreateInput, issueCredential bo
 	return out, raw, nil
 }
 
-func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, issueCredential bool, prefix string, hash []byte) (Agent, error) {
-	in.Name = strings.TrimSpace(in.Name)
-	if in.Name == "" || len(in.Name) > 128 {
-		return Agent{}, apierr.New("VALIDATION_FAILED", "agent name is invalid")
-	}
-	if in.Source == "" {
-		in.Source = "manual"
-	}
-	if in.Source != "manual" && in.Source != "oauth" && in.Source != "delegation" {
-		return Agent{}, apierr.New("VALIDATION_FAILED", "agent source is invalid")
-	}
-	if in.ExpiresAt.IsZero() {
-		in.ExpiresAt = time.Now().UTC().Add(30 * 24 * time.Hour)
-	}
-	now := time.Now().UTC()
-	if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
-		return Agent{}, apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
-	}
+func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, issueCredential bool, prefix string, hash []byte, authority MutationAuthorizer) (Agent, error) {
 	var out Agent
 	err := func() error {
 		if err := member.LockChainsTx(ctx, q, in.OwnerMemberID); err != nil {
@@ -158,6 +143,28 @@ func (s *Service) createTx(ctx context.Context, q *db.Queries, in CreateInput, i
 				return apierr.New("SUBJECT_NOT_FOUND", "owner member was not found")
 			}
 			return err
+		}
+		if authority != nil {
+			if err := authority.AuthorizeAgentMutationTx(ctx, q, in.OwnerMemberID, in.OwnerMemberID, "auth.agents:create"); err != nil {
+				return err
+			}
+		}
+		in.Name = strings.TrimSpace(in.Name)
+		if in.Name == "" || len(in.Name) > 128 {
+			return apierr.New("VALIDATION_FAILED", "agent name is invalid")
+		}
+		if in.Source == "" {
+			in.Source = "manual"
+		}
+		if in.Source != "manual" && in.Source != "oauth" && in.Source != "delegation" {
+			return apierr.New("VALIDATION_FAILED", "agent source is invalid")
+		}
+		now := time.Now().UTC()
+		if in.ExpiresAt.IsZero() {
+			in.ExpiresAt = now.Add(30 * 24 * time.Hour)
+		}
+		if !in.ExpiresAt.After(now) || in.ExpiresAt.After(now.Add(maxLifetime)) {
+			return apierr.New("VALIDATION_FAILED", "agent expiry must be within 90 days")
 		}
 		if owner.Status != "active" || (owner.ExpiresAt.Valid && !owner.ExpiresAt.Time.After(now)) {
 			return apierr.New("OWNER_INACTIVE", "owner member is not active")
@@ -380,16 +387,16 @@ func (s *Service) Get(ctx context.Context, memberID string) (Agent, error) {
 }
 
 func (s *Service) Rotate(ctx context.Context, ownerMemberID, memberID string) (string, error) {
-	return s.rotate(ctx, ownerMemberID, "", memberID)
+	return s.rotate(ctx, ownerMemberID, "", memberID, nil)
 }
 
 // RotateForUser allows an active user bound to the Agent owner member to take
 // over an Agent that was paused after its creating user's binding was revoked.
 func (s *Service) RotateForUser(ctx context.Context, ownerMemberID, actorUserID, memberID string) (string, error) {
-	return s.rotate(ctx, ownerMemberID, actorUserID, memberID)
+	return s.rotate(ctx, ownerMemberID, actorUserID, memberID, nil)
 }
 
-func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, memberID string) (string, error) {
+func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, memberID string, authority MutationAuthorizer) (string, error) {
 	raw, prefix, hash, err := s.generateCredential()
 	if err != nil {
 		return "", err
@@ -408,6 +415,11 @@ func (s *Service) rotate(ctx context.Context, ownerMemberID, actorUserID, member
 			return err
 		} else if !canManage {
 			return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
+		}
+		if authority != nil {
+			if err := authority.AuthorizeAgentMutationTx(ctx, q, ownerMemberID, memberID, "auth.agents:create"); err != nil {
+				return err
+			}
 		}
 		if _, required := stepup.RequirementFromContext(ctx); required {
 			if s.StepUp == nil {
@@ -729,11 +741,11 @@ func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID str
 }
 
 func (s *Service) Stop(ctx context.Context, ownerMemberID, memberID string) error {
-	return s.mutate(ctx, ownerMemberID, memberID, "stop", "suspended")
+	return s.mutate(ctx, ownerMemberID, memberID, "stop", "suspended", nil, "")
 }
 
 func (s *Service) Delete(ctx context.Context, ownerMemberID, memberID string) error {
-	return s.mutate(ctx, ownerMemberID, memberID, "delete", "removed")
+	return s.mutate(ctx, ownerMemberID, memberID, "delete", "removed", nil, "")
 }
 
 // ExpireAgents tombstones expired Agents and their descendants together with
@@ -781,7 +793,7 @@ func (s *Service) ExpireAgents(ctx context.Context) (int, error) {
 	return count, err
 }
 
-func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, status string) error {
+func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, status string, authority MutationAuthorizer, permission string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := member.LockChainsTx(ctx, q, ownerMemberID, memberID); err != nil {
 			return err
@@ -800,6 +812,11 @@ func (s *Service) mutate(ctx context.Context, ownerMemberID, memberID, action, s
 		}
 		if !row.HomeGroupID.Valid {
 			return apierr.New("CONFLICT", "agent home group is missing")
+		}
+		if authority != nil {
+			if err := authority.AuthorizeAgentMutationTx(ctx, q, ownerMemberID, memberID, permission); err != nil {
+				return err
+			}
 		}
 		if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, status); err != nil {
 			return err

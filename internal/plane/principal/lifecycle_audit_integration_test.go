@@ -180,3 +180,67 @@ func TestAgentLifecycleAuditHTTPFailureRollsBackStateAndAuthority(t *testing.T) 
 		}
 	}
 }
+
+func TestAgentCredentialHTTPAuditFailureRollsBackMutationAndStepUp(t *testing.T) {
+	for _, operation := range []string{"create", "rotate"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx := context.Background()
+			f := newGroupRemovalFixture(t)
+			seedTestInlineGrant(t, f.store, f.spaceID, f.owner.ID, f.owner.ID, "auth.agents:create")
+			agents := &agent.Service{Store: f.store, StepUp: f.sessions}
+			created, key, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: f.owner.ID, Name: "audit-credential-agent"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			claims, err := f.sessions.VerifyAccess(f.token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path, body := "/v1/me/agents/"+created.ID+"/rotate", ""
+			requestDigest := map[string]any{"agent_id": created.ID}
+			if operation == "create" {
+				path, body = "/v1/me/agents", `{"name":"audit-rollback-child"}`
+				requestDigest = map[string]any{"name": "audit-rollback-child", "expires_at": nil, "source": ""}
+			}
+			seedStepUpProof(t, f.store, claims.SessionID, "me.agents."+operation, requestDigest)
+			var membersBefore, credentialsBefore, groupsBefore int
+			var versionBefore int64
+			snapshot := `SELECT (SELECT count(*) FROM members), (SELECT count(*) FROM agent_credentials),
+				(SELECT count(*) FROM groups), (SELECT policy_version FROM spaces WHERE id = $1)`
+			if err := f.store.Pool.QueryRow(ctx, snapshot, f.spaceID).Scan(&membersBefore, &credentialsBefore, &groupsBefore, &versionBefore); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.store.Pool.Exec(ctx, `CREATE FUNCTION reject_credential_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+				BEGIN RAISE EXCEPTION 'audit rejected by test'; END; $$;
+				CREATE TRIGGER test_reject_credential_audit BEFORE INSERT ON audit_logs
+				FOR EACH ROW EXECUTE FUNCTION reject_credential_audit()`); err != nil {
+				t.Fatal(err)
+			}
+			mux := http.NewServeMux()
+			(&API{Authorization: f.authz, Sessions: f.sessions, Agents: agents}).Register(humago.New(mux, route.HumaConfig("Agent credential rollback", "1.0.0")))
+			req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+f.token)
+			req.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			route.Middleware(route.Principal, mux).ServeHTTP(response, req)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("credential mutation succeeded without audit: status=%d", response.Code)
+			}
+			var membersAfter, credentialsAfter, groupsAfter int
+			var versionAfter int64
+			if err := f.store.Pool.QueryRow(ctx, snapshot, f.spaceID).Scan(&membersAfter, &credentialsAfter, &groupsAfter, &versionAfter); err != nil {
+				t.Fatal(err)
+			}
+			if membersAfter != membersBefore || credentialsAfter != credentialsBefore || groupsAfter != groupsBefore || versionAfter != versionBefore {
+				t.Fatal("audit failure changed members, groups, credentials, or the policy version")
+			}
+			var proofIntact bool
+			if err := f.store.Pool.QueryRow(ctx, `SELECT step_up_expires_at IS NOT NULL FROM sessions WHERE id = $1`, claims.SessionID).Scan(&proofIntact); err != nil || !proofIntact {
+				t.Fatalf("audit failure consumed step-up: intact=%v error=%v", proofIntact, err)
+			}
+			if _, err := agents.AuthenticateKey(ctx, key); err != nil {
+				t.Fatal("audit failure revoked the original Agent credential")
+			}
+		})
+	}
+}

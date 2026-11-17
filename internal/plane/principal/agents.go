@@ -82,10 +82,10 @@ type agentAcceptedOutput struct {
 func (a *API) registerAgentRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("me.agents.list", "GET", "/v1/me/agents", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.listAgents)
 	route.Register(api, route.NewSpec("me.agents.create", "POST", "/v1/me/agents", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAgent)
-	route.Register(api, route.NewSpec("me.agents.rotate", "POST", "/v1/me/agents/{id}/rotate", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateAgent)
+	route.Register(api, route.NewSpec("me.agents.rotate", "POST", "/v1/me/agents/{id}/rotate", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.rotateAgent)
 	route.Register(api, route.NewSpec("me.agents.grants.replace", "PUT", "/v1/me/agents/{id}/grants", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithSystemAssignmentRight(), route.WithConditionalPermission("auth.grants:assign"), route.WithAuthoritativeCheck()), a.replaceAgentGrants)
-	route.Register(api, route.NewSpec("me.agents.stop", "POST", "/v1/me/agents/{id}/stop", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.stopAgent)
-	route.Register(api, route.NewSpec("me.agents.delete", "DELETE", "/v1/me/agents/{id}", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}), a.deleteAgent)
+	route.Register(api, route.NewSpec("me.agents.stop", "POST", "/v1/me/agents/{id}/stop", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.stopAgent)
+	route.Register(api, route.NewSpec("me.agents.delete", "DELETE", "/v1/me/agents/{id}", route.Principal, "auth.agents:create", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.deleteAgent)
 }
 
 func (a *API) listAgents(ctx context.Context, in *agentsListInput) (*agentsListOutput, error) {
@@ -106,7 +106,7 @@ func (a *API) listAgents(ctx context.Context, in *agentsListInput) (*agentsListO
 }
 
 func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOutput, error) {
-	member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "auth.agents:create")
+	memberID, userID, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (a *API) createAgent(ctx context.Context, in *agentsInput) (*agentCreatedOu
 	if in.Body.ExpiresAt != nil {
 		expires = in.Body.ExpiresAt.UTC()
 	}
-	created, key, err := a.Agents.Create(ctx, agent.CreateInput{OwnerMemberID: member.ID, CreatedByUser: userID, Name: in.Body.Name, ExpiresAt: expires, Source: in.Body.Source})
+	created, key, err := a.Agents.CreateManaged(ctx, agent.CreateInput{OwnerMemberID: memberID, CreatedByUser: userID, Name: in.Body.Name, ExpiresAt: expires, Source: in.Body.Source}, a.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -140,14 +140,11 @@ func (a *API) rotateAgent(ctx context.Context, in *agentPathInput) (*agentSecret
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
-	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
-		return nil, err
-	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "me.agents.rotate", map[string]any{"agent_id": in.ID})
 	if err != nil {
 		return nil, err
 	}
-	key, err := a.Agents.RotateForUser(ctx, memberID, userID, in.ID)
+	key, err := a.Agents.RotateManaged(ctx, memberID, userID, in.ID, a.Authorization)
 	if err != nil {
 		return nil, err
 	}
@@ -194,10 +191,7 @@ func (a *API) stopAgent(ctx context.Context, in *agentPathInput) (*agentAccepted
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
-	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
-		return nil, err
-	}
-	if err := a.Agents.Stop(ctx, memberID, in.ID); err != nil {
+	if err := a.Agents.StopManaged(ctx, memberID, in.ID, a.Authorization); err != nil {
 		return nil, err
 	}
 	return acceptedAgent(), nil
@@ -211,10 +205,7 @@ func (a *API) deleteAgent(ctx context.Context, in *agentPathInput) (*agentAccept
 	if a.Agents == nil {
 		return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 	}
-	if err := a.authorizeAgentAction(ctx, memberID, in.ID, "auth.agents:create"); err != nil {
-		return nil, err
-	}
-	if err := a.Agents.Delete(ctx, memberID, in.ID); err != nil {
+	if err := a.Agents.DeleteManaged(ctx, memberID, in.ID, a.Authorization); err != nil {
 		return nil, err
 	}
 	return acceptedAgent(), nil
@@ -224,35 +215,6 @@ func acceptedAgent() *agentAcceptedOutput {
 	out := &agentAcceptedOutput{}
 	out.Body.Data.Accepted = true
 	return out
-}
-
-func (a *API) authorizeAgentAction(ctx context.Context, actorID, targetID, permission string) error {
-	if a.Authorization == nil || a.Agents == nil {
-		return apierr.New("UNAVAILABLE", "authorization is unavailable")
-	}
-	member, err := a.Authorization.GetMemberAnySpace(ctx, actorID)
-	if err != nil {
-		return err
-	}
-	target, err := a.Agents.Get(ctx, targetID)
-	if err != nil {
-		return err
-	}
-	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{MemberID: actorID, Permission: permission, ResourceSpace: target.SpaceID, ResourceOwner: target.ID})
-	if err != nil {
-		return err
-	}
-	if decision.Effect != engine.Allow {
-		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
-	}
-	canManage, err := a.Agents.CanManage(ctx, member.ID, target.ID)
-	if err != nil {
-		return err
-	}
-	if !canManage {
-		return apierr.New("PERMISSION_DENIED", "agent is outside the current member's agent tree")
-	}
-	return nil
 }
 
 func (a *API) currentMember(ctx context.Context, authorizationHeader string) (string, string, context.Context, error) {
@@ -290,12 +252,14 @@ func (a *API) currentMember(ctx context.Context, authorizationHeader string) (st
 		if !bound {
 			return "", "", ctx, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
 		}
+		ctx = authorization.WithAgentGrantUser(ctx, member.ID, claims.Subject)
 		return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 	}
 	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 	if err != nil {
 		return "", "", ctx, err
 	}
+	ctx = authorization.WithAgentGrantUser(ctx, member.ID, claims.Subject)
 	return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 }
 

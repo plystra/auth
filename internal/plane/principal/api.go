@@ -247,7 +247,7 @@ func (a *API) Register(api huma.API) {
 	route.Register(api, route.NewSpec("auth.factors.list", "GET", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}), a.listFactors)
 	route.Register(api, route.NewSpec("auth.factors.create", "POST", "/v1/me/factors", route.Principal, "", []route.Subject{route.User}, route.WithStepUp()), a.createFactor)
 	route.Register(api, route.NewSpec("auth.factors.delete", "DELETE", "/v1/me/factors/{id}", route.Principal, "", []route.Subject{route.User}, route.WithStepUp()), a.deleteFactor)
-	route.Register(api, route.NewSpec("auth.me_member_remove", "DELETE", "/v1/me/member", route.Principal, "self:read", []route.Subject{route.HumanAgent}), a.removeCurrentMember)
+	route.Register(api, route.NewSpec("auth.me_member_remove", "DELETE", "/v1/me/member", route.Principal, "self:read", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.removeCurrentMember)
 	route.Register(api, route.NewSpec("auth.sign_out", "POST", "/v1/auth/sign-out", route.Principal, "", []route.Subject{route.User}), a.logout)
 	route.Register(api, route.NewSpec("auth.sessions.list", "GET", "/v1/me/sessions", route.Principal, "", []route.Subject{route.User}), a.listSessions)
 	route.Register(api, route.NewSpec("auth.sessions.revoke", "DELETE", "/v1/me/sessions/{id}", route.Principal, "", []route.Subject{route.User}), a.revokeSession)
@@ -651,20 +651,21 @@ func (a *API) meMembers(ctx context.Context, in *MembersInput) (*MembersOutput, 
 }
 
 func (a *API) removeCurrentMember(ctx context.Context, in *BearerInput) (*GenericOutput, error) {
-	member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+	memberID, userID, ctx, err := a.currentMember(ctx, in.Authorization)
 	if err != nil {
 		return nil, err
 	}
-	if member.Kind == "agent" {
+	if userID == "" {
 		if a.Agents == nil {
 			return nil, apierr.New("UNAVAILABLE", "agent service is unavailable")
 		}
-		if err := a.Agents.Delete(ctx, member.ID, member.ID); err != nil {
+		if err := a.Agents.RemoveSelf(ctx, memberID, a.Authorization); err != nil {
 			return nil, err
 		}
 	} else {
-		if userID == "" || a.Authorization == nil {
-			return nil, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
+		member, userID, ctx, err := a.authorizeCurrentMember(ctx, in.Authorization, "self:read")
+		if err != nil {
+			return nil, err
 		}
 		if err := a.Authorization.RevokeOwnBinding(ctx, userID, member.ID); err != nil {
 			return nil, err

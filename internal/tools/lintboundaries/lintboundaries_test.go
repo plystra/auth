@@ -28,6 +28,14 @@ func TestArchitectureLintRejectsBoundaryViolations(t *testing.T) {
 			t.Errorf("remove lint worktree: %v\n%s", err, output)
 		}
 	})
+	// Validate the configuration under test even before it has been committed.
+	config, err := os.ReadFile(filepath.Join(root, ".golangci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, ".golangci.yml"), config, 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	tests := []struct {
 		name        string
@@ -84,6 +92,13 @@ func TestArchitectureLintRejectsBoundaryViolations(t *testing.T) {
 			source:      "package route\nimport (\"context\"; \"github.com/jackc/pgx/v5/pgxpool\")\nfunc lintBoundaryProbe(ctx context.Context, p *pgxpool.Pool) {\n _, _ = p.Begin(ctx)\n}\n",
 			packagePath: "./internal/route",
 			want:        "(forbidigo)",
+		},
+		{
+			name:        "Agent management bypasses transactional authorization",
+			path:        "internal/plane/principal/lint_boundary_probe.go",
+			source:      "package principal\nimport (\"context\"; \"github.com/plystra/auth/internal/agent\")\nfunc lintBoundaryProbe(ctx context.Context, svc *agent.Service) {\n _, _, _ = svc.Create(ctx, agent.CreateInput{})\n}\n",
+			packagePath: "./internal/plane/principal",
+			want:        "use managed Agent lifecycle methods for transactional authorization",
 		},
 	}
 	for _, tc := range tests {
