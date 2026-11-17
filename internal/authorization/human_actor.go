@@ -10,17 +10,17 @@ import (
 	"github.com/plystra/auth/internal/db"
 )
 
-type agentGrantUserKey struct{}
+type humanActorKey struct{}
 
-type agentGrantUser struct {
+type humanActor struct {
 	memberID string
 	userID   string
 }
 
-// WithAgentGrantUser carries the verified account behind an acting human
-// member. Shared ownership alone does not grant the Agent creator's rights.
-func WithAgentGrantUser(ctx context.Context, memberID, userID string) context.Context {
-	return context.WithValue(ctx, agentGrantUserKey{}, agentGrantUser{memberID: memberID, userID: userID})
+// WithHumanActor carries the verified account behind an acting human member.
+// Shared ownership alone does not grant the Agent creator's rights.
+func WithHumanActor(ctx context.Context, memberID, userID string) context.Context {
+	return context.WithValue(ctx, humanActorKey{}, humanActor{memberID: memberID, userID: userID})
 }
 
 func ownerGrantSystemRightTx(ctx context.Context, q *db.Queries, ownerID, creatorUserID string) (bool, error) {
@@ -31,17 +31,34 @@ func ownerGrantSystemRightTx(ctx context.Context, q *db.Queries, ownerID, creato
 	if owner.Type != "human" || owner.BindingPolicy != "shared" {
 		return true, nil
 	}
-	actor, ok := ctx.Value(agentGrantUserKey{}).(agentGrantUser)
+	actor, ok := ctx.Value(humanActorKey{}).(humanActor)
 	if !ok || actor.memberID != ownerID || actor.userID == "" {
 		return false, nil
 	}
 	return actor.userID == creatorUserID, nil
 }
 
+// Lock accounts before members, matching binding revocation and invitation
+// acceptance. NO KEY UPDATE permits foreign-key checks in Agent creation.
+func lockHumanActorAccountTx(ctx context.Context, q *db.Queries, actorMemberID string) error {
+	actor, ok := ctx.Value(humanActorKey{}).(humanActor)
+	if !ok || actor.userID == "" {
+		return nil
+	}
+	if actor.memberID != actorMemberID {
+		return apierr.New("UNAUTHENTICATED", "the acting user does not match this member")
+	}
+	user, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: actor.userID})
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && user.Status != "active" {
+		return apierr.New("UNAUTHENTICATED", "the acting user is not active")
+	}
+	return err
+}
+
 // The member lock is held by the caller, so a binding revoked after HTTP
-// authentication cannot retain grant-management rights inside this write.
-func validateAgentGrantUserTx(ctx context.Context, q *db.Queries, actorMemberID string) error {
-	actor, ok := ctx.Value(agentGrantUserKey{}).(agentGrantUser)
+// authentication cannot retain management rights inside this write.
+func validateHumanActorTx(ctx context.Context, q *db.Queries, actorMemberID string) error {
+	actor, ok := ctx.Value(humanActorKey{}).(humanActor)
 	if !ok || actor.userID == "" {
 		return nil
 	}

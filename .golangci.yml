@@ -64,6 +64,8 @@ linters:
           msg: open transactions through store.InTx
         - pattern: 'agent\.Service\.(Create|Rotate|RotateForUser|Stop|Delete)$'
           msg: use managed Agent lifecycle methods for transactional authorization
+        - pattern: 'authorization\.Service\.Check(Tx)?$'
+          msg: application management must use CheckNodeTx to lock actor and target facts
 
   exclusions:
     generated: lax
@@ -83,5 +85,13 @@ linters:
           - forbidigo
       - path: _test\.go$
         text: use managed Agent lifecycle methods for transactional authorization
+        linters:
+          - forbidigo
+      - path-except: ^internal/application/
+        text: application management must use CheckNodeTx
+        linters:
+          - forbidigo
+      - path: _test\.go$
+        text: application management must use CheckNodeTx
         linters:
           - forbidigo

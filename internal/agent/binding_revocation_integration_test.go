@@ -82,7 +82,7 @@ func TestCreatorBindingRevocationSerializesWithAgentCreation(t *testing.T) {
 					t.Fatal("suspended creator branch accepted a new child")
 				}
 			}
-			userContext := authorization.WithAgentGrantUser(ctx, owner.ID, "usr_agent_owner")
+			userContext := authorization.WithHumanActor(ctx, owner.ID, "usr_agent_owner")
 			if _, _, err := agents.CreateManaged(userContext, CreateInput{OwnerMemberID: owner.ID, CreatedByUser: "usr_agent_owner", Name: "unbound-creator"}, authz); err == nil {
 				t.Fatal("unbound creator retained managed Agent creation rights")
 			} else {

@@ -693,7 +693,7 @@ func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader,
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	ctx = authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes)
+	ctx = principalMemberContext(ctx, claims, member.ID)
 	decision, _, err := a.Authorization.Check(ctx, authorization.CheckRequest{
 		MemberID: member.ID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: resourceGroup,
 	})
@@ -764,7 +764,7 @@ func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHead
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	ctx = authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes)
+	ctx = principalMemberContext(ctx, claims, member.ID)
 	resourceGroup := ""
 	if targetMemberID != "" {
 		resourceGroup, err = a.Authorization.ResourceGroupForMember(ctx, targetMemberID, spaceID)
@@ -795,7 +795,15 @@ func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, s
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
-	return member, authorization.WithTokenScopes(principalAuditContext(ctx, claims), member.ID, claims.Scopes), nil
+	return member, principalMemberContext(ctx, claims, member.ID), nil
+}
+
+func principalMemberContext(ctx context.Context, claims security.Claims, memberID string) context.Context {
+	ctx = principalAuditContext(ctx, claims)
+	if claims.Type == "user" {
+		ctx = authorization.WithHumanActor(ctx, memberID, claims.Subject)
+	}
+	return authorization.WithTokenScopes(ctx, memberID, claims.Scopes)
 }
 
 func (a *API) resolvePrincipalMemberClaims(ctx context.Context, claims security.Claims, spaceID string) (authorization.Member, error) {

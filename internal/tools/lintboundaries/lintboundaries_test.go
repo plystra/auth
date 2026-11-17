@@ -100,6 +100,20 @@ func TestArchitectureLintRejectsBoundaryViolations(t *testing.T) {
 			packagePath: "./internal/plane/principal",
 			want:        "use managed Agent lifecycle methods for transactional authorization",
 		},
+		{
+			name:        "application management bypasses actor and target locks",
+			path:        "internal/application/lint_boundary_probe.go",
+			source:      "package application\nimport (\"context\"; \"github.com/plystra/auth/internal/authorization\"; \"github.com/plystra/auth/internal/db\")\nfunc lintBoundaryProbe(ctx context.Context, svc *authorization.Service, q *db.Queries) {\n _, _ = svc.CheckTx(ctx, q, authorization.CheckRequest{})\n}\n",
+			packagePath: "./internal/application",
+			want:        "application management must use CheckNodeTx",
+		},
+		{
+			name:        "application management uses standalone authorization",
+			path:        "internal/application/lint_boundary_probe.go",
+			source:      "package application\nimport (\"context\"; authz \"github.com/plystra/auth/internal/authorization\")\nfunc lintBoundaryProbe(ctx context.Context, svc *authz.Service) {\n _, _, _ = svc.Check(ctx, authz.CheckRequest{})\n}\n",
+			packagePath: "./internal/application",
+			want:        "application management must use CheckNodeTx",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

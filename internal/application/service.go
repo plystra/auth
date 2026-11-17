@@ -116,7 +116,7 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 	}
 	var out PublishedApplication
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
 			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: in.SpaceID,
 		})
 		if err != nil {

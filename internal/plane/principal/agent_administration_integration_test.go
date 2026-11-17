@@ -310,7 +310,7 @@ func TestAgentAdministratorRevalidatesAuthenticatedUserInGrantTransaction(t *tes
 		for _, condition := range []string{"revoked_binding", "expired_binding", "inactive_user"} {
 			t.Run(scope+"/"+condition, func(t *testing.T) {
 				f := newAgentAdministrationFixture(t, "human")
-				ctx := authorization.WithAgentGrantUser(context.Background(), f.actorID, "usr_principal_actor")
+				ctx := authorization.WithHumanActor(context.Background(), f.actorID, "usr_principal_actor")
 				var err error
 				switch condition {
 				case "revoked_binding":

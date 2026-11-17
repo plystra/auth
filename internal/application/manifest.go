@@ -71,7 +71,7 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		if err != nil {
 			return err
 		}
-		decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
 			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
 		})
 		if err != nil {

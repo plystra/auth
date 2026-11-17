@@ -24,7 +24,7 @@ func (s *Service) authorizeMemberMutationTx(ctx context.Context, q *db.Queries, 
 	if err := lockAuthorizationMembersTx(ctx, q, actorID, targetID); err != nil {
 		return err
 	}
-	if err := validateAgentGrantUserTx(ctx, q, actorID); err != nil {
+	if err := validateHumanActorTx(ctx, q, actorID); err != nil {
 		return err
 	}
 	target, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: targetID})

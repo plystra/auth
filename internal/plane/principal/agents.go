@@ -165,7 +165,7 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if err != nil {
 		return nil, err
 	}
-	ctx = authorization.WithAgentGrantUser(ctx, actorID, userID)
+	ctx = authorization.WithHumanActor(ctx, actorID, userID)
 	var grant authorization.Grant
 	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
 		if in.Body.AnchorSpaceID != "" {
@@ -252,14 +252,14 @@ func (a *API) currentMember(ctx context.Context, authorizationHeader string) (st
 		if !bound {
 			return "", "", ctx, apierr.New("BINDING_REVOKED", "the current member binding is no longer active")
 		}
-		ctx = authorization.WithAgentGrantUser(ctx, member.ID, claims.Subject)
+		ctx = authorization.WithHumanActor(ctx, member.ID, claims.Subject)
 		return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 	}
 	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 	if err != nil {
 		return "", "", ctx, err
 	}
-	ctx = authorization.WithAgentGrantUser(ctx, member.ID, claims.Subject)
+	ctx = authorization.WithHumanActor(ctx, member.ID, claims.Subject)
 	return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
 }
 

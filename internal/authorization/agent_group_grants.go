@@ -29,7 +29,7 @@ func (s *Service) ReplaceAgentGroupGrants(ctx context.Context, actorMemberID, sp
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {
 			return err
 		}
-		if err := validateAgentGrantUserTx(ctx, q, actorMemberID); err != nil {
+		if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		agent, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: granteeMemberID})

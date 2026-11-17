@@ -288,7 +288,7 @@ func TestSharedAgentGrantRevalidatesActingUserInsideTransaction(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				ctx = WithAgentGrantUser(ctx, owner.ID, "usr_binding_actor")
+				ctx = WithHumanActor(ctx, owner.ID, "usr_binding_actor")
 				if scope == "space" {
 					_, err = svc.ReplaceAgentGrants(ctx, owner.ID, spaceID, created.ID, []string{"auth.members:read"}, scope, spaceID)
 				} else {

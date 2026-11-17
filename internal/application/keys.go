@@ -449,7 +449,7 @@ func (s *Service) managedApplicationTx(ctx context.Context, q *db.Queries, actor
 	if err != nil {
 		return db.LockApplicationForUpdateRow{}, err
 	}
-	decision, err := s.Authorization.CheckTx(ctx, q, authorization.CheckRequest{
+	decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
 		MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: row.SpaceID,
 	})
 	if err != nil {

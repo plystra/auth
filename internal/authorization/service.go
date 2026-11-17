@@ -93,7 +93,8 @@ func (s *Service) Check(ctx context.Context, in CheckRequest) (engine.Decision, 
 }
 
 // CheckTx evaluates the same decision using an existing business transaction.
-// It keeps authorization and the mutation on the same database snapshot.
+// Callers must lock mutable facts before checking; READ COMMITTED alone does
+// not stabilize facts between the decision and the mutation.
 func (s *Service) CheckTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
 	decision, _, err := s.checkQueries(ctx, q, in, 0, false)
 	return decision, err
@@ -1480,7 +1481,7 @@ func (s *Service) replaceInlineGrantsTx(ctx context.Context, q *db.Queries, acto
 			return err
 		}
 		if mode == inlineGrantAgentOwner {
-			if err := validateAgentGrantUserTx(ctx, q, actorMemberID); err != nil {
+			if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 				return err
 			}
 		}
@@ -1793,13 +1794,20 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission}}
 }
 
-// CheckNodeTx stabilizes the actor chain and target ancestry before a mutation.
-// The decision uses the same facts and engine as CheckTx.
+// CheckNodeTx stabilizes the verified human account, actor chain, and target
+// ancestry before a mutation. Application services must acquire any existing
+// application's lock first, matching credential exchange and installation order.
 func (s *Service) CheckNodeTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
+	if err := lockHumanActorAccountTx(ctx, q, in.MemberID); err != nil {
+		return engine.Decision{}, err
+	}
 	if err := lockAuthorizationMembersTx(ctx, q, in.MemberID); err != nil {
 		return engine.Decision{}, err
 	}
 	if err := lockAuthorizationNodesTx(ctx, q, in.ResourceSpace, in.ResourceGroup); err != nil {
+		return engine.Decision{}, err
+	}
+	if err := validateHumanActorTx(ctx, q, in.MemberID); err != nil {
 		return engine.Decision{}, err
 	}
 	return s.CheckTx(ctx, q, in)

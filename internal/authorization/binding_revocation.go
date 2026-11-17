@@ -16,7 +16,7 @@ import (
 // RevokeOwnBinding removes only this user's binding. Authorization uses the
 // member's current position inside the same transaction as subtree suspension.
 func (s *Service) RevokeOwnBinding(ctx context.Context, userID, memberID string) error {
-	ctx = WithAgentGrantUser(ctx, memberID, userID)
+	ctx = WithHumanActor(ctx, memberID, userID)
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		// Lock the account before members, matching invitation acceptance. NO KEY
 		// UPDATE permits Agent creation's foreign-key checks while it holds owners.
