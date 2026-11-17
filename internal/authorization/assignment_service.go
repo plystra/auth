@@ -290,28 +290,35 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 }
 
 // ListAssignmentRights returns active, non-expired rights anchored directly
-// in the requested Space or in one of its groups. Authorization is performed
-// by the caller against the requested Space before this display-only read.
-func (s *Service) ListAssignmentRights(ctx context.Context, spaceID string) ([]AssignmentRight, error) {
-	var rows []db.AssignRight
+// in the requested Space or in one of its groups. The actor's identity chain,
+// Space authorization, read, and step-up consumption share one transaction.
+func (s *Service) ListAssignmentRights(ctx context.Context, actorMemberID, spaceID string) ([]AssignmentRight, error) {
+	out := make([]AssignmentRight, 0)
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
+		if err := s.authorizeAssignmentRightTx(ctx, q, actorMemberID, spaceID, ""); err != nil {
+			return err
+		}
 		if err := s.consumeStepUpTx(ctx, q); err != nil {
 			return err
 		}
-		var err error
-		rows, err = q.ListAssignRightsInSpace(ctx, db.ListAssignRightsInSpaceParams{SpaceID: pgtype.Text{String: spaceID, Valid: true}})
-		return err
+		rows, err := q.ListAssignRightsInSpace(ctx, db.ListAssignRightsInSpaceParams{SpaceID: pgtype.Text{String: spaceID, Valid: true}})
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			var permissions []string
+			if err := json.Unmarshal(row.PermissionKeys, &permissions); err != nil {
+				return err
+			}
+			out = append(out, assignmentRightFromRow(row, uniqueSorted(permissions)))
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
-	}
-	out := make([]AssignmentRight, 0, len(rows))
-	for _, row := range rows {
-		var permissions []string
-		if err := json.Unmarshal(row.PermissionKeys, &permissions); err != nil {
-			return nil, err
-		}
-		out = append(out, assignmentRightFromRow(row, uniqueSorted(permissions)))
 	}
 	return out, nil
 }

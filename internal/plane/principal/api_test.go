@@ -145,7 +145,7 @@ func TestAssignmentRightsRoutesDeclareHumanAgentAndMutationGuards(t *testing.T) 
 		stepUp bool
 		delta  bool
 	}{
-		"assignment_rights.list":   {"GET", "/v1/spaces/{id}/assign-rights", true, false},
+		"assignment_rights.list":   {"GET", "/v1/spaces/{id}/assign-rights", true, true},
 		"assignment_rights.create": {"POST", "/v1/spaces/{id}/assign-rights", true, true},
 		"assignment_rights.revoke": {"DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", true, false},
 	}

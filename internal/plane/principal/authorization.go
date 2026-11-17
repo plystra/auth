@@ -224,7 +224,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("grants.list", "GET", "/v1/spaces/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.listGrants)
 	route.Register(api, route.NewSpec("grants.create", "POST", "/v1/spaces/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGrant)
 	route.Register(api, route.NewSpec("grants.revoke", "DELETE", "/v1/spaces/{id}/grants/{grant_id}", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}), a.revokeGrant)
-	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.listAssignmentRights)
+	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listAssignmentRights)
 	route.Register(api, route.NewSpec("assignment_rights.create", "POST", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createAssignmentRight)
 	route.Register(api, route.NewSpec("assignment_rights.revoke", "DELETE", "/v1/spaces/{id}/assign-rights/{ar_id}", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.revokeAssignmentRight)
 	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
@@ -579,15 +579,15 @@ func (a *API) revokeGrant(ctx context.Context, in *revokeGrantInput) (*authoriza
 }
 
 func (a *API) listAssignmentRights(ctx context.Context, in *assignmentRightsInput) (*authorizationDataOutput[[]authorization.AssignmentRight], error) {
-	if _, _, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage"); err != nil {
+	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.assign_rights:manage")
+	if err != nil {
 		return nil, err
 	}
-	var err error
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "assignment_rights.list", map[string]any{"space_id": in.ID})
 	if err != nil {
 		return nil, err
 	}
-	rights, err := a.Authorization.ListAssignmentRights(ctx, in.ID)
+	rights, err := a.Authorization.ListAssignmentRights(ctx, actor.ID, in.ID)
 	if err != nil {
 		return nil, err
 	}
