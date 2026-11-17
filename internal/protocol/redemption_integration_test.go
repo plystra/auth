@@ -24,15 +24,16 @@ import (
 )
 
 type redemptionFixture struct {
-	store    *store.Store
-	sessions *session.Service
-	agents   *agent.Service
-	owner    authorization.Member
-	agent    agent.Agent
-	handler  http.Handler
-	code     string
-	refresh  string
-	verifier string
+	store        *store.Store
+	sessions     *session.Service
+	agents       *agent.Service
+	applications *application.Service
+	owner        authorization.Member
+	agent        agent.Agent
+	handler      http.Handler
+	code         string
+	refresh      string
+	verifier     string
 }
 
 func newRedemptionFixture(t *testing.T) redemptionFixture {
@@ -87,17 +88,8 @@ func newRedemptionFixture(t *testing.T) redemptionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apps := &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("c", 32))}}
+	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("c", 32))}}
 	code, verifier := "test-authorization-code-with-sufficient-entropy", strings.Repeat("v", 43)
-	hash, challenge := sha256.Sum256([]byte(code)), sha256.Sum256([]byte(verifier))
-	if err := apps.CreateAuthorizationCode(ctx, application.CreateAuthorizationCodeInput{
-		ID: "cod_redemption", ApplicationID: "app_redemption", UserID: "usr_redemption", MemberID: ag.ID,
-		CodeHash: hash[:], RedirectURI: "https://client.test/callback", Scope: "auth.members:read",
-		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), CodeChallengeMethod: "S256",
-		Resource: "app_redemption", ExpiresAt: time.Now().Add(5 * time.Minute),
-	}); err != nil {
-		t.Fatal(err)
-	}
 	signer, err := security.GenerateSigner("https://auth.test")
 	if err != nil {
 		t.Fatal(err)
@@ -107,8 +99,23 @@ func newRedemptionFixture(t *testing.T) redemptionFixture {
 	}}
 	var mux http.ServeMux
 	(HTTP{Issuer: signer.Issuer(), Agents: agents, Applications: apps, Sessions: sessions, Authorization: authz}).Register(&mux)
-	return redemptionFixture{store: st, sessions: sessions, agents: agents, owner: owner, agent: ag,
+	f := redemptionFixture{store: st, sessions: sessions, agents: agents, applications: apps, owner: owner, agent: ag,
 		handler: &mux, code: code, refresh: refresh, verifier: verifier}
+	f.issueCode(t, "cod_redemption")
+	return f
+}
+
+func (f redemptionFixture) issueCode(t *testing.T, id string) {
+	t.Helper()
+	hash, challenge := sha256.Sum256([]byte(f.code)), sha256.Sum256([]byte(f.verifier))
+	if err := f.applications.CreateAuthorizationCode(context.Background(), application.CreateAuthorizationCodeInput{
+		ID: id, ApplicationID: "app_redemption", UserID: "usr_redemption", MemberID: f.agent.ID,
+		CodeHash: hash[:], RedirectURI: "https://client.test/callback", Scope: "auth.members:read",
+		CodeChallenge: base64.RawURLEncoding.EncodeToString(challenge[:]), CodeChallengeMethod: "S256",
+		Resource: "app_redemption", ExpiresAt: time.Now().Add(5 * time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f redemptionFixture) form(grant string) url.Values {
