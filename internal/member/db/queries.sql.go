@@ -889,6 +889,23 @@ func (q *Queries) MemberApplicationIsActive(ctx context.Context, arg MemberAppli
 	return active, err
 }
 
+const removeGroupMember = `-- name: RemoveGroupMember :exec
+DELETE FROM group_members
+WHERE group_id = $1 AND member_id = $2
+  AND space_id = $3
+`
+
+type RemoveGroupMemberParams struct {
+	GroupID  string `json:"group_id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+}
+
+func (q *Queries) RemoveGroupMember(ctx context.Context, arg RemoveGroupMemberParams) error {
+	_, err := q.db.Exec(ctx, removeGroupMember, arg.GroupID, arg.MemberID, arg.SpaceID)
+	return err
+}
+
 const revokeUserMember = `-- name: RevokeUserMember :exec
 UPDATE user_members SET status = 'revoked', revoked_at = now()
 WHERE user_id = $1 AND member_id = $2 AND status = 'active'

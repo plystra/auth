@@ -144,8 +144,24 @@ func (s *Service) coverPositiveGrantDeltaForActorTx(ctx context.Context, q *db.Q
 		if owner.Status != "active" {
 			return apierr.New("OWNER_INACTIVE", "the Agent owner member is not active")
 		}
-		if err := s.authorizeTargetTx(ctx, q, owner.ID, "auth.grants:assign", spaceID, memberID); err != nil {
-			return err
+		// A group grant is governed at the receiving group, even when one of
+		// its members belongs to other groups too. Preserve that resource fact
+		// through recursive owner coverage instead of relocating the operation.
+		positions := map[delta.Node]struct{}{}
+		for _, permission := range change.Permissions {
+			if _, checked := positions[permission.Position]; checked {
+				continue
+			}
+			positions[permission.Position] = struct{}{}
+			resourceSpace, resourceGroup := spaceID, ""
+			if permission.Position.Kind == delta.Group {
+				resourceGroup = permission.Position.ID
+			} else {
+				resourceSpace = permission.Position.ID
+			}
+			if err := s.authorizeGroupTx(ctx, q, owner.ID, "auth.grants:assign", resourceSpace, resourceGroup); err != nil {
+				return err
+			}
 		}
 		if err := s.coverPositiveGrantDeltaForActorTx(ctx, q, change, owner.ID, memberID, principalKind, spaceID, applicationInstallation, seen); err != nil {
 			return err

@@ -204,6 +204,25 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 	if _, err := scenario.Signer.Verify(childToken.AccessToken, time.Now().UTC(), scenario.ClientID); err != nil {
 		t.Fatal("online revocation should precede the existing JWT's offline expiry")
 	}
+	mvpData[authorization.Grant](t, principal(http.MethodPost, spacePath+"/grants", scenario.UserToken, map[string]any{
+		"grantee": map[string]string{"group_id": project.ID}, "permissions": []string{"invoice:read"},
+		"scope": "group_tree", "anchor_group_id": project.ID,
+	}))
+	membershipPath := spacePath + "/groups/" + project.ID + "/members/" + parent.Agent.ID
+	mvpData[json.RawMessage](t, principal(http.MethodPut, membershipPath, scenario.UserToken, nil))
+	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
+		if result := check(handler, "check", childToken.AccessToken, project.ID); result.Decision != "allow" {
+			t.Fatalf("group membership did not restore the parent's delegated authority: %s", result.DenyCode)
+		}
+	}
+	mvpData[json.RawMessage](t, principal(http.MethodDelete, membershipPath, scenario.UserToken, nil))
+	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
+		result := check(handler, "explain", childToken.AccessToken, project.ID)
+		if result.Decision != "deny" || result.DenyCode != "OWNER_ENVELOPE_EXCLUDED" || result.DecisionID == "" {
+			t.Fatalf("group removal did not revoke the existing delegated token: %s", result.DenyCode)
+		}
+		deniedDecisions = append(deniedDecisions, result.DecisionID)
+	}
 	mvpData[json.RawMessage](t, principal(http.MethodPost, "/v1/me/agents/"+parent.Agent.ID+"/stop", scenario.UserToken, nil))
 	for _, credential := range []string{parent.Key, child.Key, childToken.AccessToken} {
 		identity := mvpData[server.IntrospectIdentity](t, mvpJSON(t, scenario.Observer, http.MethodPost, "/server/v1/tokens/introspect", scenario.ServerKey, map[string]string{"token": credential}))
@@ -243,7 +262,7 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			}
 		}
 	}
-	for _, action := range []string{"agent.create", "grant.replace", "agent.stop", "authz.check", "authz.explain"} {
+	for _, action := range []string{"agent.create", "grant.replace", "group.member.add", "group.member.remove", "agent.stop", "authz.check", "authz.explain"} {
 		if !seen[action] {
 			t.Fatalf("public delegation audit omitted %s", action)
 		}

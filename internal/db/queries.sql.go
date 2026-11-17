@@ -641,6 +641,69 @@ func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (Creat
 	return i, err
 }
 
+const createGroupGrant = `-- name: CreateGroupGrant :one
+INSERT INTO authorization_grants (id, space_id, role_id, permission_keys, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, space_id, role_id, permission_keys, grantee_member_id, grantee_group_id, scope, anchor_space_id, anchor_group_id, granted_by, created_at, revoked_at
+`
+
+type CreateGroupGrantParams struct {
+	ID             string      `json:"id"`
+	SpaceID        string      `json:"space_id"`
+	RoleID         pgtype.Text `json:"role_id"`
+	PermissionKeys []byte      `json:"permission_keys"`
+	GranteeGroupID pgtype.Text `json:"grantee_group_id"`
+	Scope          string      `json:"scope"`
+	AnchorSpaceID  pgtype.Text `json:"anchor_space_id"`
+	AnchorGroupID  pgtype.Text `json:"anchor_group_id"`
+	GrantedBy      string      `json:"granted_by"`
+}
+
+type CreateGroupGrantRow struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	RoleID          pgtype.Text        `json:"role_id"`
+	PermissionKeys  []byte             `json:"permission_keys"`
+	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
+	Scope           string             `json:"scope"`
+	AnchorSpaceID   pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text        `json:"anchor_group_id"`
+	GrantedBy       string             `json:"granted_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+}
+
+func (q *Queries) CreateGroupGrant(ctx context.Context, arg CreateGroupGrantParams) (CreateGroupGrantRow, error) {
+	row := q.db.QueryRow(ctx, createGroupGrant,
+		arg.ID,
+		arg.SpaceID,
+		arg.RoleID,
+		arg.PermissionKeys,
+		arg.GranteeGroupID,
+		arg.Scope,
+		arg.AnchorSpaceID,
+		arg.AnchorGroupID,
+		arg.GrantedBy,
+	)
+	var i CreateGroupGrantRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.RoleID,
+		&i.PermissionKeys,
+		&i.GranteeMemberID,
+		&i.GranteeGroupID,
+		&i.Scope,
+		&i.AnchorSpaceID,
+		&i.AnchorGroupID,
+		&i.GrantedBy,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const createMember = `-- name: CreateMember :one
 INSERT INTO members (id, space_id, name, kind, type)
 VALUES ($1, $2, $3, $4, $5)
@@ -3024,6 +3087,23 @@ func (q *Queries) RemoveAgentGroupSubtree(ctx context.Context, arg RemoveAgentGr
 	return err
 }
 
+const removeGroupMember = `-- name: RemoveGroupMember :exec
+DELETE FROM group_members
+WHERE group_id = $1 AND member_id = $2
+  AND space_id = $3
+`
+
+type RemoveGroupMemberParams struct {
+	GroupID  string `json:"group_id"`
+	MemberID string `json:"member_id"`
+	SpaceID  string `json:"space_id"`
+}
+
+func (q *Queries) RemoveGroupMember(ctx context.Context, arg RemoveGroupMemberParams) error {
+	_, err := q.db.Exec(ctx, removeGroupMember, arg.GroupID, arg.MemberID, arg.SpaceID)
+	return err
+}
+
 const renewOAuthAgent = `-- name: RenewOAuthAgent :execrows
 UPDATE members
 SET expires_at = $1, version = version + 1
@@ -3208,6 +3288,21 @@ type RevokeUserMemberParams struct {
 func (q *Queries) RevokeUserMember(ctx context.Context, arg RevokeUserMemberParams) error {
 	_, err := q.db.Exec(ctx, revokeUserMember, arg.UserID, arg.MemberID)
 	return err
+}
+
+const roleIsApplicationInstallation = `-- name: RoleIsApplicationInstallation :one
+SELECT EXISTS (SELECT 1 FROM application_installations WHERE role_id = $1)
+`
+
+type RoleIsApplicationInstallationParams struct {
+	RoleID string `json:"role_id"`
+}
+
+func (q *Queries) RoleIsApplicationInstallation(ctx context.Context, arg RoleIsApplicationInstallationParams) (bool, error) {
+	row := q.db.QueryRow(ctx, roleIsApplicationInstallation, arg.RoleID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const setMemberBindingPolicy = `-- name: SetMemberBindingPolicy :exec

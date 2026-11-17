@@ -117,6 +117,17 @@ func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name,
 // management checks, so a group-scoped manager cannot widen its authority by
 // choosing a different member target.
 func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, groupID, memberID string) error {
+	return s.changeGroupMembership(ctx, actorMemberID, spaceID, groupID, memberID, true)
+}
+
+// RemoveMemberFromGroup revokes inherited authority without changing the member
+// identity or its other memberships. Both directions use the same before/after
+// evaluator so removing a restrictive membership cannot bypass delta coverage.
+func (s *Service) RemoveMemberFromGroup(ctx context.Context, actorMemberID, spaceID, groupID, memberID string) error {
+	return s.changeGroupMembership(ctx, actorMemberID, spaceID, groupID, memberID, false)
+}
+
+func (s *Service) changeGroupMembership(ctx context.Context, actorMemberID, spaceID, groupID, memberID string, add bool) error {
 	if actorMemberID == "" || spaceID == "" || groupID == "" || memberID == "" {
 		return apierr.New("VALIDATION_FAILED", "group membership fields are required")
 	}
@@ -144,7 +155,7 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 		if group.Status != "active" {
 			return apierr.New("GROUP_INACTIVE", "group is not active")
 		}
-		if member.Status != "active" {
+		if add && member.Status != "active" {
 			return apierr.New("ACTOR_MEMBER_INACTIVE", "member is not active")
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, spaceID, groupID); err != nil {
@@ -154,10 +165,10 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 			return err
 		}
 		_, membershipErr := q.GetGroupMember(ctx, db.GetGroupMemberParams{GroupID: groupID, MemberID: memberID})
-		if membershipErr == nil {
+		if add && membershipErr == nil || !add && errors.Is(membershipErr, pgx.ErrNoRows) {
 			return nil
 		}
-		if !errors.Is(membershipErr, pgx.ErrNoRows) {
+		if membershipErr != nil && !errors.Is(membershipErr, pgx.ErrNoRows) {
 			return membershipErr
 		}
 
@@ -165,8 +176,14 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 		if err != nil {
 			return err
 		}
-		if err := q.AddGroupMember(ctx, db.AddGroupMemberParams{GroupID: groupID, MemberID: memberID, SpaceID: spaceID, Source: "manual"}); err != nil {
-			return normalizeDBError(err)
+		if add {
+			if err := q.AddGroupMember(ctx, db.AddGroupMemberParams{GroupID: groupID, MemberID: memberID, SpaceID: spaceID, Source: "manual"}); err != nil {
+				return normalizeDBError(err)
+			}
+		} else {
+			if err := q.RemoveGroupMember(ctx, db.RemoveGroupMemberParams{GroupID: groupID, MemberID: memberID, SpaceID: spaceID}); err != nil {
+				return normalizeDBError(err)
+			}
 		}
 		after, err := s.grantAuthoritySnapshotAtPositionTx(ctx, q, member.ID, spaceID, member.Type, delta.Node{Kind: delta.Space, ID: spaceID})
 		if err != nil {
@@ -191,7 +208,15 @@ func (s *Service) AddMemberToGroup(ctx context.Context, actorMemberID, spaceID, 
 				return err
 			}
 		}
-		return auditGroupMembership(ctx, q, actorMemberID, memberID, groupID)
+		action := "group.member.remove"
+		if add {
+			action = "group.member.add"
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: memberID, Action: action, Outcome: "success",
+			Resource:   audit.Resource{Type: "group_membership", ID: memberID + "/" + groupID, SpaceID: spaceID, GroupID: groupID},
+			Permission: "auth.groups:manage",
+		})
 	})
 }
 
@@ -383,8 +408,4 @@ func (s *Service) authorizeGroupTx(ctx context.Context, q *db.Queries, actorMemb
 		return nil
 	}
 	return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": permission, "group_id": groupID}}
-}
-
-func auditGroupMembership(ctx context.Context, q *db.Queries, actorMemberID, memberID, groupID string) error {
-	return audit.Write(ctx, q, "member", actorMemberID, "group.member.add", memberID+"/"+groupID, "success")
 }

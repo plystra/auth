@@ -458,6 +458,7 @@ type Grant struct {
 	RoleID          string   `json:"role_id"`
 	Permissions     []string `json:"permissions,omitempty"`
 	GranteeMemberID string   `json:"grantee_member_id"`
+	GranteeGroupID  string   `json:"grantee_group_id,omitempty"`
 	Scope           string   `json:"scope"`
 	AnchorSpaceID   string   `json:"anchor_space_id,omitempty"`
 	AnchorGroupID   string   `json:"anchor_group_id,omitempty"`
@@ -1200,6 +1201,9 @@ func (s *Service) CreateGrant(ctx context.Context, actorMemberID, spaceID, grant
 			return apierr.New("NOT_FOUND", "role was not found in this Space")
 		}
 		if err != nil {
+			return err
+		}
+		if err := validateOrdinaryGrantRoleTx(ctx, q, role.ID); err != nil {
 			return err
 		}
 		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, granteeMemberID); err != nil {

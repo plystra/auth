@@ -1492,6 +1492,9 @@
           "granted_by": {
             "type": "string"
           },
+          "grantee_group_id": {
+            "type": "string"
+          },
           "grantee_member_id": {
             "type": "string"
           },
@@ -5188,6 +5191,65 @@
       }
     },
     "/v1/spaces/{id}/groups/{group_id}/members/{mid}": {
+      "delete": {
+        "operationId": "groups.members.remove",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "group_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "mid",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputAcceptedDataBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "groups.members.remove"
+      },
       "put": {
         "operationId": "groups.members.add",
         "parameters": [

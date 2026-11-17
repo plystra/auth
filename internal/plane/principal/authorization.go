@@ -228,6 +228,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("groups.create", "POST", "/v1/spaces/{id}/groups", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGroup)
 	route.Register(api, route.NewSpec("invitations.create", "POST", "/v1/spaces/{id}/invitations", route.Principal, "auth.members:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.bindings:manage"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createInvitation)
 	route.Register(api, route.NewSpec("groups.members.add", "PUT", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.addGroupMember)
+	route.Register(api, route.NewSpec("groups.members.remove", "DELETE", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.removeGroupMember)
 	route.Register(api, route.NewSpec("groups.members.list", "GET", "/v1/spaces/{id}/groups/{group_id}/members", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}), a.listGroupMembers)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
 }
@@ -426,6 +427,17 @@ func (a *API) addGroupMember(ctx context.Context, in *groupMemberPathInput) (*au
 	return acceptedResponse(), nil
 }
 
+func (a *API) removeGroupMember(ctx context.Context, in *groupMemberPathInput) (*authorizationDataOutput[acceptedData], error) {
+	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Authorization.RemoveMemberFromGroup(ctx, actor.ID, in.ID, in.GroupID, in.MemberID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
 func (a *API) moveGroup(ctx context.Context, in *groupMoveInput) (*authorizationDataOutput[acceptedData], error) {
 	actor, ctx, err := a.actorForNode(ctx, in.Authorization, in.ID, in.GroupID, "auth.groups:manage")
 	if err != nil {
@@ -486,8 +498,24 @@ func (a *API) createGrant(ctx context.Context, in *createGrantInput) (*authoriza
 	if (in.Body.RoleID == "") == (len(in.Body.Permissions) == 0) {
 		return nil, apierr.New("VALIDATION_FAILED", "provide exactly one of role_id or permissions")
 	}
-	if in.Body.Grantee.GroupID != "" || in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
-		return nil, apierr.New("UNAVAILABLE", "group grants are not yet available")
+	if in.Body.Grantee.GroupID != "" {
+		actor, ctx, err := a.resolvePrincipalMember(ctx, in.Authorization, in.ID)
+		if err != nil {
+			return nil, err
+		}
+		grant, err := a.Authorization.CreateGroupGrant(ctx, actor.ID, in.ID, in.Body.Grantee.GroupID, authorization.GroupGrantInput{
+			RoleID: in.Body.RoleID, Permissions: in.Body.Permissions, Scope: in.Body.Scope,
+			AnchorSpaceID: in.Body.AnchorSpaceID, AnchorGroupID: in.Body.AnchorGroupID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		out := &authorizationDataOutput[authorization.Grant]{}
+		out.Body.Data = grant
+		return out, nil
+	}
+	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
+		return nil, apierr.New("UNAVAILABLE", "member grants with group resource scopes are not yet available")
 	}
 	actor, ctx, err := a.actorForSpaceTarget(ctx, in.Authorization, in.ID, "auth.grants:assign", in.Body.Grantee.MemberID)
 	if err != nil {

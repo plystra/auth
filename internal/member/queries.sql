@@ -111,6 +111,11 @@ INSERT INTO group_members (group_id, member_id, space_id, source)
 VALUES (sqlc.arg(group_id), sqlc.arg(member_id), sqlc.arg(space_id), sqlc.arg(source))
 ON CONFLICT (group_id, member_id) DO NOTHING;
 
+-- name: RemoveGroupMember :exec
+DELETE FROM group_members
+WHERE group_id = sqlc.arg(group_id) AND member_id = sqlc.arg(member_id)
+  AND space_id = sqlc.arg(space_id);
+
 -- name: LockGroupSubtree :many
 WITH RECURSIVE tree AS (
     SELECT groups.id, groups.space_id, groups.name, groups.parent_id, groups.kind, groups.owner_member_id, groups.status, groups.created_at
