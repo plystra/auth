@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/session"
 )
 
@@ -129,5 +131,82 @@ func TestOAuthInstallationLifecycleSerializesWithRedemption(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+func TestOAuthAuthorizationCodeCannotReviveAfterAgentStopAndResume(t *testing.T) {
+	for _, waiting := range []bool{false, true} {
+		name := "StoredCode"
+		if waiting {
+			name = "WaitingForMemberLock"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRedemptionFixture(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			mutation, err := f.store.BeginIdempotency(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = mutation.Rollback(context.Background()) })
+			if err := f.store.InTx(mutation.Context(ctx), func(q *db.Queries) error {
+				if err := member.SetAgentSubtreeStatusTx(ctx, q, f.agent.ID, "suspended"); err != nil {
+					return err
+				}
+				return q.ResumeSuspendedAgent(ctx, db.ResumeSuspendedAgentParams{MemberID: f.agent.ID})
+			}); err != nil {
+				t.Fatal(err)
+			}
+			response := make(chan *httptest.ResponseRecorder, 1)
+			if waiting {
+				go func() { response <- f.request(ctx, f.form("authorization_code")) }()
+				waitForRedemptionLock(t, ctx, f.store, response)
+			}
+			if err := mutation.Commit(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if !waiting {
+				response <- f.request(ctx, f.form("authorization_code"))
+			}
+			out := <-response
+			if out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "invalid_grant") || strings.Contains(out.Body.String(), "access_token") {
+				t.Fatalf("authorization code revived a stopped Agent: status=%d", out.Code)
+			}
+			var consumed, issued int
+			if err := f.store.Pool.QueryRow(ctx, `SELECT
+				(SELECT count(*) FROM authorization_codes WHERE consumed_at IS NOT NULL),
+				(SELECT count(*) FROM audit_logs WHERE action = 'agent.access.issue')`).Scan(&consumed, &issued); err != nil || consumed != 0 || issued != 0 {
+				t.Fatalf("rejected code committed issuance: consumed=%d issued=%d error=%v", consumed, issued, err)
+			}
+			f.code += "-after-restore"
+			f.issueCode(t, "cod_redemption_after_restore")
+			delegationAuditToken(t, f.request(ctx, f.form("authorization_code")))
+		})
+	}
+}
+
+func TestOAuthAuthorizationCodeEpochBindingFailsClosed(t *testing.T) {
+	for _, name := range []string{"MissingEpoch", "WrongEpoch"} {
+		t.Run(name, func(t *testing.T) {
+			f := newRedemptionFixture(t)
+			ctx := context.Background()
+			var bound, current int64
+			if err := f.store.Pool.QueryRow(ctx, `SELECT c.member_token_epoch, m.token_epoch
+				FROM authorization_codes c JOIN members m ON m.id = c.member_id WHERE c.id = 'cod_redemption'`).Scan(&bound, &current); err != nil || bound != current || bound < 1 {
+				t.Fatalf("authorization code did not capture the current epoch: error=%v", err)
+			}
+			var epoch any
+			if name == "WrongEpoch" {
+				epoch = current + 1
+			}
+			if _, err := f.store.Pool.Exec(ctx, `UPDATE authorization_codes SET member_token_epoch = $1 WHERE id = 'cod_redemption'`, epoch); err != nil {
+				t.Fatal(err)
+			}
+			out := f.request(ctx, f.form("authorization_code"))
+			if out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "invalid_grant") || strings.Contains(out.Body.String(), "access_token") {
+				t.Fatalf("invalid code epoch was accepted: status=%d", out.Code)
+			}
+			f.assertUnchanged(t)
+		})
 	}
 }

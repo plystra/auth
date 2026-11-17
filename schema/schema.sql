@@ -1713,3 +1713,10 @@ $$;
 CREATE TRIGGER members_agent_token_deactivation
 BEFORE UPDATE OF status ON members
 FOR EACH ROW EXECUTE FUNCTION invalidate_agent_tokens_on_deactivation();
+
+
+-- Authorization codes cannot restore credentials revoked by Agent suspension.
+-- Bind new codes to the existing Agent token epoch. Legacy codes deliberately
+-- remain unbound and fail closed: their issue-time epoch cannot be recovered.
+ALTER TABLE authorization_codes
+    ADD COLUMN member_token_epoch bigint CHECK (member_token_epoch > 0);

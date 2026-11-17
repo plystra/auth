@@ -242,19 +242,27 @@ func TestOAuthRefreshReplayCommitsFamilyRevocation(t *testing.T) {
 
 func TestOAuthRedemptionRevalidatesAfterConcurrentChanges(t *testing.T) {
 	for _, grant := range []string{"authorization_code", "refresh_token"} {
-		for _, change := range []string{"client_rotation", "installation_suspend", "owner_suspend", "code_expiry"} {
-			if change == "code_expiry" && grant != "authorization_code" {
+		for _, change := range []string{"client_rotation", "installation_suspend", "owner_suspend", "code_expiry", "code_expiry_member"} {
+			if strings.HasPrefix(change, "code_expiry") && grant != "authorization_code" {
 				continue
 			}
 			t.Run(grant+"/"+change, func(t *testing.T) {
 				f := newRedemptionFixture(t)
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
+				var memberWaitExpiry time.Time
+				if change == "code_expiry_member" {
+					if err := f.store.Pool.QueryRow(ctx, `UPDATE authorization_codes
+						SET expires_at = clock_timestamp() + interval '3 seconds'
+						WHERE id = 'cod_redemption' RETURNING expires_at`).Scan(&memberWaitExpiry); err != nil {
+						t.Fatal(err)
+					}
+				}
 				locked, release := make(chan struct{}), make(chan struct{})
 				writer := make(chan error, 1)
 				go func() {
 					writer <- f.store.InTx(ctx, func(q *db.Queries) error {
-						if change == "owner_suspend" {
+						if change == "owner_suspend" || change == "code_expiry_member" {
 							if err := member.LockChainsTx(ctx, q, f.owner.ID); err != nil {
 								return err
 							}
@@ -283,6 +291,8 @@ func TestOAuthRedemptionRevalidatesAfterConcurrentChanges(t *testing.T) {
 							return err
 						case "owner_suspend":
 							return q.SetMemberStatus(ctx, db.SetMemberStatusParams{ID: f.owner.ID, SpaceID: f.owner.SpaceID, Status: "suspended"})
+						case "code_expiry_member":
+							return nil
 						default:
 							_, err := tx.Exec(ctx, `UPDATE authorization_codes SET expires_at = clock_timestamp() WHERE id = 'cod_redemption'`)
 							return err
@@ -297,6 +307,15 @@ func TestOAuthRedemptionRevalidatesAfterConcurrentChanges(t *testing.T) {
 				response := make(chan *httptest.ResponseRecorder, 1)
 				go func() { response <- f.request(ctx, f.form(grant)) }()
 				waitForRedemptionLock(t, ctx, f.store, response)
+				if change == "code_expiry_member" {
+					timer := time.NewTimer(time.Until(memberWaitExpiry) + 50*time.Millisecond)
+					defer timer.Stop()
+					select {
+					case <-timer.C:
+					case <-ctx.Done():
+						t.Fatal(ctx.Err())
+					}
+				}
 				close(release)
 				if err := <-writer; err != nil {
 					t.Fatal(err)

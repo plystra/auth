@@ -24,6 +24,7 @@ import (
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
@@ -225,6 +226,7 @@ type AuthorizationCode struct {
 	ApplicationID       string
 	UserID              string
 	MemberID            string
+	MemberTokenEpoch    int64
 	RedirectURI         string
 	CodeChallenge       string
 	CodeChallengeMethod string
@@ -536,6 +538,9 @@ func (s *Service) CreateAuthorizationCode(ctx context.Context, in CreateAuthoriz
 }
 
 func (s *Service) CreateAuthorizationCodeTx(ctx context.Context, q *db.Queries, in CreateAuthorizationCodeInput) error {
+	if err := member.LockChainsTx(ctx, q, in.MemberID); err != nil {
+		return err
+	}
 	return q.CreateAuthorizationCode(ctx, db.CreateAuthorizationCodeParams{
 		ID: in.ID, ApplicationID: in.ApplicationID, UserID: in.UserID,
 		MemberID: nullableText(in.MemberID), RedirectUri: in.RedirectURI,
@@ -567,7 +572,7 @@ func (s *Service) ConsumeAuthorizationCodeTx(ctx context.Context, q *db.Queries,
 	}
 	return AuthorizationCode{ID: row.ID, ApplicationID: row.ApplicationID, UserID: row.UserID,
 		RedirectURI: row.RedirectUri, Scope: row.Scope, ExpiresAt: row.ExpiresAt.Time,
-		MemberID: row.MemberID.String, CodeChallenge: row.CodeChallenge.String,
+		MemberID: row.MemberID.String, MemberTokenEpoch: row.MemberTokenEpoch.Int64, CodeChallenge: row.CodeChallenge.String,
 		CodeChallengeMethod: row.CodeChallengeMethod.String, Nonce: row.Nonce.String, Resource: row.Resource.String}, nil
 }
 

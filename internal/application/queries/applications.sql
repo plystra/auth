@@ -286,13 +286,14 @@ FOR UPDATE;
 -- name: CreateAuthorizationCode :exec
 INSERT INTO authorization_codes (
     id, application_id, user_id, member_id, redirect_uri, code_hash,
-    code_challenge, code_challenge_method, scope, nonce, resource, expires_at
+    code_challenge, code_challenge_method, scope, nonce, resource, expires_at, member_token_epoch
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(application_id), sqlc.arg(user_id), sqlc.narg(member_id),
     sqlc.arg(redirect_uri), sqlc.arg(code_hash), sqlc.arg(code_challenge),
     sqlc.arg(code_challenge_method), sqlc.arg(scope), sqlc.narg(nonce),
-    sqlc.narg(resource), sqlc.arg(expires_at)
+    sqlc.narg(resource), sqlc.arg(expires_at),
+    (SELECT m.token_epoch FROM members m WHERE m.id = sqlc.narg(member_id))
 );
 
 -- name: CreateOAuthAuthorizationRequest :exec
@@ -327,7 +328,7 @@ WHERE code_hash = sqlc.arg(code_hash)
   AND expires_at > now()
 RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
           code_challenge, code_challenge_method, scope, nonce, resource,
-          expires_at, consumed_at;
+          expires_at, consumed_at, member_token_epoch;
 
 -- name: CreateAPIKey :one
 INSERT INTO api_keys (id, application_id, name, prefix, secret_hash, scopes, restrict_to, allowed_ip_cidrs, expires_at, allow_subject_assertion)

@@ -21,7 +21,7 @@ WHERE code_hash = $1
   AND expires_at > now()
 RETURNING id, application_id, user_id, member_id, redirect_uri, code_hash,
           code_challenge, code_challenge_method, scope, nonce, resource,
-          expires_at, consumed_at
+          expires_at, consumed_at, member_token_epoch
 `
 
 type ConsumeAuthorizationCodeParams struct {
@@ -44,6 +44,7 @@ type ConsumeAuthorizationCodeRow struct {
 	Resource            pgtype.Text        `json:"resource"`
 	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt          pgtype.Timestamptz `json:"consumed_at"`
+	MemberTokenEpoch    pgtype.Int8        `json:"member_token_epoch"`
 }
 
 func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAuthorizationCodeParams) (ConsumeAuthorizationCodeRow, error) {
@@ -63,6 +64,7 @@ func (q *Queries) ConsumeAuthorizationCode(ctx context.Context, arg ConsumeAutho
 		&i.Resource,
 		&i.ExpiresAt,
 		&i.ConsumedAt,
+		&i.MemberTokenEpoch,
 	)
 	return i, err
 }
@@ -262,13 +264,14 @@ func (q *Queries) CreateApplicationInstallation(ctx context.Context, arg CreateA
 const createAuthorizationCode = `-- name: CreateAuthorizationCode :exec
 INSERT INTO authorization_codes (
     id, application_id, user_id, member_id, redirect_uri, code_hash,
-    code_challenge, code_challenge_method, scope, nonce, resource, expires_at
+    code_challenge, code_challenge_method, scope, nonce, resource, expires_at, member_token_epoch
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
     $8, $9, $10,
-    $11, $12
+    $11, $12,
+    (SELECT m.token_epoch FROM members m WHERE m.id = $4)
 )
 `
 

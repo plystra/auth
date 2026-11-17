@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -139,6 +140,9 @@ func (s tokenService) authorizationCode(ctx context.Context, in codeExchangeInpu
 		if code.Resource != client.ClientID {
 			return apierr.New("invalid_target", "resource is not registered for this client")
 		}
+		if err := member.LockChainsTx(ctx, q, code.MemberID); err != nil {
+			return err
+		}
 		ag, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: code.MemberID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("invalid_grant", "authorization code is invalid or expired")
@@ -146,7 +150,8 @@ func (s tokenService) authorizationCode(ctx context.Context, in codeExchangeInpu
 		if err != nil {
 			return err
 		}
-		if ag.OauthClientID.String != client.ClientID || ag.Source.String != "oauth" {
+		if ag.OauthClientID.String != client.ClientID || ag.Source.String != "oauth" ||
+			code.MemberTokenEpoch <= 0 || code.MemberTokenEpoch != ag.TokenEpoch || !code.ExpiresAt.After(time.Now().UTC()) {
 			return apierr.New("invalid_grant", "authorization code is invalid or expired")
 		}
 		installed, err := s.applications.OAuthClientInstalledTx(ctx, q, client.ID, ag.SpaceID)

@@ -213,6 +213,7 @@ type AuthorizationCode struct {
 	MemberID            pgtype.Text        `json:"member_id"`
 	Nonce               pgtype.Text        `json:"nonce"`
 	Resource            pgtype.Text        `json:"resource"`
+	MemberTokenEpoch    pgtype.Int8        `json:"member_token_epoch"`
 }
 
 type AuthorizationGrant struct {
