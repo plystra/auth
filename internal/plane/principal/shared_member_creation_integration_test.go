@@ -229,7 +229,11 @@ func TestSharedMemberCreationAgentApprovalIsRequestBoundAndAtomic(t *testing.T) 
 			if changed := memberIdentityRequest(t, ctx, f, op); changed.Code != http.StatusForbidden || !strings.Contains(changed.Body.String(), "APPROVAL_REQUIRED") {
 				t.Fatalf("approved creation accepted a different name: status=%d", changed.Code)
 			}
-			proofCtx := authorization.WithGovernanceApproval(ctx, op.approvalID, "members.create", f.spaceID, make([]byte, 32))
+			var approvedDigest []byte
+			if err := f.store.Pool.QueryRow(ctx, `SELECT request_digest FROM approval_requests WHERE id = $1`, op.approvalID).Scan(&approvedDigest); err != nil {
+				t.Fatal(err)
+			}
+			proofCtx := authorization.WithGovernanceApproval(ctx, op.approvalID, "members.create", f.spaceID, approvedDigest)
 			if _, err := f.authz.CreateMember(proofCtx, f.actorID, "", f.spaceID, "Different domain request", "human", "shared"); err == nil {
 				t.Fatal("domain creation trusted an approval digest supplied in context")
 			} else {
