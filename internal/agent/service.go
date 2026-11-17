@@ -702,7 +702,7 @@ func (s *Service) RevokeOAuthRefreshToken(ctx context.Context, raw string) (bool
 				return err
 			}
 		}
-		return s.revokeOAuthTx(ctx, q, row.MemberID)
+		return s.RevokeOAuthTx(ctx, q, row.MemberID)
 	})
 	return found, err
 }
@@ -733,11 +733,13 @@ func (s *Service) lockOAuthRefreshCredentialTx(ctx context.Context, q *db.Querie
 // member status checked by session introspection.
 func (s *Service) RevokeOAuth(ctx context.Context, memberID string) error {
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
-		return s.revokeOAuthTx(ctx, q, memberID)
+		return s.RevokeOAuthTx(ctx, q, memberID)
 	})
 }
 
-func (s *Service) revokeOAuthTx(ctx context.Context, q *db.Queries, memberID string) error {
+// RevokeOAuthTx participates in an authenticated credential revocation's
+// transaction so identity revalidation and subtree revocation commit together.
+func (s *Service) RevokeOAuthTx(ctx context.Context, q *db.Queries, memberID string) error {
 	if err := member.LockChainsTx(ctx, q, memberID); err != nil {
 		return err
 	}

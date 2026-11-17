@@ -279,6 +279,18 @@ func (s *Service) CreateAgentAccessTx(ctx context.Context, q *db.Queries, member
 	return s.agentAccessTx(ctx, q, memberID, spaceID, audience, "", nil, 0)
 }
 
+// CreateAgentScopedAccessTx issues an explicitly restricted credential for the
+// same Agent, without introducing a delegation hop or a new refresh family.
+func (s *Service) CreateAgentScopedAccessTx(ctx context.Context, q *db.Queries, memberID, spaceID, audience string, scopes []string) (Tokens, error) {
+	if len(scopes) == 0 {
+		return Tokens{}, apierr.New("invalid_scope", "an explicit nonempty scope is required")
+	}
+	if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+		return Tokens{}, err
+	}
+	return s.agentAccessTx(ctx, q, memberID, spaceID, audience, "", scopes, 0)
+}
+
 // CreateAgentDelegatedAccess issues a token for an existing child Agent. The
 // actor and optional upper expiry bound are carried from the parent token so a
 // delegated token cannot outlive the delegation step that produced it.
@@ -364,7 +376,7 @@ func (s *Service) agentAccessTx(ctx context.Context, q *db.Queries, memberID, sp
 	}
 	if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 		ActorType: "member", ActorID: actorID, Action: action, Outcome: "success", MemberID: memberID,
-		Metadata: map[string]string{"expires_at": expiresAt.UTC().Format(time.RFC3339)},
+		Metadata: map[string]string{"expires_at": expiresAt.UTC().Format(time.RFC3339), "audience": audience, "scope": strings.Join(scopes, " ")},
 	}); err != nil {
 		return Tokens{}, err
 	}

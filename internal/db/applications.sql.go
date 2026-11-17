@@ -1086,6 +1086,42 @@ func (q *Queries) ListManifestInstallationMembers(ctx context.Context, arg ListM
 	return items, nil
 }
 
+const listOAuthConsentPermissions = `-- name: ListOAuthConsentPermissions :many
+SELECT DISTINCT permission.value::text AS permission_key
+FROM authorization_grants ag
+JOIN members m ON m.id = ag.grantee_member_id
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+CROSS JOIN LATERAL jsonb_array_elements_text(ag.permission_keys) AS permission(value)
+WHERE m.id = $1::text AND m.source = 'oauth'
+  AND ag.granted_by = g.owner_member_id
+  AND ag.role_id IS NULL AND ag.revoked_at IS NULL
+ORDER BY permission_key
+`
+
+type ListOAuthConsentPermissionsParams struct {
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) ListOAuthConsentPermissions(ctx context.Context, arg ListOAuthConsentPermissionsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listOAuthConsentPermissions, arg.MemberID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var permission_key string
+		if err := rows.Scan(&permission_key); err != nil {
+			return nil, err
+		}
+		items = append(items, permission_key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPublicApplicationReviews = `-- name: ListPublicApplicationReviews :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
        pending_manifest_permissions, review_status, status, created_at

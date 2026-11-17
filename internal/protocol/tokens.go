@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -46,9 +47,41 @@ func (s tokenService) agentKey(ctx context.Context, raw secret.String, resource 
 	return tokens, nil
 }
 
-func (s tokenService) delegated(ctx context.Context, subject, actor secret.String, requested []string, resource string) (session.Tokens, error) {
+func (s tokenService) delegated(ctx context.Context, subject, actor secret.String, requested []string, resource string) (session.Tokens, string, error) {
+	resource = strings.TrimSpace(resource)
+	verified, err := s.sessions.Signer.Verify(subject.Value(), time.Now().UTC(), security.DefaultApplicationAudience)
+	if err != nil && resource != "" && resource != security.DefaultApplicationAudience {
+		verified, err = s.sessions.Signer.Verify(subject.Value(), time.Now().UTC(), resource)
+	}
+	if err != nil || verified.Type != "agent" {
+		return session.Tokens{}, "", apierr.New("invalid_grant", "subject token is invalid")
+	}
 	var tokens session.Tokens
-	err := s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+	var scope string
+	err = s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+		var client application.OAuthClient
+		if verified.Audience != security.DefaultApplicationAudience {
+			if s.applications == nil {
+				return apierr.New("temporarily_unavailable", "application token exchange is unavailable")
+			}
+			// Application lifecycle and consent take the application lock before
+			// any members. Resolve only from the already verified audience.
+			ref, err := q.GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: verified.Audience})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "subject application is unavailable")
+			}
+			if err != nil {
+				return err
+			}
+			client, err = s.applications.OAuthClientByIDTx(ctx, q, ref.ID)
+			if err != nil {
+				var public *apierr.Error
+				if errors.As(err, &public) && public.Code == "invalid_request" {
+					return apierr.New("invalid_grant", "subject application is unavailable")
+				}
+				return err
+			}
+		}
 		credential, err := s.agents.AuthenticateKeyTx(ctx, q, actor.Value())
 		if err != nil {
 			return exchangeCredentialError(err)
@@ -58,7 +91,7 @@ func (s tokenService) delegated(ctx context.Context, subject, actor secret.Strin
 		}
 		// The authenticated child's persisted owner chain is locked before
 		// reading the parent JWT's current revocation epoch and authority.
-		parent, active, err := s.sessions.IntrospectTx(ctx, q, subject.Value(), security.DefaultApplicationAudience)
+		parent, active, err := s.sessions.IntrospectTx(ctx, q, subject.Value(), verified.Audience)
 		if err != nil {
 			return err
 		}
@@ -73,32 +106,149 @@ func (s tokenService) delegated(ctx context.Context, subject, actor secret.Strin
 			return apierr.New("invalid_grant", "actor token is not delegated by the subject")
 		}
 		requested = uniqueScopes(requested)
-		parentScopes := uniqueScopes(parent.Scopes)
-		if len(requested) == 0 && len(parentScopes) > 0 {
-			requested = parentScopes
-		}
-		if len(parentScopes) > 0 {
-			for _, permission := range requested {
-				if !scopeContains(parentScopes, permission) {
-					return apierr.New("invalid_scope", "requested scope exceeds the subject token scope")
+		if client.ID != "" {
+			requested, err = s.oauthDelegatedScopesTx(ctx, q, parent, credential.SpaceID, credential.MemberID, client, requested)
+			if err != nil {
+				return err
+			}
+		} else {
+			parentScopes := uniqueScopes(parent.Scopes)
+			if len(requested) == 0 && len(parentScopes) > 0 {
+				requested = parentScopes
+			}
+			if len(parentScopes) > 0 {
+				for _, permission := range requested {
+					if !scopeContains(parentScopes, permission) {
+						return apierr.New("invalid_scope", "requested scope exceeds the subject token scope")
+					}
 				}
 			}
+			allowed, err := s.authorization.ValidateTokenScopesTx(ctx, q, credential.MemberID, requested)
+			if err != nil {
+				return err
+			}
+			if !allowed {
+				return apierr.New("invalid_scope", "requested scope is not held by the delegated Agent")
+			}
 		}
-		allowed, err := s.authorization.ValidateTokenScopesTx(ctx, q, credential.MemberID, requested)
-		if err != nil {
-			return err
-		}
-		if !allowed {
-			return apierr.New("invalid_scope", "requested scope is not held by the delegated Agent")
-		}
-		ctx = audit.WithCaller(ctx, audit.Caller{CredentialType: "agent_token_exchange"})
+		scope = strings.Join(requested, " ")
+		ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: client.ID, CredentialType: "agent_token_exchange"})
 		tokens, err = s.sessions.CreateAgentDelegatedAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource, parent.Subject, requested, parent.ExpiresAt)
 		return err
 	})
 	if err != nil {
-		return session.Tokens{}, err
+		return session.Tokens{}, "", err
 	}
-	return tokens, nil
+	return tokens, scope, nil
+}
+
+func (s tokenService) oauthDelegatedScopesTx(ctx context.Context, q *db.Queries, parent security.Claims, spaceID, childID string, client application.OAuthClient, requested []string) ([]string, error) {
+	member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: parent.Subject})
+	if err != nil {
+		return nil, err
+	}
+	if member.Source.String == "oauth" && member.OauthClientID.String != client.ClientID {
+		return nil, apierr.New("invalid_grant", "subject token does not belong to this application")
+	}
+	installation, err := q.LockActiveApplicationInstallationForSpace(ctx, db.LockActiveApplicationInstallationForSpaceParams{
+		ApplicationID: client.ID, TargetSpaceID: spaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, apierr.New("invalid_grant", "application is not installed")
+	}
+	if err != nil {
+		return nil, err
+	}
+	var approved []string
+	if json.Unmarshal(installation.ApprovedPermissions, &approved) != nil {
+		return nil, apierr.New("temporarily_unavailable", "application installation is invalid")
+	}
+	explicit := len(requested) > 0
+	if !explicit {
+		requested = uniqueScopes(client.AllowedScopes)
+	}
+	allowed := make([]string, 0, len(requested))
+	for _, permission := range requested {
+		usable := scopeContains(client.AllowedScopes, permission) && scopeContains(approved, permission) &&
+			(parent.Scopes == nil || scopeContains(parent.Scopes, permission))
+		if usable {
+			usable, err = s.authorization.ValidateTokenScopesTx(ctx, q, childID, []string{permission})
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !usable {
+			if explicit {
+				return nil, apierr.New("invalid_scope", "requested scope is outside the application or delegated authority")
+			}
+			continue
+		}
+		allowed = append(allowed, permission)
+	}
+	if len(allowed) == 0 {
+		return nil, apierr.New("invalid_scope", "no requested scope is held by the delegated Agent")
+	}
+	return allowed, nil
+}
+
+func (s tokenService) revokeOAuthAccess(ctx context.Context, raw secret.String) error {
+	parts := strings.Split(raw.Value(), ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var hint struct {
+		Subject string `json:"sub"`
+	}
+	if json.Unmarshal(payload, &hint) != nil || hint.Subject == "" {
+		return nil
+	}
+	return s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+		// The untrusted subject selects only a lookup and lock. Authority comes
+		// from full verification against this Agent's stored client below.
+		if err := member.LockChainsTx(ctx, q, hint.Subject); err != nil {
+			return err
+		}
+		root, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: hint.Subject})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if root.Source.String != "oauth" {
+			return nil
+		}
+		audience := root.OauthClientID.String
+		if audience == "" {
+			audience = security.DefaultApplicationAudience
+		}
+		claims, active, err := s.sessions.IntrospectTx(ctx, q, raw.Value(), audience)
+		if err != nil {
+			return err
+		}
+		if !active && audience != security.DefaultApplicationAudience {
+			claims, active, err = s.sessions.IntrospectTx(ctx, q, raw.Value(), security.DefaultApplicationAudience)
+			if err != nil {
+				return err
+			}
+		}
+		if !active || claims.Type != "agent" || claims.Subject != root.ID {
+			return nil
+		}
+		caller := audit.Caller{CredentialType: "agent_access_token"}
+		if root.OauthClientID.Valid {
+			client, err := q.GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: root.OauthClientID.String})
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			caller.ApplicationID = client.ID
+		}
+		return s.agents.RevokeOAuthTx(audit.WithCaller(ctx, caller), q, root.ID)
+	})
 }
 
 func exchangeCredentialError(err error) error {
@@ -176,8 +326,9 @@ func (s tokenService) authorizationCode(ctx context.Context, in codeExchangeInpu
 	return tokens, scope, nil
 }
 
-func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret, raw secret.String, resource string) (session.Tokens, error) {
+func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret, raw secret.String, resource, scope string) (session.Tokens, string, error) {
 	var tokens session.Tokens
+	var issuedScope string
 	var replayed bool
 	err := s.applications.Store.InTx(ctx, func(q *db.Queries) error {
 		client, err := s.applications.AuthenticateOAuthClientTx(ctx, q, clientID, clientSecret.Value())
@@ -188,8 +339,12 @@ func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret
 		if resource == "" {
 			resource = client.ClientID
 		}
-		if resource != client.ClientID {
+		if resource != client.ClientID && resource != security.DefaultApplicationAudience {
 			return apierr.New("invalid_target", "resource is not registered for this client")
+		}
+		requested := uniqueScopes(strings.Fields(scope))
+		if len(requested) > 256 || (resource == security.DefaultApplicationAudience && len(requested) == 0) {
+			return apierr.New("invalid_scope", "an explicit scope of at most 256 permissions is required")
 		}
 		ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: client.ID, CredentialType: "oauth_refresh_token"})
 		credential, next, replay, err := s.agents.RotateOAuthRefreshForClientTx(ctx, q, raw.Value(), client.ClientID)
@@ -208,15 +363,35 @@ func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret
 		if !installed {
 			return apierr.New("invalid_grant", "application is not installed")
 		}
-		tokens, err = s.sessions.CreateAgentAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource)
+		if len(requested) > 0 {
+			if s.authorization == nil {
+				return apierr.New("temporarily_unavailable", "scope authorization is unavailable")
+			}
+			consented, consentErr := q.ListOAuthConsentPermissions(ctx, db.ListOAuthConsentPermissionsParams{MemberID: credential.MemberID})
+			if consentErr != nil {
+				return consentErr
+			}
+			for _, permission := range requested {
+				if !scopeContains(consented, permission) {
+					return apierr.New("invalid_scope", "requested scope is outside user consent")
+				}
+			}
+			if _, err := s.oauthDelegatedScopesTx(ctx, q, security.Claims{Subject: credential.MemberID}, credential.SpaceID, credential.MemberID, client, requested); err != nil {
+				return err
+			}
+			tokens, err = s.sessions.CreateAgentScopedAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource, requested)
+			issuedScope = strings.Join(requested, " ")
+		} else {
+			tokens, err = s.sessions.CreateAgentAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource)
+		}
 		tokens.RefreshToken = next
 		return err
 	})
 	if err != nil {
-		return session.Tokens{}, err
+		return session.Tokens{}, "", err
 	}
 	if replayed {
-		return session.Tokens{}, apierr.New("invalid_grant", "OAuth refresh token replayed")
+		return session.Tokens{}, "", apierr.New("invalid_grant", "OAuth refresh token replayed")
 	}
-	return tokens, nil
+	return tokens, issuedScope, nil
 }

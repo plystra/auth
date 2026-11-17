@@ -361,7 +361,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	if err := json.Unmarshal(createdFactor.Body.Bytes(), &factorResult); err != nil || factorResult.Data.Secret == "" {
 		t.Fatal("publisher factor enrollment omitted its one-time secret")
 	}
-	manifest := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "auth.audit:write", "invoice:read", "invoice:approve"}
+	manifest := []string{"auth.authz:check", "auth.authz:explain", "auth.tokens:introspect", "auth.audit:write", "auth.agents:create", "invoice:read", "invoice:approve"}
 	appRequest := map[string]any{
 		"space_id": publisher.spaceID, "name": "Invoice SaaS", "visibility": "public",
 		"redirect_uris":        []string{"https://saas.example.test/callback"},
@@ -681,7 +681,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatalf("server key on principal plane = %d %s", denied.Code, denied.Body.String())
 	}
 	approvalGrantBody, err := json.Marshal(map[string]any{
-		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"invoice:approve"},
+		"grantee": map[string]string{"member_id": customer.memberID}, "permissions": []string{"invoice:approve", "auth.agents:create"},
 		"scope": "space", "anchor_space_id": customer.spaceID,
 	})
 	if err != nil {
@@ -696,7 +696,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		"response_type":         {"code"},
 		"client_id":             {appResult.Data.ClientID},
 		"redirect_uri":          {"https://saas.example.test/callback"},
-		"scope":                 {"invoice:read invoice:approve"},
+		"scope":                 {"invoice:read invoice:approve auth.agents:create"},
 		"resource":              {appResult.Data.ClientID},
 		"state":                 {"mvp-state"},
 		"nonce":                 {"mvp-nonce"},
@@ -721,7 +721,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 		t.Fatal(err)
 	}
 	consent := func(token, requestID, memberID string) *httptest.ResponseRecorder {
-		body, _ := json.Marshal(map[string]any{"request_id": requestID, "decision": "approve", "member_id": memberID, "permissions": []string{"invoice:read", "invoice:approve"}})
+		body, _ := json.Marshal(map[string]any{"request_id": requestID, "decision": "approve", "member_id": memberID, "permissions": []string{"invoice:read", "invoice:approve", "auth.agents:create"}})
 		request := httptest.NewRequest(http.MethodPost, "/oauth/authorize", bytes.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -1327,6 +1327,17 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			MFACode:             func() string { return nextTOTP(customerFactorResult.Data.Secret) },
 			BusinessDatabaseURL: businessDatabase.URL,
 		})
+	})
+	t.Run("OAuthAgentPublicDelegation", func(t *testing.T) {
+		if standardRootID == "" {
+			t.Fatal("the shared standard group root was not established")
+		}
+		oauthToken.RefreshToken = runOAuthAgentDelegationScenario(t, mvpDelegationScenario{
+			Principal: principalHandler, Server: serverHandler,
+			Observer: newMVPObserver(t, database.AppURL, signer, key, sessions.Settings), Signer: signer,
+			UserToken: customer.token, UserMemberID: customer.memberID, SpaceID: customer.spaceID,
+			ClientID: appResult.Data.ClientID, ServerKey: keyResult.Data.Secret, ControlToken: oauthToken.AccessToken,
+		}, oauthToken.RefreshToken, oauthAgent, standardRootID)
 	})
 	t.Run("GroupScopedApplicationInstallation", func(t *testing.T) {
 		spacePath := "/v1/spaces/" + customer.spaceID

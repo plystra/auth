@@ -377,3 +377,14 @@ RETURNING id, application_id, name, prefix, scopes, restrict_to, allowed_ip_cidr
 SELECT scope FROM application_installations
 WHERE application_id = sqlc.arg(application_id) AND space_id = sqlc.arg(space_id)
   AND status = 'active';
+
+-- name: ListOAuthConsentPermissions :many
+SELECT DISTINCT permission.value::text AS permission_key
+FROM authorization_grants ag
+JOIN members m ON m.id = ag.grantee_member_id
+JOIN groups g ON g.id = m.home_group_id AND g.kind = 'agents'
+CROSS JOIN LATERAL jsonb_array_elements_text(ag.permission_keys) AS permission(value)
+WHERE m.id = sqlc.arg(member_id)::text AND m.source = 'oauth'
+  AND ag.granted_by = g.owner_member_id
+  AND ag.role_id IS NULL AND ag.revoked_at IS NULL
+ORDER BY permission_key;

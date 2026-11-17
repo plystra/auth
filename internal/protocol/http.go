@@ -169,13 +169,17 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeOAuthErr(w, err)
 			return
 		}
-		tokens, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions}).refresh(
-			r.Context(), clientID, secret.New(clientSecret), secret.New(r.Form.Get("refresh_token")), r.Form.Get("resource"))
+		tokens, scope, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions, authorization: h.Authorization}).refresh(
+			r.Context(), clientID, secret.New(clientSecret), secret.New(r.Form.Get("refresh_token")), r.Form.Get("resource"), r.Form.Get("scope"))
 		if err != nil {
 			writeOAuthErr(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": tokens.RefreshToken})
+		body := map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "refresh_token": tokens.RefreshToken}
+		if scope != "" {
+			body["scope"] = scope
+		}
+		writeJSON(w, http.StatusOK, body)
 		return
 	}
 	if grantType == "authorization_code" {
@@ -278,13 +282,9 @@ func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	claims, err := h.Sessions.VerifyAccess(raw)
-	if err == nil && claims.Type == "agent" && claims.Subject != "" {
-		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "agent_access_token"})
-		if err := h.Agents.RevokeOAuth(ctx, claims.Subject); err != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
-			return
-		}
+	if err := (tokenService{agents: h.Agents, sessions: h.Sessions}).revokeOAuthAccess(r.Context(), secret.New(raw)); err != nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
+		return
 	}
 	// RFC 7009 intentionally hides whether an opaque or JWT token was known.
 	w.WriteHeader(http.StatusOK)
@@ -341,13 +341,17 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("temporarily_unavailable", "token exchange is unavailable"))
 		return
 	}
-	tokens, err := (tokenService{agents: h.Agents, sessions: h.Sessions, authorization: h.Authorization}).delegated(
+	tokens, scope, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions, authorization: h.Authorization}).delegated(
 		r.Context(), secret.New(r.Form.Get("subject_token")), secret.New(r.Form.Get("actor_token")), strings.Fields(r.Form.Get("scope")), r.Form.Get("resource"))
 	if err != nil {
 		writeOAuthErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"})
+	response := map[string]any{"access_token": tokens.AccessToken, "token_type": tokens.TokenType, "expires_in": tokens.ExpiresIn, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token"}
+	if scope != "" {
+		response["scope"] = scope
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 func (h HTTP) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, apierr.New("not_implemented", "protocol operation is not enabled for this deployment"))
