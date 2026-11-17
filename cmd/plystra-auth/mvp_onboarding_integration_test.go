@@ -1032,6 +1032,66 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			}
 		}
 	})
+	t.Run("SpaceCreationAudit", func(t *testing.T) {
+		registered := mvpData[account.AuthResult](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/sign-up", "",
+			map[string]string{"email": "space-audit-creator@example.test", "password": "a-long-space-creator-password"}))
+		if registered.Tokens == nil {
+			t.Fatal("Space creator registration omitted its session")
+		}
+		members := mvpData[[]authorization.Member](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/me/members", registered.Tokens.AccessToken, nil))
+		if len(members) != 1 || members[0].SpaceID != account.DefaultSpaceID {
+			t.Fatal("registration did not create exactly one default membership")
+		}
+		creation := mvpJSON(t, principalHandler, http.MethodPost, "/v1/spaces", registered.Tokens.AccessToken,
+			map[string]string{"name": "Private creator workspace", "slug": "public-audit-created-space"})
+		created := mvpData[struct {
+			Space  authorization.Space  `json:"space"`
+			Member authorization.Member `json:"member"`
+		}](t, creation)
+		selected := mvpData[session.Tokens](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/refresh", "",
+			map[string]string{"refresh_token": registered.Tokens.RefreshToken, "member_id": created.Member.ID}))
+		requestID := creation.Header().Get("X-Request-ID")
+		if requestID == "" {
+			t.Fatal("Space creation omitted its request identifier")
+		}
+		query := url.Values{"request_id": {requestID}, "member_id": {members[0].ID}}.Encode()
+		response := mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+created.Space.ID+"/audit-logs?"+query, selected.AccessToken, nil)
+		events := mvpData[[]audit.Event](t, response)
+		if len(events) != 2 {
+			t.Fatal("public Space creation did not produce two queryable events")
+		}
+		for _, event := range events {
+			if event.ActorID != members[0].ID || event.MemberID != members[0].ID || event.MemberType != "human" || event.UserID != registered.User.ID ||
+				event.SpaceID != created.Space.ID || event.ResourceGroupID != "" || event.PolicyVersion != created.Space.PolicyVersion ||
+				event.PermissionKey != "self:read" || event.CredentialType != "user_access_token" || event.Plane != "principal" || len(event.OwnerChain) != 0 {
+				t.Fatal("Space creation audit lost the acting member or new Space context")
+			}
+			var metadata map[string]any
+			if json.Unmarshal(event.Metadata, &metadata) != nil {
+				t.Fatal("Space creation audit metadata is invalid")
+			}
+			if event.Action == "space.create" {
+				if event.ResourceID != created.Space.ID || metadata["administrator_member_id"] != created.Member.ID || metadata["binding_user_id"] != registered.User.ID {
+					t.Fatal("Space creation audit omitted initial administrator provenance")
+				}
+			} else if event.Action != "assign_right.system_create" || metadata["holder_member_id"] != created.Member.ID || metadata["source"] != "system" {
+				t.Fatal("initial assignment right audit omitted its holder or source")
+			}
+		}
+		for _, private := range []string{registered.Tokens.AccessToken, registered.Tokens.RefreshToken, selected.AccessToken, selected.RefreshToken,
+			registered.User.Email, "a-long-space-creator-password", "Private creator workspace"} {
+			if strings.Contains(response.Body.String(), private) {
+				t.Fatal("Space creation audit exposed credentials or private labels")
+			}
+		}
+		other := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+customer.spaceID+"/audit-logs?"+query, customer.token, nil))
+		if len(other) != 0 {
+			t.Fatal("creation audit crossed the customer Space boundary")
+		}
+		if denied := mvpJSON(t, principalHandler, http.MethodGet, "/v1/spaces/"+account.DefaultSpaceID+"/audit-logs", selected.AccessToken, nil); denied.Code != http.StatusForbidden {
+			t.Fatal("new Space administrator gained access to default-Space registration audits")
+		}
+	})
 	t.Run("MemberGovernanceAudit", func(t *testing.T) {
 		user := mvpData[account.User](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/me", customer.token, nil))
 		spacePath := "/v1/spaces/" + customer.spaceID

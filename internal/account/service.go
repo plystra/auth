@@ -154,7 +154,19 @@ func (s *Service) Register(ctx context.Context, in RegisterInput, ip net.IP, ua 
 				return err
 			}
 		}
-		return audit.Write(ctx, q, "public", u.ID, "auth.register", u.ID, "success")
+		if memberID == "" {
+			return audit.Write(ctx, q, "public", u.ID, "auth.register", u.ID, "success")
+		}
+		defaultSpace, err := q.GetSpace(ctx, db.GetSpaceParams{ID: DefaultSpaceID})
+		if err != nil {
+			return err
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "public", ActorID: u.ID, UserID: u.ID, MemberID: memberID,
+			Action: "auth.register", Outcome: "success", CredentialType: "public_registration", PolicyVersion: defaultSpace.PolicyVersion,
+			Resource: audit.Resource{Type: "user", ID: u.ID, SpaceID: DefaultSpaceID},
+			Metadata: map[string]string{"identity_source": "registration_result"},
+		})
 	})
 	if e != nil {
 		if strings.Contains(e.Error(), "duplicate") || strings.Contains(e.Error(), "unique") {

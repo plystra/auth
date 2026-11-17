@@ -493,6 +493,14 @@ var administratorPermissions = []string{
 }
 
 func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (Space, Member, error) {
+	if actor, ok := ctx.Value(humanActorKey{}).(humanActor); ok {
+		if actor.userID != userID || actor.memberID == "" {
+			return Space{}, Member{}, apierr.New("UNAUTHENTICATED", "the acting user does not match this member")
+		}
+		return s.createSpace(ctx, userID, actor.memberID, "member", actor.memberID, name, slug)
+	}
+	// Internal provisioning has no pre-existing acting member. HTTP callers
+	// always carry the verified human actor or use CreateSpaceByAgent.
 	return s.createSpace(ctx, userID, userID, "human", userID, name, slug)
 }
 
@@ -500,7 +508,7 @@ func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (S
 // to the Agent's owner account. The Agent is the audited actor, while the
 // resulting membership stays within the normal one-Space-per-member model.
 func (s *Service) CreateSpaceByAgent(ctx context.Context, actorMemberID, ownerUserID, name, slug string) (Space, Member, error) {
-	return s.createSpace(ctx, ownerUserID, actorMemberID, "agent", actorMemberID, name, slug)
+	return s.createSpace(ctx, ownerUserID, actorMemberID, "member", actorMemberID, name, slug)
 }
 
 func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType, actorID, name, slug string) (Space, Member, error) {
@@ -512,6 +520,35 @@ func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType,
 	var outSpace Space
 	var outMember Member
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		user, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: userID})
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && user.Status != "active" {
+			return apierr.New("UNAUTHENTICATED", "the administrator account is not active")
+		}
+		if err != nil {
+			return err
+		}
+		if actorType == "member" {
+			actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorID})
+			if err != nil {
+				return err
+			}
+			decision, err := s.CheckNodeTx(ctx, q, CheckRequest{MemberID: actorID, Permission: "self:read", ResourceSpace: actor.SpaceID, ResourceOwner: actorID})
+			if err != nil {
+				return err
+			}
+			if decision.Effect != engine.Allow {
+				return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+			}
+			if actor.Type == "agent" {
+				ownerUserID, err := s.ownerUserIDTx(ctx, q, actorID)
+				if err != nil {
+					return err
+				}
+				if ownerUserID != userID {
+					return apierr.New("USER_ACCOUNT_REQUIRED", "the administrator must be the Agent owner account")
+				}
+			}
+		}
 		spaceRow, err := q.CreateSpace(ctx, db.CreateSpaceParams{ID: string(ids.New[ids.SpaceID]("spc")), Name: name, Slug: slug})
 		if err != nil {
 			return normalizeDBError(err)
@@ -537,24 +574,43 @@ func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType,
 		if err := addRolePermissions(ctx, q, role.ID, administratorPermissions); err != nil {
 			return err
 		}
-		if _, err := q.CreateGrant(ctx, db.CreateGrantParams{
+		grant, err := q.CreateGrant(ctx, db.CreateGrantParams{
 			ID: string(ids.New[ids.GrantID]("grt")), SpaceID: spaceRow.ID, RoleID: pgtype.Text{String: role.ID, Valid: true},
 			GranteeMemberID: pgtype.Text{String: memberRow.ID, Valid: true}, Scope: "space",
 			AnchorGroupID: pgtype.Text{},
 			AnchorSpaceID: pgtype.Text{String: spaceRow.ID, Valid: true}, GrantedBy: grantedBy,
-		}); err != nil {
+		})
+		if err != nil {
 			return err
 		}
 		rightID, err := createTopLevelCreatorRightTx(ctx, q, memberRow.ID, spaceRow.ID)
 		if err != nil {
 			return err
 		}
+		spaceRow, err = q.GetSpace(ctx, db.GetSpaceParams{ID: spaceRow.ID})
+		if err != nil {
+			return err
+		}
+		auditMemberID, permission := memberRow.ID, ""
+		if actorType == "member" {
+			auditMemberID, permission = actorID, "self:read"
+		}
 		if rightID != "" {
-			if err := audit.Write(ctx, q, actorType, actorID, "assign_right.system_create", rightID, "success"); err != nil {
+			if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+				ActorType: actorType, ActorID: actorID, MemberID: auditMemberID,
+				Action: "assign_right.system_create", Outcome: "success", Permission: permission, PolicyVersion: spaceRow.PolicyVersion,
+				Resource: audit.Resource{Type: "assign_right", ID: rightID, SpaceID: spaceRow.ID},
+				Metadata: map[string]string{"holder_member_id": memberRow.ID, "source": "system"},
+			}); err != nil {
 				return err
 			}
 		}
-		if err := audit.Write(ctx, q, actorType, actorID, "space.create", spaceRow.ID, "success"); err != nil {
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: actorType, ActorID: actorID, MemberID: auditMemberID,
+			Action: "space.create", Outcome: "success", Permission: permission, PolicyVersion: spaceRow.PolicyVersion,
+			Resource: audit.Resource{Type: "space", ID: spaceRow.ID, SpaceID: spaceRow.ID},
+			Metadata: map[string]string{"administrator_member_id": memberRow.ID, "binding_user_id": userID, "role_id": role.ID, "grant_id": grant.ID},
+		}); err != nil {
 			return err
 		}
 		outSpace = toSpace(spaceRow)
@@ -662,6 +718,10 @@ func (s *Service) GetMemberAnySpace(ctx context.Context, memberID string) (Membe
 // ownership chain. It is used only for operations whose result must create a
 // user-bound member, such as creating a new Space on behalf of an Agent.
 func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, error) {
+	return s.ownerUserIDTx(ctx, s.Store.Queries(), memberID)
+}
+
+func (s *Service) ownerUserIDTx(ctx context.Context, q *db.Queries, memberID string) (string, error) {
 	current := strings.TrimSpace(memberID)
 	seen := map[string]struct{}{}
 	for depth := 0; depth <= s.maxDelegationDepth(); depth++ {
@@ -672,7 +732,7 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 			return "", apierr.New("OWNER_INACTIVE", "the owner chain contains a cycle")
 		}
 		seen[current] = struct{}{}
-		member, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: current})
+		member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: current})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", apierr.New("OWNER_INACTIVE", "the owner member was not found")
 		}
@@ -683,7 +743,7 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 			return "", apierr.New("OWNER_INACTIVE", "the owner member is not active")
 		}
 		if member.Type == "human" {
-			bindings, err := s.Store.Queries().ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: current})
+			bindings, err := q.ListMemberBindings(ctx, db.ListMemberBindingsParams{MemberID: current})
 			if err != nil {
 				return "", err
 			}
@@ -692,7 +752,7 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 				if binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC())) {
 					continue
 				}
-				user, userErr := s.Store.Queries().GetUserByID(ctx, db.GetUserByIDParams{ID: binding.UserID})
+				user, userErr := q.GetUserByID(ctx, db.GetUserByIDParams{ID: binding.UserID})
 				if errors.Is(userErr, pgx.ErrNoRows) {
 					continue
 				}
@@ -715,7 +775,7 @@ func (s *Service) OwnerUserID(ctx context.Context, memberID string) (string, err
 		if member.Type != "agent" {
 			return "", apierr.New("USER_ACCOUNT_REQUIRED", "the Agent owner chain does not end in a user account")
 		}
-		agent, agentErr := s.Store.Queries().GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: current})
+		agent, agentErr := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: current})
 		if errors.Is(agentErr, pgx.ErrNoRows) {
 			return "", apierr.New("OWNER_INACTIVE", "the Agent owner record was not found")
 		}
@@ -792,10 +852,20 @@ func (s *Service) EnsureDefaultMembershipTx(ctx context.Context, q *db.Queries, 
 	if err != nil {
 		return "", err
 	}
-	if _, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"}); err != nil {
+	grant, err := q.CreateGrant(ctx, db.CreateGrantParams{ID: string(ids.New[ids.GrantID]("grt")), SpaceID: role.SpaceID, RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: member.ID, Valid: true}, Scope: "space", AnchorGroupID: pgtype.Text{}, AnchorSpaceID: pgtype.Text{String: role.SpaceID, Valid: true}, GrantedBy: "system"})
+	if err != nil {
 		return "", err
 	}
-	if err := audit.Write(ctx, q, "system", "system", "member.default_bind", member.ID, "success"); err != nil {
+	space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: role.SpaceID})
+	if err != nil {
+		return "", err
+	}
+	if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		ActorType: "system", ActorID: "system", MemberID: member.ID, UserID: userID,
+		Action: "member.default_bind", Outcome: "success", CredentialType: "public_registration", PolicyVersion: space.PolicyVersion,
+		Resource: audit.Resource{Type: "member", ID: member.ID, SpaceID: member.SpaceID},
+		Metadata: map[string]string{"binding_user_id": userID, "binding_policy": member.BindingPolicy, "role_id": role.ID, "grant_id": grant.ID, "identity_source": "registration_result"},
+	}); err != nil {
 		return "", err
 	}
 	return member.ID, nil
