@@ -497,6 +497,127 @@ func (q *Queries) ListActiveRoleGranteeMembers(ctx context.Context, arg ListActi
 	return items, nil
 }
 
+const listGrantResourceGroups = `-- name: ListGrantResourceGroups :many
+SELECT DISTINCT COALESCE(ag.grantee_group_id, position.group_id, '')::text AS resource_group_id
+FROM authorization_grants ag
+LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(*) = 1 THEN min(gm.group_id) END AS group_id
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+    WHERE gm.member_id = ag.grantee_member_id AND gm.space_id = ag.space_id
+) position ON true
+WHERE ag.space_id = $1 AND ag.revoked_at IS NULL
+ORDER BY resource_group_id
+`
+
+type ListGrantResourceGroupsParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) ListGrantResourceGroups(ctx context.Context, arg ListGrantResourceGroupsParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, listGrantResourceGroups, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var resource_group_id string
+		if err := rows.Scan(&resource_group_id); err != nil {
+			return nil, err
+		}
+		items = append(items, resource_group_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGrantsInSpace = `-- name: ListGrantsInSpace :many
+SELECT ag.id, ag.space_id, ag.role_id, ag.grantee_member_id, ag.grantee_group_id, ag.scope, ag.anchor_space_id, ag.anchor_group_id, ag.granted_by, ag.created_at, ag.revoked_at, ag.permission_keys, COALESCE(ag.grantee_group_id, position.group_id, '')::text AS resource_group_id
+FROM authorization_grants ag
+LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(*) = 1 THEN min(gm.group_id) END AS group_id
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+    WHERE gm.member_id = ag.grantee_member_id AND gm.space_id = ag.space_id
+) position ON true
+WHERE ag.space_id = $1 AND ag.revoked_at IS NULL
+  AND ((COALESCE(ag.grantee_group_id, position.group_id) IS NULL AND $2::boolean)
+       OR COALESCE(ag.grantee_group_id, position.group_id) = ANY($3::text[]))
+  AND ($4::timestamptz IS NULL
+       OR (ag.created_at, ag.id) < ($4::timestamptz, $5::text))
+ORDER BY ag.created_at DESC, ag.id DESC
+LIMIT $6
+`
+
+type ListGrantsInSpaceParams struct {
+	SpaceID            string             `json:"space_id"`
+	IncludeSpaceGrants bool               `json:"include_space_grants"`
+	VisibleGroupIds    []string           `json:"visible_group_ids"`
+	CursorAt           pgtype.Timestamptz `json:"cursor_at"`
+	CursorID           pgtype.Text        `json:"cursor_id"`
+	LimitCount         int32              `json:"limit_count"`
+}
+
+type ListGrantsInSpaceRow struct {
+	ID              string             `json:"id"`
+	SpaceID         string             `json:"space_id"`
+	RoleID          pgtype.Text        `json:"role_id"`
+	GranteeMemberID pgtype.Text        `json:"grantee_member_id"`
+	GranteeGroupID  pgtype.Text        `json:"grantee_group_id"`
+	Scope           string             `json:"scope"`
+	AnchorSpaceID   pgtype.Text        `json:"anchor_space_id"`
+	AnchorGroupID   pgtype.Text        `json:"anchor_group_id"`
+	GrantedBy       string             `json:"granted_by"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	PermissionKeys  []byte             `json:"permission_keys"`
+	ResourceGroupID string             `json:"resource_group_id"`
+}
+
+func (q *Queries) ListGrantsInSpace(ctx context.Context, arg ListGrantsInSpaceParams) ([]ListGrantsInSpaceRow, error) {
+	rows, err := q.db.Query(ctx, listGrantsInSpace,
+		arg.SpaceID,
+		arg.IncludeSpaceGrants,
+		arg.VisibleGroupIds,
+		arg.CursorAt,
+		arg.CursorID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListGrantsInSpaceRow{}
+	for rows.Next() {
+		var i ListGrantsInSpaceRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpaceID,
+			&i.RoleID,
+			&i.GranteeMemberID,
+			&i.GranteeGroupID,
+			&i.Scope,
+			&i.AnchorSpaceID,
+			&i.AnchorGroupID,
+			&i.GrantedBy,
+			&i.CreatedAt,
+			&i.RevokedAt,
+			&i.PermissionKeys,
+			&i.ResourceGroupID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMemberAssignments = `-- name: ListMemberAssignments :many
 WITH RECURSIVE member_groups AS (
     SELECT gm.group_id

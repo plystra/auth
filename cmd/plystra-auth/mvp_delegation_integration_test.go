@@ -235,8 +235,44 @@ func runNativeAgentDelegationScenario(t *testing.T, scenario mvpDelegationScenar
 			t.Fatalf("new member grant did not restore delegated authority: %s", result.DenyCode)
 		}
 	}
+	listGrants := func() []authorization.Grant {
+		t.Helper()
+		var result []authorization.Grant
+		cursor := ""
+		for range 100 {
+			response := principal(http.MethodGet, spacePath+"/grants?limit=2&cursor="+url.QueryEscape(cursor), scenario.UserToken, nil)
+			var page struct {
+				Data       []authorization.Grant `json:"data"`
+				NextCursor string                `json:"next_cursor"`
+			}
+			if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &page) != nil || page.Data == nil {
+				t.Fatalf("public grant listing failed: status=%d body=%s", response.Code, response.Body.String())
+			}
+			result = append(result, page.Data...)
+			if page.NextCursor == "" {
+				return result
+			}
+			if page.NextCursor == cursor {
+				t.Fatal("public grant cursor did not advance")
+			}
+			cursor = page.NextCursor
+		}
+		t.Fatal("public grant traversal did not terminate")
+		return nil
+	}
+	configured := listGrants()
+	grantPosition := slices.IndexFunc(configured, func(grant authorization.Grant) bool {
+		return grant.ID == restoredGrant.ID && grant.GranteeMemberID == parent.Agent.ID && grant.AnchorGroupID == project.ID && slices.Equal(grant.Permissions, []string{"invoice:read"})
+	})
+	if grantPosition < 0 {
+		t.Fatal("public grant listing could not discover the parent's revocable grant")
+	}
+	listedGrant := configured[grantPosition]
 	for range 2 {
-		mvpData[json.RawMessage](t, principal(http.MethodDelete, spacePath+"/grants/"+restoredGrant.ID, scenario.UserToken, nil))
+		mvpData[json.RawMessage](t, principal(http.MethodDelete, spacePath+"/grants/"+listedGrant.ID, scenario.UserToken, nil))
+	}
+	if slices.ContainsFunc(listGrants(), func(grant authorization.Grant) bool { return grant.ID == listedGrant.ID }) {
+		t.Fatal("revoked grant remained in the public configuration list")
 	}
 	for _, handler := range []http.Handler{scenario.Server, scenario.Observer} {
 		result := check(handler, "explain", childToken.AccessToken, project.ID)

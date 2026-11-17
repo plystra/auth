@@ -134,6 +134,35 @@ SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
 FROM groups
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id);
 
+-- name: ListGrantResourceGroups :many
+SELECT DISTINCT COALESCE(ag.grantee_group_id, position.group_id, '')::text AS resource_group_id
+FROM authorization_grants ag
+LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(*) = 1 THEN min(gm.group_id) END AS group_id
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+    WHERE gm.member_id = ag.grantee_member_id AND gm.space_id = ag.space_id
+) position ON true
+WHERE ag.space_id = sqlc.arg(space_id) AND ag.revoked_at IS NULL
+ORDER BY resource_group_id;
+
+-- name: ListGrantsInSpace :many
+SELECT ag.*, COALESCE(ag.grantee_group_id, position.group_id, '')::text AS resource_group_id
+FROM authorization_grants ag
+LEFT JOIN LATERAL (
+    SELECT CASE WHEN count(*) = 1 THEN min(gm.group_id) END AS group_id
+    FROM group_members gm
+    JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
+    WHERE gm.member_id = ag.grantee_member_id AND gm.space_id = ag.space_id
+) position ON true
+WHERE ag.space_id = sqlc.arg(space_id) AND ag.revoked_at IS NULL
+  AND ((COALESCE(ag.grantee_group_id, position.group_id) IS NULL AND sqlc.arg(include_space_grants)::boolean)
+       OR COALESCE(ag.grantee_group_id, position.group_id) = ANY(sqlc.arg(visible_group_ids)::text[]))
+  AND (sqlc.narg(cursor_at)::timestamptz IS NULL
+       OR (ag.created_at, ag.id) < (sqlc.narg(cursor_at)::timestamptz, sqlc.narg(cursor_id)::text))
+ORDER BY ag.created_at DESC, ag.id DESC
+LIMIT sqlc.arg(limit_count);
+
 -- name: GetGroupSpaceForAuthorization :one
 SELECT space_id FROM groups WHERE id = sqlc.arg(id);
 

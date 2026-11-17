@@ -1686,3 +1686,10 @@ $$;
 CREATE TRIGGER agent_credentials_auth_policy_mutation
 AFTER INSERT OR UPDATE OR DELETE ON agent_credentials
 FOR EACH ROW EXECUTE FUNCTION bump_agent_policy_for_credential();
+
+
+-- Grant configuration is filtered by Space and traversed in creation order.
+-- Keep revoked tombstones out of the listing index without deleting history.
+CREATE INDEX authorization_grants_space_listing_idx
+    ON authorization_grants(space_id, created_at DESC, id DESC)
+    WHERE revoked_at IS NULL;

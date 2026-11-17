@@ -220,6 +220,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("roles.list", "GET", "/v1/spaces/{id}/roles", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}), a.listRoles)
 	route.Register(api, route.NewSpec("roles.create", "POST", "/v1/spaces/{id}/roles", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createRole)
 	route.Register(api, route.NewSpec("roles.update", "PATCH", "/v1/spaces/{id}/roles/{role_id}", route.Principal, "auth.roles:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.updateRole)
+	route.Register(api, route.NewSpec("grants.list", "GET", "/v1/spaces/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.listGrants)
 	route.Register(api, route.NewSpec("grants.create", "POST", "/v1/spaces/{id}/grants", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.createGrant)
 	route.Register(api, route.NewSpec("grants.revoke", "DELETE", "/v1/spaces/{id}/grants/{grant_id}", route.Principal, "auth.grants:assign", []route.Subject{route.HumanAgent}), a.revokeGrant)
 	route.Register(api, route.NewSpec("assignment_rights.list", "GET", "/v1/spaces/{id}/assign-rights", route.Principal, "auth.assign_rights:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.listAssignmentRights)
