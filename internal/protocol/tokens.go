@@ -107,7 +107,7 @@ func (s tokenService) delegated(ctx context.Context, subject, actor secret.Strin
 		}
 		requested = uniqueScopes(requested)
 		if client.ID != "" {
-			requested, err = s.oauthDelegatedScopesTx(ctx, q, parent, credential.SpaceID, credential.MemberID, client, requested)
+			requested, err = s.oauthScopesTx(ctx, q, parent, credential.SpaceID, credential.MemberID, client, requested, false)
 			if err != nil {
 				return err
 			}
@@ -142,7 +142,7 @@ func (s tokenService) delegated(ctx context.Context, subject, actor secret.Strin
 	return tokens, scope, nil
 }
 
-func (s tokenService) oauthDelegatedScopesTx(ctx context.Context, q *db.Queries, parent security.Claims, spaceID, childID string, client application.OAuthClient, requested []string) ([]string, error) {
+func (s tokenService) oauthScopesTx(ctx context.Context, q *db.Queries, parent security.Claims, spaceID, memberID string, client application.OAuthClient, requested []string, rootRefresh bool) ([]string, error) {
 	member, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: parent.Subject})
 	if err != nil {
 		return nil, err
@@ -172,7 +172,11 @@ func (s tokenService) oauthDelegatedScopesTx(ctx context.Context, q *db.Queries,
 		usable := scopeContains(client.AllowedScopes, permission) && scopeContains(approved, permission) &&
 			(parent.Scopes == nil || scopeContains(parent.Scopes, permission))
 		if usable {
-			usable, err = s.authorization.ValidateTokenScopesTx(ctx, q, childID, []string{permission})
+			if rootRefresh {
+				usable, err = s.authorization.ValidateOAuthTokenScopesTx(ctx, q, memberID, []string{permission})
+			} else {
+				usable, err = s.authorization.ValidateTokenScopesTx(ctx, q, memberID, []string{permission})
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -376,7 +380,7 @@ func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret
 					return apierr.New("invalid_scope", "requested scope is outside user consent")
 				}
 			}
-			if _, err := s.oauthDelegatedScopesTx(ctx, q, security.Claims{Subject: credential.MemberID}, credential.SpaceID, credential.MemberID, client, requested); err != nil {
+			if _, err := s.oauthScopesTx(ctx, q, security.Claims{Subject: credential.MemberID}, credential.SpaceID, credential.MemberID, client, requested, true); err != nil {
 				return err
 			}
 			tokens, err = s.sessions.CreateAgentScopedAccessTx(ctx, q, credential.MemberID, credential.SpaceID, resource, requested)

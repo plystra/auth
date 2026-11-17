@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/member"
+	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -117,7 +120,7 @@ func TestOAuthGovernanceRefreshKeepsIdentityAudienceScopeAndRotation(t *testing.
 }
 
 func TestOAuthGovernanceRefreshRejectsUnconsentedAndInactiveAuthority(t *testing.T) {
-	for _, scenario := range []string{"MissingScope", "TooManyScopes", "OtherResource", "Consent", "RoleOnly", "Manifest", "InstallationPermissions", "InstallationInactive", "ClientInactive", "OwnerAuthority", "OwnerInactive", "Disabled", "HumanOnly", "ApprovalRequired", "Expired"} {
+	for _, scenario := range []string{"MissingScope", "TooManyScopes", "OtherResource", "Consent", "RoleOnly", "Manifest", "InstallationPermissions", "InstallationInactive", "ClientInactive", "OwnerAuthority", "OwnerInactive", "Disabled", "HumanOnly", "Expired"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newGovernanceFixture(t)
 			ctx := context.Background()
@@ -161,8 +164,6 @@ func TestOAuthGovernanceRefreshRejectsUnconsentedAndInactiveAuthority(t *testing
 				query = `UPDATE permissions SET status = 'disabled' WHERE key = 'auth.members:read'`
 			case "HumanOnly":
 				query = `UPDATE permissions SET principal_kinds = '["human"]' WHERE key = 'auth.members:read'`
-			case "ApprovalRequired":
-				query = `UPDATE permissions SET agent_approval = 'required' WHERE key = 'auth.members:read'`
 			case "Expired":
 				query, code = `UPDATE members SET expires_at = now() WHERE source = 'oauth'`, "invalid_grant"
 			}
@@ -327,5 +328,69 @@ func TestOAuthGovernanceRefreshConcurrentReplayRevokesSharedFamily(t *testing.T)
 		(SELECT count(*) FROM audit_logs WHERE action = 'agent.access.issue'),
 		(SELECT count(*) FROM audit_logs WHERE action = 'agent.oauth_refresh.replay')`).Scan(&live, &issuance, &replay); err != nil || live != 0 || issuance != 1 || replay != 1 {
 		t.Fatal("concurrent governance replay did not atomically revoke the shared family with one issuance")
+	}
+}
+
+func TestOAuthGovernanceRefreshPreservesRequestBoundApproval(t *testing.T) {
+	f := newGovernanceFixture(t)
+	ctx := context.Background()
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE applications SET allowed_scopes = '["auth.bindings:manage"]' WHERE id = 'app_redemption';
+		UPDATE application_installations SET approved_permissions = '["auth.bindings:manage"]' WHERE id = 'ins_redemption';
+		UPDATE authorization_grants SET permission_keys = '["auth.bindings:manage"]' WHERE id = 'grt_governance_consent';
+		INSERT INTO users (id, email, email_normalized, password_hash, status, email_verified_at)
+		VALUES ('usr_governance_invitee', 'governance-invitee@example.test', 'governance-invitee@example.test', 'test-hash', 'active', now())`); err != nil {
+		t.Fatal(err)
+	}
+	form := governanceForm(f)
+	form.Set("scope", "auth.bindings:manage")
+	response := f.request(ctx, form)
+	token := delegationAuditToken(t, response)
+	var issued struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if json.Unmarshal(response.Body.Bytes(), &issued) != nil || issued.RefreshToken == "" {
+		t.Fatal("approval-restricted root credential omitted its refresh successor")
+	}
+	authz := f.applications.Authorization
+	target, err := authz.CreateMember(ctx, f.owner.ID, "", f.owner.SpaceID, "Shared target", "human", "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	approvals := &approval.Service{Store: f.store, Authorization: authz, StepUp: f.sessions}
+	var mux http.ServeMux
+	(&principal.API{Authorization: authz, Sessions: f.sessions, Signer: f.sessions.Signer, Agents: f.agents, Approvals: approvals}).Register(
+		humago.New(&mux, route.HumaConfig("OAuth governance approval", "1.0.0")))
+	req := httptest.NewRequest(http.MethodPost, "/v1/spaces/"+f.owner.SpaceID+"/members/"+target.ID+"/users",
+		strings.NewReader(`{"user_id":"usr_governance_invitee"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	out := httptest.NewRecorder()
+	route.Middleware(route.Principal, &mux).ServeHTTP(out, req)
+	var denied struct {
+		Error struct {
+			Code    string            `json:"code"`
+			Details map[string]string `json:"details"`
+		} `json:"error"`
+	}
+	if out.Code != http.StatusForbidden || json.Unmarshal(out.Body.Bytes(), &denied) != nil || denied.Error.Code != "APPROVAL_REQUIRED" ||
+		!strings.HasPrefix(denied.Error.Details["approval_id"], "apr_") {
+		t.Fatalf("governance credential bypassed request-bound approval: status=%d", out.Code)
+	}
+	var bindings, pending int
+	if err := f.store.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM user_members WHERE member_id = $1),
+		(SELECT count(*) FROM approval_requests WHERE agent_member_id = $2 AND status = 'pending')`, target.ID, f.agent.ID).Scan(&bindings, &pending); err != nil || bindings != 0 || pending != 1 {
+		t.Fatal("unapproved governance operation changed the binding or lost its approval request")
+	}
+	allowed, err := authz.ValidateTokenScopes(ctx, f.agent.ID, []string{"auth.bindings:manage"})
+	if err != nil || allowed {
+		t.Fatal("root credential issuance relaxed the child delegation rule")
+	}
+	if _, err := f.store.Pool.Exec(ctx, `UPDATE authorization_grants SET revoked_at = now() WHERE id = 'grt_governance_consent'`); err != nil {
+		t.Fatal(err)
+	}
+	form.Set("refresh_token", issued.RefreshToken)
+	if out := f.request(ctx, form); out.Code != http.StatusBadRequest || !strings.Contains(out.Body.String(), "invalid_scope") {
+		t.Fatal("approval-required scope replaced revoked consent")
 	}
 }

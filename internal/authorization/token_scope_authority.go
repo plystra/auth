@@ -27,6 +27,28 @@ func (s *Service) ValidateTokenScopes(ctx context.Context, memberID string, perm
 // ValidateTokenScopesTx evaluates current authority in the credential issuance
 // transaction. The caller holds the member and owner-chain lifecycle locks.
 func (s *Service) ValidateTokenScopesTx(ctx context.Context, q *db.Queries, memberID string, permissions []string) (bool, error) {
+	return s.validateTokenScopesTx(ctx, q, memberID, permissions, false)
+}
+
+// ValidateOAuthTokenScopesTx restricts a root OAuth credential without treating
+// issuance as execution. A held permission awaiting approval may be included;
+// the actual operation must still obtain and consume its request-bound approval.
+// Delegated children continue to use ValidateTokenScopesTx and cannot receive it.
+func (s *Service) ValidateOAuthTokenScopesTx(ctx context.Context, q *db.Queries, memberID string, permissions []string) (bool, error) {
+	root, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: memberID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if root.Source.String != "oauth" {
+		return false, nil
+	}
+	return s.validateTokenScopesTx(ctx, q, memberID, permissions, true)
+}
+
+func (s *Service) validateTokenScopesTx(ctx context.Context, q *db.Queries, memberID string, permissions []string, allowPendingApproval bool) (bool, error) {
 	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
@@ -97,7 +119,7 @@ func (s *Service) ValidateTokenScopesTx(ctx context.Context, q *db.Queries, memb
 			if err != nil {
 				return false, err
 			}
-			if decision.Effect == engine.Allow {
+			if decision.Effect == engine.Allow || (allowPendingApproval && decision.Code == "APPROVAL_REQUIRED") {
 				usable = true
 				break
 			}
