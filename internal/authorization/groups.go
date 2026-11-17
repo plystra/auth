@@ -33,7 +33,7 @@ func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name,
 
 	var out Group
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
 			return err
 		}
 		// Lock the governing Space and, when present, the complete parent chain
@@ -80,14 +80,8 @@ func (s *Service) CreateGroup(ctx context.Context, actorMemberID, spaceID, name,
 			}
 		}
 
-		decision, checkErr := s.CheckTx(ctx, q, CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.groups:manage", ResourceSpace: spaceID, ResourceGroup: parentGroupID,
-		})
-		if checkErr != nil {
-			return checkErr
-		}
-		if decision.Effect != engine.Allow {
-			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation.", Details: map[string]string{"permission": "auth.groups:manage"}}
+		if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.groups:manage", spaceID, parentGroupID); err != nil {
+			return err
 		}
 
 		row, createErr := q.CreateStandardGroup(ctx, db.CreateStandardGroupParams{
@@ -239,12 +233,11 @@ func (s *Service) MoveGroup(ctx context.Context, actorMemberID, spaceID, groupID
 		if err != nil {
 			return err
 		}
-		memberIDs := make([]string, 0, len(members)+1)
-		memberIDs = append(memberIDs, actorMemberID)
+		memberIDs := make([]string, 0, len(members))
 		for _, member := range members {
 			memberIDs = append(memberIDs, member.ID)
 		}
-		if err := lockAuthorizationMembersTx(ctx, q, memberIDs...); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, memberIDs...); err != nil {
 			return err
 		}
 		groups, err := q.LockGroupSubtree(ctx, db.LockGroupSubtreeParams{GroupID: groupID, SpaceID: spaceID})
@@ -410,6 +403,9 @@ func groupDepthTx(ctx context.Context, q *db.Queries, groupID, spaceID string) (
 }
 
 func (s *Service) authorizeGroupTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, groupID string) error {
+	if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
+		return err
+	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{
 		MemberID: actorMemberID, Permission: permission, ResourceSpace: spaceID, ResourceGroup: groupID,
 	})

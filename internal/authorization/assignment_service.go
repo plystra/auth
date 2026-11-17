@@ -48,7 +48,7 @@ func (s *Service) CreateAssignmentRight(ctx context.Context, actorMemberID, spac
 	}
 	var out AssignmentRight
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, holderMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, holderMemberID); err != nil {
 			return err
 		}
 		actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
@@ -254,7 +254,7 @@ func (s *Service) RevokeAssignmentRight(ctx context.Context, actorMemberID, spac
 		if err != nil {
 			return err
 		}
-		if err := lockAuthorizationMembersTx(ctx, q, actorMemberID, row.HolderMemberID); err != nil {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID, row.HolderMemberID); err != nil {
 			return err
 		}
 		if err := lockAuthorizationNodesTx(ctx, q, anchorSpace, row.AnchorGroupID.String, holder.SpaceID, spaceID); err != nil {
@@ -351,6 +351,9 @@ func (s *Service) authorizeAssignmentRightTx(ctx context.Context, q *db.Queries,
 		return err
 	}
 	if err := lockAuthorizationNodesTx(ctx, q, anchorSpaceID, anchorGroupID); err != nil {
+		return err
+	}
+	if err := validateHumanActorTx(ctx, q, actorMemberID); err != nil {
 		return err
 	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{MemberID: actorMemberID, Permission: "auth.assign_rights:manage", ResourceSpace: anchorSpaceID, ResourceGroup: anchorGroupID})

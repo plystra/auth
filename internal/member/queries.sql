@@ -127,10 +127,11 @@ WITH RECURSIVE tree AS (
     JOIN tree parent ON child.parent_id = parent.id
     WHERE child.space_id = sqlc.arg(space_id)
 )
-SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
-FROM tree
-ORDER BY id
-FOR UPDATE;
+-- A locking clause on the CTE alone does not lock its underlying table rows.
+SELECT g.id, g.space_id, g.name, g.parent_id, g.kind, g.owner_member_id, g.status, g.created_at
+FROM groups g JOIN tree ON tree.id = g.id
+ORDER BY g.id
+FOR UPDATE OF g;
 
 -- name: ListMembersInGroupSubtree :many
 WITH RECURSIVE tree AS (

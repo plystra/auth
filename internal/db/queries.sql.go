@@ -2932,10 +2932,10 @@ WITH RECURSIVE tree AS (
     JOIN tree parent ON child.parent_id = parent.id
     WHERE child.space_id = $2
 )
-SELECT id, space_id, name, parent_id, kind, owner_member_id, status, created_at
-FROM tree
-ORDER BY id
-FOR UPDATE
+SELECT g.id, g.space_id, g.name, g.parent_id, g.kind, g.owner_member_id, g.status, g.created_at
+FROM groups g JOIN tree ON tree.id = g.id
+ORDER BY g.id
+FOR UPDATE OF g
 `
 
 type LockGroupSubtreeParams struct {
@@ -2954,6 +2954,7 @@ type LockGroupSubtreeRow struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
+// A locking clause on the CTE alone does not lock its underlying table rows.
 func (q *Queries) LockGroupSubtree(ctx context.Context, arg LockGroupSubtreeParams) ([]LockGroupSubtreeRow, error) {
 	rows, err := q.db.Query(ctx, lockGroupSubtree, arg.GroupID, arg.SpaceID)
 	if err != nil {

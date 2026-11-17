@@ -1041,6 +1041,9 @@ func (s *Service) CreateRole(ctx context.Context, actorMemberID, spaceID, name, 
 	permissions = uniqueSorted(permissions)
 	var out Role
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		if err := s.authorizeTx(ctx, q, actorMemberID, "auth.roles:manage", spaceID); err != nil {
 			return err
 		}
@@ -1080,6 +1083,9 @@ func (s *Service) UpdateRole(ctx context.Context, actorMemberID, spaceID, roleID
 	permissions = uniqueSorted(permissions)
 	var out Role
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockAuthorizationActorTx(ctx, q, actorMemberID); err != nil {
+			return err
+		}
 		role, err := q.LockRoleInSpace(ctx, db.LockRoleInSpaceParams{ID: roleID, SpaceID: spaceID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("NOT_FOUND", "role was not found in this Space")
@@ -1792,6 +1798,9 @@ func (s *Service) authorizeTx(ctx context.Context, q *db.Queries, memberID, perm
 		return err
 	}
 	if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
+		return err
+	}
+	if err := validateHumanActorTx(ctx, q, memberID); err != nil {
 		return err
 	}
 	decision, err := s.CheckTx(ctx, q, CheckRequest{MemberID: memberID, Permission: permission, ResourceSpace: spaceID})

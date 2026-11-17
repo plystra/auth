@@ -55,6 +55,18 @@ func lockHumanActorAccountTx(ctx context.Context, q *db.Queries, actorMemberID s
 	return err
 }
 
+// Governance writes acquire the caller's account before any member or target
+// locks, and retain both identity locks until the mutation commits.
+func lockAuthorizationActorTx(ctx context.Context, q *db.Queries, actorMemberID string, targetMemberIDs ...string) error {
+	if err := lockHumanActorAccountTx(ctx, q, actorMemberID); err != nil {
+		return err
+	}
+	if err := lockAuthorizationMembersTx(ctx, q, append([]string{actorMemberID}, targetMemberIDs...)...); err != nil {
+		return err
+	}
+	return validateHumanActorTx(ctx, q, actorMemberID)
+}
+
 // The member lock is held by the caller, so a binding revoked after HTTP
 // authentication cannot retain management rights inside this write.
 func validateHumanActorTx(ctx context.Context, q *db.Queries, actorMemberID string) error {
