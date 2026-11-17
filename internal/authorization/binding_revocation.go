@@ -40,29 +40,36 @@ func (s *Service) RevokeOwnBinding(ctx context.Context, userID, memberID string)
 		if err := s.authorizeMemberMutationTx(ctx, q, memberID, memberID, "self:read"); err != nil {
 			return err
 		}
-		if err := suspendBindingAgentsTx(ctx, q, memberID, userID, memberID, userID); err != nil {
+		current, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+		if err != nil {
+			return err
+		}
+		groupID, err := resourceGroupForMemberTx(ctx, q, memberID, current.SpaceID)
+		if err != nil {
+			return err
+		}
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: current.SpaceID})
+		if err != nil {
+			return err
+		}
+		if err := suspendBindingAgentsTx(ctx, q, memberID, userID, memberID, userID, "self:read", version); err != nil {
 			return err
 		}
 		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 			return err
 		}
-		current, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
-		if err != nil {
-			return err
-		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: current.SpaceID}); err != nil {
-			return err
-		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: memberID, Action: "member.binding.self_revoke", Outcome: "success", MemberID: memberID,
-			UserID: userID, Permission: "self:read", Metadata: map[string]string{"binding_user_id": userID},
+			UserID: userID, Permission: "self:read", PolicyVersion: version,
+			Resource: audit.Resource{Type: "member", ID: memberID, SpaceID: current.SpaceID, GroupID: groupID},
+			Metadata: map[string]string{"binding_user_id": userID},
 		})
 	})
 }
 
 // The human member lock serializes this read with new direct Agents and with
 // descendant creation, whose lock set includes every owner in the chain.
-func suspendBindingAgentsTx(ctx context.Context, q *db.Queries, actorID, actorUserID, memberID, userID string) error {
+func suspendBindingAgentsTx(ctx context.Context, q *db.Queries, actorID, actorUserID, memberID, userID, permission string, policyVersion int64) error {
 	agents, err := q.ListAgentsCreatedByBinding(ctx, db.ListAgentsCreatedByBindingParams{
 		UserID: pgtype.Text{String: userID, Valid: true}, MemberID: pgtype.Text{String: memberID, Valid: true},
 	})
@@ -75,7 +82,8 @@ func suspendBindingAgentsTx(ctx context.Context, q *db.Queries, actorID, actorUs
 		}
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorID, Action: "agent.binding.suspend", Outcome: "success", MemberID: id,
-			UserID: actorUserID, Metadata: map[string]string{"binding_user_id": userID, "binding_member_id": memberID},
+			UserID: actorUserID, Permission: permission, PolicyVersion: policyVersion,
+			Metadata: map[string]string{"binding_user_id": userID, "binding_member_id": memberID},
 		}); err != nil {
 			return err
 		}

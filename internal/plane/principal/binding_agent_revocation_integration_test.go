@@ -2,6 +2,7 @@ package principal
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,13 +17,16 @@ import (
 )
 
 func TestBindingRevocationHTTPInvalidatesOnlyCreatorAgentSubtrees(t *testing.T) {
+	t.Parallel()
 	for _, operation := range []string{"self", "admin"} {
-		for _, auditFailure := range []bool{false, true} {
+		for _, rejectedAction := range []string{"", "member", "agent.binding.suspend"} {
+			auditFailure := rejectedAction != ""
 			name := operation + "/success"
 			if auditFailure {
-				name = operation + "/audit_failure"
+				name = operation + "/audit_failure/" + rejectedAction
 			}
 			t.Run(name, func(t *testing.T) {
+				t.Parallel()
 				ctx := context.Background()
 				f := newSelfBindingFixture(t)
 				f.authz.StepUp = f.sessions
@@ -108,9 +112,19 @@ func TestBindingRevocationHTTPInvalidatesOnlyCreatorAgentSubtrees(t *testing.T) 
 					t.Fatal(err)
 				}
 				if auditFailure {
+					action := rejectedAction
+					if action == "member" {
+						action = "member.binding.self_revoke"
+						if operation == "admin" {
+							action = "member.binding.revoke"
+						}
+					}
 					if _, err := f.store.Pool.Exec(ctx, `CREATE FUNCTION reject_binding_audit() RETURNS trigger LANGUAGE plpgsql AS $$
-						BEGIN IF NEW.action IN ('member.binding.self_revoke', 'member.binding.revoke') THEN RAISE EXCEPTION 'audit rejected by test'; END IF; RETURN NEW; END; $$;
-						CREATE TRIGGER test_reject_binding_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_binding_audit()`); err != nil {
+						BEGIN IF NEW.action = TG_ARGV[0] THEN RAISE EXCEPTION 'audit rejected by test'; END IF; RETURN NEW; END; $$`); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := f.store.Pool.Exec(ctx, fmt.Sprintf(`CREATE TRIGGER test_reject_binding_audit BEFORE INSERT ON audit_logs
+						FOR EACH ROW EXECUTE FUNCTION reject_binding_audit('%s')`, action)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -194,16 +208,43 @@ func TestBindingRevocationHTTPInvalidatesOnlyCreatorAgentSubtrees(t *testing.T) 
 				}
 				var suspensionAudits int
 				auditUser, auditActor := "usr_principal_actor", f.target.ID
+				permission, action := "self:read", "member.binding.self_revoke"
 				if operation == "admin" {
 					auditUser, auditActor = "usr_binding_peer", f.owner.ID
+					permission, action = "auth.bindings:manage", "member.binding.revoke"
 				}
 				if err := f.store.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action = 'agent.binding.suspend' AND member_id = $1
 					AND user_id = $5 AND actor_id = $6 AND space_id = $2 AND resource_group_id = $3 AND owner_chain->0->>'member_id' = $4
-					AND metadata->>'binding_user_id' = 'usr_principal_actor'`, branch[0].ID, f.spaceID, branch[0].HomeGroupID, f.target.ID, auditUser, auditActor).Scan(&suspensionAudits); err != nil {
+					AND metadata->>'binding_user_id' = 'usr_principal_actor' AND permission_key = $7 AND policy_version = $8`,
+					branch[0].ID, f.spaceID, branch[0].HomeGroupID, f.target.ID, auditUser, auditActor, permission, policyAfter).Scan(&suspensionAudits); err != nil {
 					t.Fatal(err)
 				}
 				if !auditFailure && suspensionAudits != 1 || auditFailure && suspensionAudits != 0 {
 					t.Fatalf("binding suspension audit snapshots=%d", suspensionAudits)
+				}
+				reader, err := f.sessions.CreateForMember(ctx, "usr_binding_peer", f.owner.ID, nil, "revocation-auditor", 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				requestID := response.Header().Get("X-Request-ID")
+				if requestID == "" {
+					t.Fatal("binding revocation omitted its request identifier")
+				}
+				path := "/v1/spaces/" + f.spaceID + "/audit-logs?request_id=" + requestID + "&action=" + action + "&member_id=" + auditActor
+				page := decodeAuditPage(t, getAuditHTTP(f.handler, reader.AccessToken, path))
+				wantEvents := 1
+				if auditFailure {
+					wantEvents = 0
+				}
+				if len(page.Body.Data) != wantEvents {
+					t.Fatal("binding revocation audit was not atomically associated with its acting identity")
+				}
+				if !auditFailure {
+					event := page.Body.Data[0]
+					if event.ActorID != auditActor || event.MemberID != auditActor || event.UserID != auditUser || event.ResourceID != f.target.ID ||
+						event.SpaceID != f.spaceID || event.ResourceGroupID != "grp_remove_a" || event.PermissionKey != permission || event.PolicyVersion != policyAfter {
+						t.Fatal("binding revocation audit confused its actor with the affected subtree owner")
+					}
 				}
 				if !auditFailure {
 					newKey, err := agents.RotateForUser(ctx, f.target.ID, "usr_binding_peer", branch[0].ID)

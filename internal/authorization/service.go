@@ -971,7 +971,15 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 			}
 			return err
 		}
-		if err := suspendBindingAgentsTx(ctx, q, actorMemberID, "", memberID, userID); err != nil {
+		groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
+		if err != nil {
+			return err
+		}
+		version, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID})
+		if err != nil {
+			return err
+		}
+		if err := suspendBindingAgentsTx(ctx, q, actorMemberID, "", memberID, userID, "auth.bindings:manage", version); err != nil {
 			return err
 		}
 		if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
@@ -983,12 +991,11 @@ func (s *Service) UnbindUser(ctx context.Context, actorMemberID, spaceID, member
 		if err := q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: userID}); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: spaceID}); err != nil {
-			return err
-		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
-			ActorType: "member", ActorID: actorMemberID, Action: "member.binding.revoke", Outcome: "success", MemberID: memberID,
-			Permission: "auth.bindings:manage", Metadata: map[string]string{"binding_user_id": userID},
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "member.binding.revoke", Outcome: "success", Permission: "auth.bindings:manage", PolicyVersion: version,
+			Resource: audit.Resource{Type: "member", ID: memberID, SpaceID: spaceID, GroupID: groupID},
+			Metadata: map[string]string{"binding_user_id": userID},
 		})
 	})
 }
@@ -1058,6 +1065,10 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 			}
 			return err
 		}
+		groupID, err := resourceGroupForMemberTx(ctx, q, memberID, spaceID)
+		if err != nil {
+			return err
+		}
 		if target.Type == "agent" && status != "active" {
 			if err := member.SetAgentSubtreeStatusTx(ctx, q, memberID, status); err != nil {
 				return err
@@ -1089,9 +1100,15 @@ func (s *Service) SetMemberStatus(ctx context.Context, actorMemberID, spaceID, m
 				}
 			}
 		}
+		space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID})
+		if err != nil {
+			return err
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
-			ActorType: "member", ActorID: actorMemberID, Action: "member.status.update", Outcome: "success", MemberID: memberID,
-			Metadata: map[string]string{"status": status},
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "member.status.update", Outcome: "success", Permission: "auth.members:manage", PolicyVersion: space.PolicyVersion,
+			Resource: audit.Resource{Type: "member", ID: memberID, SpaceID: spaceID, GroupID: groupID},
+			Metadata: map[string]string{"previous_status": target.Status, "status": status, "type": target.Type},
 		})
 	})
 }

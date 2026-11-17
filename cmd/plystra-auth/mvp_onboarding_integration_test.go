@@ -1088,6 +1088,87 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 			}
 		}
 	})
+	t.Run("MemberRevocationAudit", func(t *testing.T) {
+		actingUser := mvpData[account.User](t, mvpJSON(t, principalHandler, http.MethodGet, "/v1/me", customer.token, nil))
+		recipient := mvpData[account.AuthResult](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/sign-up", "",
+			map[string]string{"email": "revocation-recipient@example.test", "password": "a-long-revocation-password"}))
+		if recipient.Tokens == nil {
+			t.Fatal("revocation recipient registration omitted its session")
+		}
+		spacePath := "/v1/spaces/" + customer.spaceID
+		selfMember := mvpData[authorization.Member](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/members", customer.token,
+			map[string]string{"name": "Self-service identity", "type": "human", "user_id": recipient.User.ID}))
+		mvpData[json.RawMessage](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/grants", customer.token,
+			map[string]any{"grantee": map[string]string{"member_id": selfMember.ID}, "permissions": []string{"self:read"},
+				"scope": "self", "anchor_space_id": customer.spaceID}))
+		selected := mvpData[session.Tokens](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/refresh", "",
+			map[string]string{"refresh_token": recipient.Tokens.RefreshToken, "member_id": selfMember.ID}))
+		selfResponse := mvpJSON(t, principalHandler, http.MethodDelete, "/v1/me/member", selected.AccessToken, nil)
+		mvpData[json.RawMessage](t, selfResponse)
+		managed := mvpData[authorization.Member](t, mvpJSON(t, principalHandler, http.MethodPost, spacePath+"/members", customer.token,
+			map[string]string{"name": "Managed identity", "type": "human", "user_id": recipient.User.ID}))
+		targetPath := spacePath + "/members/" + managed.ID
+		suspended := mvpJSON(t, principalHandler, http.MethodPost, targetPath+"/suspend", customer.token, nil)
+		mvpData[json.RawMessage](t, suspended)
+		resumed := mvpJSON(t, principalHandler, http.MethodPost, targetPath+"/resume", customer.token, nil)
+		mvpData[json.RawMessage](t, resumed)
+		mvpData[json.RawMessage](t, mvpJSON(t, principalHandler, http.MethodPost, "/v1/auth/step-up", customer.token,
+			map[string]any{"mfa_code": nextTOTP(customerFactorResult.Data.Secret), "operation": "members.bindings.revoke",
+				"request": map[string]string{"space_id": customer.spaceID, "member_id": managed.ID, "user_id": recipient.User.ID}}))
+		unbound := mvpJSON(t, principalHandler, http.MethodDelete, targetPath+"/users/"+recipient.User.ID, customer.token, nil)
+		mvpData[json.RawMessage](t, unbound)
+		removed := mvpJSON(t, principalHandler, http.MethodPost, targetPath+"/remove", customer.token, nil)
+		mvpData[json.RawMessage](t, removed)
+		for _, item := range []struct {
+			response                                                     *httptest.ResponseRecorder
+			action, targetID, actorID, userID, permission, before, after string
+		}{
+			{selfResponse, "member.binding.self_revoke", selfMember.ID, selfMember.ID, recipient.User.ID, "self:read", "", ""},
+			{suspended, "member.status.update", managed.ID, customer.memberID, actingUser.ID, "auth.members:manage", "active", "suspended"},
+			{resumed, "member.status.update", managed.ID, customer.memberID, actingUser.ID, "auth.members:manage", "suspended", "active"},
+			{unbound, "member.binding.revoke", managed.ID, customer.memberID, actingUser.ID, "auth.bindings:manage", "", ""},
+			{removed, "member.status.update", managed.ID, customer.memberID, actingUser.ID, "auth.members:manage", "active", "removed"},
+		} {
+			requestID := item.response.Header().Get("X-Request-ID")
+			if requestID == "" {
+				t.Fatal("revocation omitted the request identifier")
+			}
+			query := url.Values{"request_id": {requestID}, "action": {item.action}, "member_id": {item.actorID}}.Encode()
+			response := mvpJSON(t, principalHandler, http.MethodGet, spacePath+"/audit-logs?"+query, customer.token, nil)
+			events := mvpData[[]audit.Event](t, response)
+			if len(events) != 1 {
+				t.Fatal("empty-deployment revocation did not produce one queryable event")
+			}
+			event := events[0]
+			if event.ActorID != item.actorID || event.MemberID != item.actorID || event.MemberType != "human" || event.UserID != item.userID ||
+				event.ResourceID != item.targetID || event.ResourceType != "member" || event.ResourceGroupID != "" || event.SpaceID != customer.spaceID ||
+				event.PermissionKey != item.permission || event.PolicyVersion <= 0 || event.CredentialType != "user_access_token" || event.Plane != "principal" || len(event.OwnerChain) != 0 {
+				t.Fatal("revocation audit omitted the authenticated identity or target facts")
+			}
+			var metadata map[string]any
+			if json.Unmarshal(event.Metadata, &metadata) != nil {
+				t.Fatal("revocation audit metadata is invalid")
+			}
+			if item.action == "member.status.update" {
+				if metadata["previous_status"] != item.before || metadata["status"] != item.after || metadata["type"] != "human" {
+					t.Fatal("status audit omitted its before and after facts")
+				}
+			} else if metadata["binding_user_id"] != recipient.User.ID {
+				t.Fatal("unbinding audit omitted the affected account")
+			}
+			for _, private := range []string{recipient.Tokens.AccessToken, recipient.Tokens.RefreshToken, selected.AccessToken, selected.RefreshToken,
+				customer.token, customerFactorResult.Data.Secret, recipient.User.Email, "a-long-revocation-password"} {
+				if strings.Contains(response.Body.String(), private) {
+					t.Fatal("revocation audit exposed credentials or private labels")
+				}
+			}
+			other := mvpData[[]audit.Event](t, mvpJSON(t, principalHandler, http.MethodGet,
+				"/v1/spaces/"+publisher.spaceID+"/audit-logs?"+query, publisher.token, nil))
+			if len(other) != 0 {
+				t.Fatal("revocation audit crossed the customer Space boundary")
+			}
+		}
+	})
 	var standardRootID string
 	t.Run("NativeAgentDelegationAndRevocation", func(t *testing.T) {
 		businessDatabase, err := harness.CloneEmpty(ctx)
