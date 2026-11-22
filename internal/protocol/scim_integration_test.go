@@ -137,6 +137,20 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if err := json.Unmarshal(secondResponse.Body.Bytes(), &secondUser); err != nil {
 		t.Fatal(err)
 	}
+	filteredRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=userName%20eq%20%22bob%40example.test%22&count=1`, nil)
+	filteredRequest.Header.Set("Authorization", "Bearer "+directory.Token)
+	filteredResponse := httptest.NewRecorder()
+	mux.ServeHTTP(filteredResponse, filteredRequest)
+	if filteredResponse.Code != http.StatusOK || !strings.Contains(filteredResponse.Body.String(), `"totalResults":1`) {
+		t.Fatalf("SCIM user filter = %d %s", filteredResponse.Code, filteredResponse.Body.String())
+	}
+	invalidFilterRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=displayName%20eq%20%22Bob%22`, nil)
+	invalidFilterRequest.Header.Set("Authorization", "Bearer "+directory.Token)
+	invalidFilterResponse := httptest.NewRecorder()
+	mux.ServeHTTP(invalidFilterResponse, invalidFilterRequest)
+	if invalidFilterResponse.Code != http.StatusBadRequest || !strings.Contains(invalidFilterResponse.Body.String(), "invalidFilter") {
+		t.Fatalf("unsupported SCIM filter = %d %s", invalidFilterResponse.Code, invalidFilterResponse.Body.String())
+	}
 	postGroup := func(payload string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/scim/v2/"+directory.ID+"/Groups", strings.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+directory.Token)
