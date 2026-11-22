@@ -310,6 +310,34 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 	return i, err
 }
 
+const getSSOMembershipForUser = `-- name: GetSSOMembershipForUser :one
+SELECT m.id, (m.type = 'human' AND m.status = 'active' AND b.status = 'active'
+    AND b.revoked_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp()))::boolean AS active
+FROM user_members b JOIN members m ON m.id = b.member_id
+WHERE b.user_id = $1 AND m.space_id = $2
+ORDER BY active DESC, m.created_at, m.id
+LIMIT 1
+`
+
+type GetSSOMembershipForUserParams struct {
+	UserID  string `json:"user_id"`
+	SpaceID string `json:"space_id"`
+}
+
+type GetSSOMembershipForUserRow struct {
+	ID     string `json:"id"`
+	Active bool   `json:"active"`
+}
+
+// An inactive row records a prior binding that JIT must not replace. Prefer
+// any live binding and use wall time when the callback has waited on locks.
+func (q *Queries) GetSSOMembershipForUser(ctx context.Context, arg GetSSOMembershipForUserParams) (GetSSOMembershipForUserRow, error) {
+	row := q.db.QueryRow(ctx, getSSOMembershipForUser, arg.UserID, arg.SpaceID)
+	var i GetSSOMembershipForUserRow
+	err := row.Scan(&i.ID, &i.Active)
+	return i, err
+}
+
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
