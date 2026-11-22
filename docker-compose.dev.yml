@@ -35,10 +35,10 @@ services:
       PLYSTRA_AUTH_ENVIRONMENT: development
     command: ["plystra-auth migrate && exec plystra-auth serve"]
     ports:
-      - "8080:8080"
-      - "8081:8081"
-      - "8082:8082"
-      - "8090:8090"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:8082:8082"
+      - "127.0.0.1:8090:8090"
 
 volumes:
   auth-dev-pgdata:

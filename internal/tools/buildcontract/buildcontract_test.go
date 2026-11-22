@@ -193,6 +193,11 @@ func TestMakeDevUsesDockerComposeDevelopmentStack(t *testing.T) {
 			t.Errorf("development compose file is missing %q", required)
 		}
 	}
+	for _, port := range []string{"8080", "8081", "8082", "8090"} {
+		if !strings.Contains(string(compose), `"127.0.0.1:`+port+`:`+port+`"`) {
+			t.Errorf("development listener %s needs a loopback host binding", port)
+		}
+	}
 }
 
 func TestTestDBUsesDockerTemplateDatabaseClones(t *testing.T) {
