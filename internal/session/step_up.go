@@ -162,9 +162,14 @@ func (s *Service) ConsumeStepUpTx(ctx context.Context, q *db.Queries) error {
 	if strings.TrimSpace(requirement.SessionID) == "" || strings.TrimSpace(requirement.Operation) == "" || len(requirement.Digest) != sha256.Size {
 		return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
 	}
-	_, err := q.ConsumeSessionStepUp(ctx, db.ConsumeSessionStepUpParams{
-		ID: requirement.SessionID, Operation: pgtype.Text{String: requirement.Operation, Valid: true}, Digest: requirement.Digest,
-	})
+	// An UPDATE may qualify a row before waiting for its lock. Take the
+	// lock first so the consuming statement evaluates expiry after the wait.
+	_, err := q.LockSessionForStepUp(ctx, db.LockSessionForStepUpParams{ID: requirement.SessionID})
+	if err == nil {
+		_, err = q.ConsumeSessionStepUp(ctx, db.ConsumeSessionStepUpParams{
+			ID: requirement.SessionID, Operation: pgtype.Text{String: requirement.Operation, Valid: true}, Digest: requirement.Digest,
+		})
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
 	}
