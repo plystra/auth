@@ -105,7 +105,9 @@ type createDirectoryInput struct {
 	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	Body          struct {
-		Name string `json:"name"`
+		Name             string  `json:"name"`
+		SSOConnectionID  *string `json:"sso_connection_id,omitempty"`
+		SSOIdentityClaim *string `json:"sso_identity_claim,omitempty"`
 	}
 }
 
@@ -116,8 +118,10 @@ type directoryPathInput struct {
 	ID            string `path:"id"`
 	DirectoryID   string `path:"dir_id"`
 	Body          struct {
-		Name        string `json:"name,omitempty"`
-		RotateToken bool   `json:"rotate_token,omitempty"`
+		Name             string  `json:"name,omitempty"`
+		RotateToken      bool    `json:"rotate_token,omitempty"`
+		SSOConnectionID  *string `json:"sso_connection_id,omitempty"`
+		SSOIdentityClaim *string `json:"sso_identity_claim,omitempty"`
 	}
 }
 
@@ -177,7 +181,11 @@ func (a *API) createDirectory(ctx context.Context, in *createDirectoryInput) (*d
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
 	}
-	request := map[string]any{"operation": "directories.create", "space_id": in.ID, "name": strings.TrimSpace(in.Body.Name)}
+	if (in.Body.SSOConnectionID == nil) != (in.Body.SSOIdentityClaim == nil) {
+		return nil, apierr.New("validation_failed", "sso_connection_id and sso_identity_claim must be provided together")
+	}
+	request := map[string]any{"operation": "directories.create", "space_id": in.ID, "name": strings.TrimSpace(in.Body.Name),
+		"sso_connection_id": in.Body.SSOConnectionID, "sso_identity_claim": in.Body.SSOIdentityClaim}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.create", request)
 	if err != nil {
 		return nil, err
@@ -186,7 +194,14 @@ func (a *API) createDirectory(ctx context.Context, in *createDirectoryInput) (*d
 	if err != nil {
 		return nil, err
 	}
-	directory, err := a.Enterprise.CreateDirectory(ctx, actor.ID, in.ID, enterprise.DirectoryInput{Name: in.Body.Name})
+	input := enterprise.DirectoryInput{Name: in.Body.Name}
+	if in.Body.SSOConnectionID != nil {
+		input.SSOConnectionID, input.SSOIdentityClaim = *in.Body.SSOConnectionID, *in.Body.SSOIdentityClaim
+		if input.SSOConnectionID == "" || input.SSOIdentityClaim == "" {
+			return nil, apierr.New("validation_failed", "directory creation requires nonempty SSO configuration when provided")
+		}
+	}
+	directory, err := a.Enterprise.CreateDirectory(ctx, actor.ID, in.ID, input)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +218,11 @@ func (a *API) updateDirectory(ctx context.Context, in *directoryPathInput) (*dir
 	if err != nil {
 		return nil, err
 	}
-	request := map[string]any{"operation": "directories.update", "space_id": in.ID, "directory_id": in.DirectoryID, "version": version, "name": strings.TrimSpace(in.Body.Name), "rotate_token": in.Body.RotateToken}
+	if in.Body.RotateToken && (in.Body.Name != "" || in.Body.SSOConnectionID != nil || in.Body.SSOIdentityClaim != nil) {
+		return nil, apierr.New("validation_failed", "token rotation cannot be combined with configuration changes")
+	}
+	request := map[string]any{"operation": "directories.update", "space_id": in.ID, "directory_id": in.DirectoryID, "version": version, "name": strings.TrimSpace(in.Body.Name), "rotate_token": in.Body.RotateToken,
+		"sso_connection_id": in.Body.SSOConnectionID, "sso_identity_claim": in.Body.SSOIdentityClaim}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.update", request)
 	if err != nil {
 		return nil, err
@@ -216,7 +235,8 @@ func (a *API) updateDirectory(ctx context.Context, in *directoryPathInput) (*dir
 	if in.Body.RotateToken {
 		directory, err = a.Enterprise.RotateDirectoryToken(ctx, actor.ID, in.ID, in.DirectoryID, version)
 	} else {
-		directory, err = a.Enterprise.UpdateDirectory(ctx, actor.ID, in.ID, in.DirectoryID, enterprise.DirectoryUpdate{Name: in.Body.Name}, version)
+		directory, err = a.Enterprise.UpdateDirectory(ctx, actor.ID, in.ID, in.DirectoryID, enterprise.DirectoryUpdate{Name: in.Body.Name,
+			SSOConnectionID: in.Body.SSOConnectionID, SSOIdentityClaim: in.Body.SSOIdentityClaim}, version)
 	}
 	if err != nil {
 		return nil, err

@@ -979,6 +979,12 @@
         "properties": {
           "name": {
             "type": "string"
+          },
+          "sso_connection_id": {
+            "type": "string"
+          },
+          "sso_identity_claim": {
+            "type": "string"
           }
         },
         "required": [
@@ -1440,6 +1446,12 @@
           "space_id": {
             "type": "string"
           },
+          "sso_connection_id": {
+            "type": "string"
+          },
+          "sso_identity_claim": {
+            "type": "string"
+          },
           "status": {
             "type": "string"
           },
@@ -1486,6 +1498,12 @@
           },
           "rotate_token": {
             "type": "boolean"
+          },
+          "sso_connection_id": {
+            "type": "string"
+          },
+          "sso_identity_claim": {
+            "type": "string"
           }
         },
         "type": "object"

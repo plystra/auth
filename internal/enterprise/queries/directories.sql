@@ -1,7 +1,7 @@
 -- name: CreateDirectory :one
-INSERT INTO directories (id, space_id, name, token_prefix, token_hash, configured_by_member_id, configured_by_user_id)
-VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(token_prefix), sqlc.arg(token_hash), sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id))
-RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id;
+INSERT INTO directories (id, space_id, name, token_prefix, token_hash, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim)
+VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(token_prefix), sqlc.arg(token_hash), sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id), sqlc.narg(sso_connection_id), sqlc.narg(sso_identity_claim))
+RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim;
 
 -- name: CreateDirectoryProvisionedUser :one
 INSERT INTO users (id, email, email_normalized, password_hash, display_name, status, email_verified_at)
@@ -9,30 +9,30 @@ VALUES (sqlc.arg(id), sqlc.arg(email), sqlc.arg(email_normalized), sqlc.arg(pass
 RETURNING id, email, email_normalized, password_hash, email_verified_at, disabled_at, status, password_reset_required_at, created_at, updated_at;
 
 -- name: GetDirectory :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE id = sqlc.arg(id);
 
 -- name: ListDirectories :many
-SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
 -- name: LockDirectory :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE id = sqlc.arg(id) FOR UPDATE;
 
 -- name: GetDirectoryByTokenHash :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE token_hash = sqlc.arg(token_hash);
 
 -- name: DisableDirectory :exec
 UPDATE directories SET status = 'disabled', version = version + 1, updated_at = now()
 WHERE id = sqlc.arg(id) AND status <> 'disabled';
 
--- name: UpdateDirectoryName :one
-UPDATE directories SET name = sqlc.arg(name), version = version + 1, updated_at = now()
+-- name: UpdateDirectoryConfiguration :one
+UPDATE directories SET name = sqlc.arg(name), sso_connection_id = sqlc.narg(sso_connection_id), sso_identity_claim = sqlc.narg(sso_identity_claim), version = version + 1, updated_at = now()
 WHERE id = sqlc.arg(id) AND status = 'active' AND version = sqlc.arg(version)
-RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id;
+RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim;
 
 -- name: RotateDirectoryToken :one
 UPDATE directories SET token_prefix = sqlc.arg(token_prefix), token_hash = sqlc.arg(token_hash),
@@ -187,3 +187,19 @@ SELECT count(*)::bigint FROM groups WHERE parent_id = sqlc.arg(group_id) AND sta
 
 -- name: ListDirectoryBackedGroupMembers :many
 SELECT member_id FROM group_members WHERE group_id = sqlc.arg(group_id) ORDER BY member_id;
+
+-- name: GetDirectoryForSSOConnection :one
+SELECT * FROM directories WHERE sso_connection_id = sqlc.arg(connection_id)
+ORDER BY (status = 'active') DESC, id LIMIT 1;
+
+-- name: GetDirectoryLoginIdentity :one
+SELECT du.id AS directory_user_id, du.user_id, du.member_id, u.email, u.display_name, u.status, u.created_at
+FROM directory_users du
+JOIN users u ON u.id = du.user_id
+JOIN members m ON m.id = du.member_id AND m.space_id = sqlc.arg(space_id)
+JOIN user_members um ON um.user_id = du.user_id AND um.member_id = du.member_id
+WHERE du.directory_id = sqlc.arg(directory_id) AND du.id = sqlc.arg(id)
+  AND du.active AND du.deleted_at IS NULL AND u.status = 'active' AND u.disabled_at IS NULL
+  AND m.type = 'human' AND m.status = 'active'
+  AND um.status = 'active' AND um.revoked_at IS NULL
+  AND (um.expires_at IS NULL OR um.expires_at > now());

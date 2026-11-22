@@ -61,14 +61,14 @@ UPDATE sso_states SET consumed_at = now()
 WHERE id = sqlc.arg(id) AND consumed_at IS NULL;
 
 -- name: GetExternalIdentity :one
-SELECT id, user_id, issuer, subject, created_at
+SELECT id, user_id, issuer, subject, created_at, directory_user_id
 FROM external_identities
 WHERE issuer = sqlc.arg(issuer) AND subject = sqlc.arg(subject);
 
 -- name: CreateExternalIdentity :one
-INSERT INTO external_identities (id, user_id, issuer, subject)
-VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(issuer), sqlc.arg(subject))
-RETURNING id, user_id, issuer, subject, created_at;
+INSERT INTO external_identities (id, user_id, issuer, subject, directory_user_id)
+VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(issuer), sqlc.arg(subject), sqlc.narg(directory_user_id))
+RETURNING id, user_id, issuer, subject, created_at, directory_user_id;
 
 -- name: MarkExternalUserVerified :exec
 UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()), status = 'active', updated_at = now()
@@ -77,3 +77,8 @@ WHERE id = sqlc.arg(id);
 -- name: GetRoleByNameInSpace :one
 SELECT id, space_id, name, description, managed, created_at
 FROM roles WHERE space_id = sqlc.arg(space_id) AND name = sqlc.arg(name);
+
+-- name: AssociateExternalDirectoryUser :one
+UPDATE external_identities SET directory_user_id = sqlc.arg(directory_user_id)
+WHERE id = sqlc.arg(id) AND directory_user_id IS NULL
+RETURNING id;

@@ -248,6 +248,8 @@ type Directory struct {
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	ConfiguredByMemberID pgtype.Text        `json:"configured_by_member_id"`
 	ConfiguredByUserID   pgtype.Text        `json:"configured_by_user_id"`
+	SsoConnectionID      pgtype.Text        `json:"sso_connection_id"`
+	SsoIdentityClaim     pgtype.Text        `json:"sso_identity_claim"`
 }
 
 type DirectoryGroup struct {
@@ -292,11 +294,12 @@ type EmailVerificationToken struct {
 }
 
 type ExternalIdentity struct {
-	ID        string             `json:"id"`
-	UserID    string             `json:"user_id"`
-	Issuer    string             `json:"issuer"`
-	Subject   string             `json:"subject"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	Issuer          string             `json:"issuer"`
+	Subject         string             `json:"subject"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	DirectoryUserID pgtype.Text        `json:"directory_user_id"`
 }
 
 type Factor struct {

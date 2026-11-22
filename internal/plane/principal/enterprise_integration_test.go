@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,7 +53,8 @@ func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.
 		return res
 	}
 	request("POST", "", `{"name":"Workforce"}`, "", 403)
-	seedStepUpProof(t, st, claims.SessionID, "directories.create", map[string]any{"operation": "directories.create", "space_id": spaceID, "name": "Workforce"})
+	seedStepUpProof(t, st, claims.SessionID, "directories.create", map[string]any{"operation": "directories.create", "space_id": spaceID, "name": "Workforce",
+		"sso_connection_id": nil, "sso_identity_claim": nil})
 	created := request("POST", "", `{"name":"Workforce"}`, "", 200)
 	var result struct {
 		Data enterprise.Directory `json:"data"`
@@ -66,7 +68,7 @@ func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.
 		t.Fatal("directory credential leaked through listing or formatting")
 	}
 	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{"operation": "directories.update", "space_id": spaceID,
-		"directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1)})
+		"directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1), "sso_connection_id": nil, "sso_identity_claim": nil})
 	request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"2"`, 412)
 	rotated := request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"1"`, 200)
 	if err := json.Unmarshal(rotated.Body.Bytes(), &result); err != nil {
@@ -75,7 +77,8 @@ func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.
 	if result.Data.Version != 2 || !result.Data.UpdatedAt.After(directory.UpdatedAt) || result.Data.Token.Value() == directory.Token.Value() {
 		t.Fatal("rotation did not return the committed version, timestamp and new token")
 	}
-	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{"operation": "directories.update", "space_id": spaceID, "directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1)})
+	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{"operation": "directories.update", "space_id": spaceID, "directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1),
+		"sso_connection_id": nil, "sso_identity_claim": nil})
 	request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"2"`, 403)
 	seedStepUpProof(t, st, claims.SessionID, "directories.delete", map[string]any{"operation": "directories.delete", "space_id": spaceID,
 		"directory_id": directory.ID, "version": int64(2)})
@@ -83,6 +86,86 @@ func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.
 	var status string
 	if err := st.Pool.QueryRow(ctx, `SELECT status FROM directories WHERE id=$1`, directory.ID).Scan(&status); err != nil || status != "disabled" {
 		t.Fatalf("directory delete status = %s, %v", status, err)
+	}
+}
+
+func TestDirectorySSOConfigurationHTTPBindsClaimAndPresenceToStepUp(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	service := &enterprise.Service{Store: st, Authorization: authz, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32))}
+	actor := authorization.WithHumanActor(ctx, owner.ID, "usr_principal_actor")
+	connection, err := service.CreateConnection(actor, owner.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Directory OIDC", Provider: "oidc", Issuer: "https://idp.example.test", ClientID: "directory-client", ClientSecret: "test-secret",
+		RedirectURI: "https://auth.example.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Enterprise: service}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("directory identity configuration", "1.0.0")))
+	server := httptest.NewServer(route.Middleware(route.Principal, mux))
+	t.Cleanup(server.Close)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sessions.VerifyAccess(tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, suffix, body string, version int, want int) []byte {
+		t.Helper()
+		req, err := http.NewRequestWithContext(ctx, method, server.URL+"/v1/spaces/"+spaceID+"/directories"+suffix, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("If-Match", fmt.Sprintf("W/\"%d\"", version))
+		res, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		data, err := io.ReadAll(res.Body)
+		if err != nil || res.StatusCode != want {
+			t.Fatalf("directory configuration status=%d want=%d err=%v", res.StatusCode, want, err)
+		}
+		return data
+	}
+	seedStepUpProof(t, st, claims.SessionID, "directories.create", map[string]any{
+		"operation": "directories.create", "space_id": spaceID, "name": "Workforce",
+		"sso_connection_id": connection.ID, "sso_identity_claim": "oid",
+	})
+	request("POST", "", fmt.Sprintf(`{"name":"Workforce","sso_connection_id":%q,"sso_identity_claim":"sub"}`, connection.ID), 0, 403)
+	data := request("POST", "", fmt.Sprintf(`{"name":"Workforce","sso_connection_id":%q,"sso_identity_claim":"oid"}`, connection.ID), 0, 200)
+	var created struct{ Data enterprise.Directory }
+	if err := json.Unmarshal(data, &created); err != nil {
+		t.Fatal(err)
+	}
+	directory := created.Data
+	if directory.SSOConnectionID != connection.ID || directory.SSOIdentityClaim != "oid" {
+		t.Fatal("directory SSO configuration was not returned")
+	}
+	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{
+		"operation": "directories.update", "space_id": spaceID, "directory_id": directory.ID, "version": int64(1), "name": "Renamed", "rotate_token": false,
+		"sso_connection_id": nil, "sso_identity_claim": nil,
+	})
+	request("PATCH", "/"+directory.ID, `{"name":"Renamed","sso_connection_id":"","sso_identity_claim":""}`, 1, 403)
+	data = request("PATCH", "/"+directory.ID, `{"name":"Renamed"}`, 1, 200)
+	if err := json.Unmarshal(data, &created); err != nil || created.Data.SSOConnectionID != connection.ID || created.Data.Version != 2 {
+		t.Fatal("omitting SSO fields changed the mapping")
+	}
+	request("PATCH", "/"+directory.ID, `{"rotate_token":true,"sso_connection_id":"","sso_identity_claim":""}`, 2, 400)
+	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{
+		"operation": "directories.update", "space_id": spaceID, "directory_id": directory.ID, "version": int64(2), "name": "", "rotate_token": false,
+		"sso_connection_id": "", "sso_identity_claim": "",
+	})
+	request("PATCH", "/"+directory.ID, `{"sso_connection_id":"","sso_identity_claim":""}`, 2, 200)
+	var linked bool
+	if err := st.Pool.QueryRow(ctx, "SELECT sso_connection_id IS NOT NULL OR sso_identity_claim IS NOT NULL FROM directories WHERE id=$1", directory.ID).Scan(&linked); err != nil || linked {
+		t.Fatal("explicit clearing did not remove both mapping fields")
 	}
 }
 

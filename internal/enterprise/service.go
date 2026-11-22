@@ -152,12 +152,14 @@ type samlConnectionDetails struct {
 }
 
 type idTokenClaims struct {
-	Subject       string   `json:"sub"`
-	Email         string   `json:"email"`
-	EmailVerified bool     `json:"email_verified"`
-	Name          string   `json:"name"`
-	Nonce         string   `json:"nonce"`
-	Groups        []string `json:"groups"`
+	Subject        string                     `json:"sub"`
+	Email          string                     `json:"email"`
+	EmailVerified  bool                       `json:"email_verified"`
+	Name           string                     `json:"name"`
+	Nonce          string                     `json:"nonce"`
+	Groups         []string                   `json:"groups"`
+	VerifiedClaims map[string]json.RawMessage `json:"-"`
+	SAMLAttributes map[string][]string        `json:"-"`
 }
 
 func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID string, in ConnectionInput) (Connection, error) {
@@ -901,6 +903,17 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 		Name:   firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
 		Groups: firstSAMLValues(info.Values, "groups", "Groups", "memberOf", "MemberOf"),
 	}
+	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
+	if len(info.Assertions) != 1 {
+		return account.AuthResult{}, directoryIdentityUnavailable()
+	}
+	if statement := info.Assertions[0].AttributeStatement; statement != nil {
+		for _, attribute := range statement.Attributes {
+			for _, value := range attribute.Values {
+				claims.SAMLAttributes[attribute.Name] = append(claims.SAMLAttributes[attribute.Name], value.Value)
+			}
+		}
+	}
 	return s.finishCallback(ctx, row, state, claims)
 }
 
@@ -970,16 +983,31 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	if len(groups) > maxIdentityGroups {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC groups claim is too large")
 	}
+	hint, err := s.directorySSOHint(ctx, connection, claims)
+	if err != nil {
+		return account.AuthResult{}, err
+	}
 	var userID, memberID string
 	var userEmail, userStatus string
+	userName := displayName(claims, email)
 	var userCreated time.Time
-	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := lockDirectorySSOTx(ctx, q, connection, hint); err != nil {
+			return err
+		}
 		lockedConnection, err := q.LockSSOConnection(ctx, db.LockSSOConnectionParams{ID: connection.ID})
 		if err != nil {
 			return err
 		}
 		if lockedConnection.Status != "active" {
 			return apierr.New("forbidden", "SSO connection is disabled")
+		}
+		active, err := q.AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: connection.SpaceID})
+		if err != nil {
+			return err
+		}
+		if !active {
+			return directoryIdentityUnavailable()
 		}
 		if state.ID != "" {
 			lockedState, err := q.LockSSOStateByHash(ctx, db.LockSSOStateByHashParams{StateHash: state.StateHash})
@@ -993,59 +1021,71 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				return err
 			}
 		}
-		external, err := q.GetExternalIdentity(ctx, db.GetExternalIdentityParams{Issuer: connection.Issuer, Subject: claims.Subject})
 		newMembership := false
-		if errors.Is(err, pgx.ErrNoRows) {
-			if existing, emailErr := q.GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email}); emailErr == nil {
-				_ = existing
-				return apierr.New("conflict", "an account with this email requires explicit SSO identity linking")
-			} else if !errors.Is(emailErr, pgx.ErrNoRows) {
-				return emailErr
-			}
-			passwordHash, hashErr := s.passwordHash()
-			if hashErr != nil {
-				return hashErr
-			}
-			created, createErr := q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: passwordHash, Status: "active"})
-			if createErr != nil {
-				return createErr
-			}
-			userID, userEmail, userStatus, userCreated = created.ID, created.Email, created.Status, created.CreatedAt.Time
-			if err := q.MarkExternalUserVerified(ctx, db.MarkExternalUserVerifiedParams{ID: userID}); err != nil {
+		if hint != nil {
+			identity, err := linkDirectoryIdentityTx(ctx, q, connection, hint, claims)
+			if err != nil {
 				return err
 			}
-			if _, err := q.CreateExternalIdentity(ctx, db.CreateExternalIdentityParams{ID: string(ids.New[ids.ID]("ext")), UserID: userID, Issuer: connection.Issuer, Subject: claims.Subject}); err != nil {
-				return err
-			}
-			newMembership = true
-		} else if err != nil {
-			return err
+			userID, memberID = identity.UserID, identity.MemberID
+			userEmail, userStatus, userCreated, userName = identity.Email, identity.Status, identity.CreatedAt.Time, identity.DisplayName
 		} else {
-			userID = external.UserID
-			user, userErr := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
-			if userErr != nil {
-				return userErr
-			}
-			if user.Status != "active" {
-				return apierr.New("forbidden", "the linked account is not active")
-			}
-			userEmail, userStatus, userCreated = user.Email, user.Status, user.CreatedAt.Time
-		}
-		member, memberErr := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: connection.SpaceID})
-		if errors.Is(memberErr, pgx.ErrNoRows) {
-			createdMember, createErr := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: connection.SpaceID, Name: displayName(claims, email), Type: "human", BindingPolicy: "single"})
-			if createErr != nil {
-				return createErr
-			}
-			memberID = createdMember.ID
-			if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
+			external, err := q.GetExternalIdentity(ctx, db.GetExternalIdentityParams{Issuer: connection.Issuer, Subject: claims.Subject})
+			if errors.Is(err, pgx.ErrNoRows) {
+				if existing, emailErr := q.GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email}); emailErr == nil {
+					_ = existing
+					return apierr.New("conflict", "an account with this email requires explicit SSO identity linking")
+				} else if !errors.Is(emailErr, pgx.ErrNoRows) {
+					return emailErr
+				}
+				passwordHash, hashErr := s.passwordHash()
+				if hashErr != nil {
+					return hashErr
+				}
+				created, createErr := q.CreateUser(ctx, db.CreateUserParams{ID: string(ids.New[ids.UserID]("usr")), Email: email, EmailNormalized: email, PasswordHash: passwordHash, Status: "active"})
+				if createErr != nil {
+					return createErr
+				}
+				userID, userEmail, userStatus, userCreated = created.ID, created.Email, created.Status, created.CreatedAt.Time
+				if err := q.MarkExternalUserVerified(ctx, db.MarkExternalUserVerifiedParams{ID: userID}); err != nil {
+					return err
+				}
+				if _, err := q.CreateExternalIdentity(ctx, db.CreateExternalIdentityParams{ID: string(ids.New[ids.ID]("ext")), UserID: userID, Issuer: connection.Issuer, Subject: claims.Subject}); err != nil {
+					return err
+				}
+				newMembership = true
+			} else if err != nil {
 				return err
+			} else {
+				if external.DirectoryUserID.Valid {
+					return directoryIdentityUnavailable()
+				}
+				userID = external.UserID
+				user, userErr := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
+				if userErr != nil {
+					return userErr
+				}
+				if user.Status != "active" {
+					return apierr.New("forbidden", "the linked account is not active")
+				}
+				userEmail, userStatus, userCreated = user.Email, user.Status, user.CreatedAt.Time
 			}
-			newMembership = true
-		} else if memberErr != nil {
-			return memberErr
-		} else {
-			memberID = member.ID
+			member, memberErr := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: connection.SpaceID})
+			if errors.Is(memberErr, pgx.ErrNoRows) {
+				createdMember, createErr := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: connection.SpaceID, Name: displayName(claims, email), Type: "human", BindingPolicy: "single"})
+				if createErr != nil {
+					return createErr
+				}
+				memberID = createdMember.ID
+				if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
+					return err
+				}
+				newMembership = true
+			} else if memberErr != nil {
+				return memberErr
+			} else {
+				memberID = member.ID
+			}
 		}
 		if newMembership {
 			roles, err := s.rolesForLogin(ctx, q, connection, groups)
@@ -1070,12 +1110,16 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if connection.Provider == "saml" {
 			credentialType = "saml"
 		}
+		metadata := map[string]string{"provider": connection.Provider, "subject_hash": hexDigest(claims.Subject), "new_membership": fmt.Sprintf("%t", newMembership)}
+		if hint != nil {
+			metadata["directory_id"], metadata["directory_user_id"] = hint.directory.ID, hint.user.ID
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "sso", ActorID: connection.ID, MemberID: memberID, UserID: userID,
 			Action: "auth.sso.login", Outcome: "success", CredentialType: credentialType,
 			Resource:      audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: connection.SpaceID},
 			PolicyVersion: space.PolicyVersion,
-			Metadata:      map[string]string{"provider": connection.Provider, "subject_hash": hexDigest(claims.Subject), "new_membership": fmt.Sprintf("%t", newMembership)},
+			Metadata:      metadata,
 		})
 	})
 	if err != nil {
@@ -1092,7 +1136,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	if err != nil {
 		return account.AuthResult{}, err
 	}
-	return account.AuthResult{User: account.User{ID: userID, Email: userEmail, EmailVerified: true, Status: userStatus, DisplayName: displayName(claims, userEmail), CreatedAt: userCreated}, Tokens: &tokens}, nil
+	return account.AuthResult{User: account.User{ID: userID, Email: userEmail, EmailVerified: true, Status: userStatus, DisplayName: userName, CreatedAt: userCreated}, Tokens: &tokens}, nil
 }
 
 func (s *Service) rolesForLogin(ctx context.Context, q *db.Queries, connection db.SsoConnection, groups []string) ([]string, error) {
@@ -1174,6 +1218,9 @@ func parseIDToken(ctx context.Context, provider *oidc.Provider, raw, clientID, g
 	}
 	var claims idTokenClaims
 	if err := token.Claims(&claims); err != nil {
+		return idTokenClaims{}, err
+	}
+	if err := token.Claims(&claims.VerifiedClaims); err != nil {
 		return idTokenClaims{}, err
 	}
 	if groupsClaim != "" && groupsClaim != "groups" {

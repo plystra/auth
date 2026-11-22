@@ -32,6 +32,7 @@ type oidcTestCode struct {
 	email         string
 	emailVerified bool
 	groups        []string
+	extra         map[string]any
 }
 
 type oidcTestProvider struct {
@@ -122,11 +123,15 @@ func rsaPublicJWK(key *rsa.PublicKey) map[string]string {
 func signOIDCTestToken(t *testing.T, key *rsa.PrivateKey, issuer, audience string, code oidcTestCode) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"oidc-test-key","typ":"JWT"}`))
-	payload, err := json.Marshal(map[string]any{
+	claims := map[string]any{
 		"iss": issuer, "aud": audience, "sub": code.subject, "email": code.email,
 		"email_verified": code.emailVerified, "nonce": code.nonce, "groups": code.groups,
 		"iat": time.Now().UTC().Unix(), "exp": time.Now().UTC().Add(5 * time.Minute).Unix(),
-	})
+	}
+	for name, value := range code.extra {
+		claims[name] = value
+	}
+	payload, err := json.Marshal(claims)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,22 +17,28 @@ import (
 )
 
 type DirectoryInput struct {
-	Name string
+	Name             string
+	SSOConnectionID  string
+	SSOIdentityClaim string
 }
 
 type DirectoryUpdate struct {
-	Name string
+	Name             string
+	SSOConnectionID  *string
+	SSOIdentityClaim *string
 }
 
 type Directory struct {
-	ID        string        `json:"id"`
-	SpaceID   string        `json:"space_id"`
-	Name      string        `json:"name"`
-	Token     secret.String `json:"token,omitempty"`
-	Status    string        `json:"status"`
-	Version   int64         `json:"version"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID               string        `json:"id"`
+	SpaceID          string        `json:"space_id"`
+	Name             string        `json:"name"`
+	Token            secret.String `json:"token,omitempty"`
+	Status           string        `json:"status"`
+	Version          int64         `json:"version"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
+	SSOConnectionID  string        `json:"sso_connection_id,omitempty"`
+	SSOIdentityClaim string        `json:"sso_identity_claim,omitempty"`
 }
 
 func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID string, in DirectoryInput) (Directory, error) {
@@ -52,6 +58,9 @@ func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID st
 		if _, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID}); err != nil {
 			return err
 		}
+		if err := validateDirectorySSOTx(ctx, q, spaceID, in.SSOConnectionID, in.SSOIdentityClaim); err != nil {
+			return err
+		}
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
 		}
@@ -59,6 +68,7 @@ func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID st
 			ID: string(ids.New[ids.ID]("dir")), SpaceID: spaceID, Name: name,
 			TokenPrefix: directoryTokenPrefix(token), TokenHash: digest(token),
 			ConfiguredByMemberID: pgtype.Text{String: actorMemberID, Valid: true}, ConfiguredByUserID: actorUserID(ctx, actorMemberID),
+			SsoConnectionID: optionalDirectoryText(in.SSOConnectionID), SsoIdentityClaim: optionalDirectoryText(in.SSOIdentityClaim),
 		})
 		if err != nil {
 			return err
@@ -148,8 +158,11 @@ func (s *Service) RotateDirectoryToken(ctx context.Context, actorMemberID, space
 
 func (s *Service) UpdateDirectory(ctx context.Context, actorMemberID, spaceID, directoryID string, in DirectoryUpdate, version int64) (Directory, error) {
 	name := strings.TrimSpace(in.Name)
-	if name == "" || len(name) > 128 {
+	if len(name) > 128 || name == "" && in.SSOConnectionID == nil && in.SSOIdentityClaim == nil {
 		return Directory{}, apierr.New("validation_failed", "directory name is invalid")
+	}
+	if (in.SSOConnectionID == nil) != (in.SSOIdentityClaim == nil) {
+		return Directory{}, apierr.New("validation_failed", "sso_connection_id and sso_identity_claim must be provided together")
 	}
 	var out Directory
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -169,10 +182,23 @@ func (s *Service) UpdateDirectory(ctx context.Context, actorMemberID, spaceID, d
 		if row.Version != version {
 			return apierr.New("precondition_failed", "directory version does not match")
 		}
+		connectionID, claim := row.SsoConnectionID.String, row.SsoIdentityClaim.String
+		if in.SSOConnectionID != nil {
+			connectionID, claim = *in.SSOConnectionID, *in.SSOIdentityClaim
+			if err := validateDirectorySSOTx(ctx, q, spaceID, connectionID, claim); err != nil {
+				return err
+			}
+		}
+		if name == "" {
+			name = row.Name
+		}
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
 		}
-		updated, err := q.UpdateDirectoryName(ctx, db.UpdateDirectoryNameParams{ID: row.ID, Name: name, Version: row.Version})
+		updated, err := q.UpdateDirectoryConfiguration(ctx, db.UpdateDirectoryConfigurationParams{
+			ID: row.ID, Name: name, Version: row.Version,
+			SsoConnectionID: optionalDirectoryText(connectionID), SsoIdentityClaim: optionalDirectoryText(claim),
+		})
 		if err != nil {
 			return err
 		}
@@ -243,11 +269,11 @@ func directoryTokenPrefix(token string) string {
 }
 
 func directoryFromRow(row db.Directory) Directory {
-	return Directory{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Status: row.Status, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	return Directory{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Status: row.Status, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time, SSOConnectionID: row.SsoConnectionID.String, SSOIdentityClaim: row.SsoIdentityClaim.String}
 }
 
 func directoryFromListRow(row db.ListDirectoriesRow) Directory {
-	return Directory{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Status: row.Status, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	return Directory{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Status: row.Status, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time, SSOConnectionID: row.SsoConnectionID.String, SSOIdentityClaim: row.SsoIdentityClaim.String}
 }
 
 func actorUserID(ctx context.Context, memberID string) pgtype.Text {

@@ -93,9 +93,9 @@ func (q *Queries) CountLiveGroupChildren(ctx context.Context, arg CountLiveGroup
 }
 
 const createDirectory = `-- name: CreateDirectory :one
-INSERT INTO directories (id, space_id, name, token_prefix, token_hash, configured_by_member_id, configured_by_user_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+INSERT INTO directories (id, space_id, name, token_prefix, token_hash, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 `
 
 type CreateDirectoryParams struct {
@@ -106,6 +106,8 @@ type CreateDirectoryParams struct {
 	TokenHash            []byte      `json:"token_hash"`
 	ConfiguredByMemberID pgtype.Text `json:"configured_by_member_id"`
 	ConfiguredByUserID   pgtype.Text `json:"configured_by_user_id"`
+	SsoConnectionID      pgtype.Text `json:"sso_connection_id"`
+	SsoIdentityClaim     pgtype.Text `json:"sso_identity_claim"`
 }
 
 func (q *Queries) CreateDirectory(ctx context.Context, arg CreateDirectoryParams) (Directory, error) {
@@ -117,6 +119,8 @@ func (q *Queries) CreateDirectory(ctx context.Context, arg CreateDirectoryParams
 		arg.TokenHash,
 		arg.ConfiguredByMemberID,
 		arg.ConfiguredByUserID,
+		arg.SsoConnectionID,
+		arg.SsoIdentityClaim,
 	)
 	var i Directory
 	err := row.Scan(
@@ -131,6 +135,8 @@ func (q *Queries) CreateDirectory(ctx context.Context, arg CreateDirectoryParams
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
@@ -327,7 +333,7 @@ func (q *Queries) DisableDirectory(ctx context.Context, arg DisableDirectoryPara
 }
 
 const getDirectory = `-- name: GetDirectory :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE id = $1
 `
 
@@ -350,12 +356,14 @@ func (q *Queries) GetDirectory(ctx context.Context, arg GetDirectoryParams) (Dir
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
 
 const getDirectoryByTokenHash = `-- name: GetDirectoryByTokenHash :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE token_hash = $1
 `
 
@@ -378,6 +386,38 @@ func (q *Queries) GetDirectoryByTokenHash(ctx context.Context, arg GetDirectoryB
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
+	)
+	return i, err
+}
+
+const getDirectoryForSSOConnection = `-- name: GetDirectoryForSSOConnection :one
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim FROM directories WHERE sso_connection_id = $1
+ORDER BY (status = 'active') DESC, id LIMIT 1
+`
+
+type GetDirectoryForSSOConnectionParams struct {
+	ConnectionID pgtype.Text `json:"connection_id"`
+}
+
+func (q *Queries) GetDirectoryForSSOConnection(ctx context.Context, arg GetDirectoryForSSOConnectionParams) (Directory, error) {
+	row := q.db.QueryRow(ctx, getDirectoryForSSOConnection, arg.ConnectionID)
+	var i Directory
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.TokenPrefix,
+		&i.TokenHash,
+		&i.Status,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ConfiguredByMemberID,
+		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
@@ -432,6 +472,50 @@ func (q *Queries) GetDirectoryGroupByID(ctx context.Context, arg GetDirectoryGro
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+	)
+	return i, err
+}
+
+const getDirectoryLoginIdentity = `-- name: GetDirectoryLoginIdentity :one
+SELECT du.id AS directory_user_id, du.user_id, du.member_id, u.email, u.display_name, u.status, u.created_at
+FROM directory_users du
+JOIN users u ON u.id = du.user_id
+JOIN members m ON m.id = du.member_id AND m.space_id = $1
+JOIN user_members um ON um.user_id = du.user_id AND um.member_id = du.member_id
+WHERE du.directory_id = $2 AND du.id = $3
+  AND du.active AND du.deleted_at IS NULL AND u.status = 'active' AND u.disabled_at IS NULL
+  AND m.type = 'human' AND m.status = 'active'
+  AND um.status = 'active' AND um.revoked_at IS NULL
+  AND (um.expires_at IS NULL OR um.expires_at > now())
+`
+
+type GetDirectoryLoginIdentityParams struct {
+	SpaceID     string `json:"space_id"`
+	DirectoryID string `json:"directory_id"`
+	ID          string `json:"id"`
+}
+
+type GetDirectoryLoginIdentityRow struct {
+	DirectoryUserID string             `json:"directory_user_id"`
+	UserID          string             `json:"user_id"`
+	MemberID        string             `json:"member_id"`
+	Email           string             `json:"email"`
+	DisplayName     string             `json:"display_name"`
+	Status          string             `json:"status"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+func (q *Queries) GetDirectoryLoginIdentity(ctx context.Context, arg GetDirectoryLoginIdentityParams) (GetDirectoryLoginIdentityRow, error) {
+	row := q.db.QueryRow(ctx, getDirectoryLoginIdentity, arg.SpaceID, arg.DirectoryID, arg.ID)
+	var i GetDirectoryLoginIdentityRow
+	err := row.Scan(
+		&i.DirectoryUserID,
+		&i.UserID,
+		&i.MemberID,
+		&i.Email,
+		&i.DisplayName,
+		&i.Status,
+		&i.CreatedAt,
 	)
 	return i, err
 }
@@ -518,7 +602,7 @@ func (q *Queries) GetSCIMStandardRoot(ctx context.Context, arg GetSCIMStandardRo
 }
 
 const listDirectories = `-- name: ListDirectories :many
-SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -538,6 +622,8 @@ type ListDirectoriesRow struct {
 	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
 	ConfiguredByMemberID pgtype.Text        `json:"configured_by_member_id"`
 	ConfiguredByUserID   pgtype.Text        `json:"configured_by_user_id"`
+	SsoConnectionID      pgtype.Text        `json:"sso_connection_id"`
+	SsoIdentityClaim     pgtype.Text        `json:"sso_identity_claim"`
 }
 
 func (q *Queries) ListDirectories(ctx context.Context, arg ListDirectoriesParams) ([]ListDirectoriesRow, error) {
@@ -560,6 +646,8 @@ func (q *Queries) ListDirectories(ctx context.Context, arg ListDirectoriesParams
 			&i.UpdatedAt,
 			&i.ConfiguredByMemberID,
 			&i.ConfiguredByUserID,
+			&i.SsoConnectionID,
+			&i.SsoIdentityClaim,
 		); err != nil {
 			return nil, err
 		}
@@ -796,7 +884,7 @@ func (q *Queries) ListDirectoryUsersForLock(ctx context.Context, arg ListDirecto
 }
 
 const lockDirectory = `-- name: LockDirectory :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 FROM directories WHERE id = $1 FOR UPDATE
 `
 
@@ -819,12 +907,14 @@ func (q *Queries) LockDirectory(ctx context.Context, arg LockDirectoryParams) (D
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
 
 const lockDirectoryForRead = `-- name: LockDirectoryForRead :one
-SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id FROM directories WHERE id = $1 FOR SHARE
+SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim FROM directories WHERE id = $1 FOR SHARE
 `
 
 type LockDirectoryForReadParams struct {
@@ -846,6 +936,8 @@ func (q *Queries) LockDirectoryForRead(ctx context.Context, arg LockDirectoryFor
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
@@ -962,7 +1054,7 @@ UPDATE directories SET token_prefix = $1, token_hash = $2,
     version = version + 1, updated_at = now(),
     configured_by_member_id = $3, configured_by_user_id = $4
 WHERE id = $5 AND status = 'active' AND version = $6
-RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
+RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
 `
 
 type RotateDirectoryTokenParams struct {
@@ -996,6 +1088,8 @@ func (q *Queries) RotateDirectoryToken(ctx context.Context, arg RotateDirectoryT
 		&i.UpdatedAt,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
 	)
 	return i, err
 }
@@ -1032,6 +1126,47 @@ func (q *Queries) TombstoneDirectoryUser(ctx context.Context, arg TombstoneDirec
 	return i, err
 }
 
+const updateDirectoryConfiguration = `-- name: UpdateDirectoryConfiguration :one
+UPDATE directories SET name = $1, sso_connection_id = $2, sso_identity_claim = $3, version = version + 1, updated_at = now()
+WHERE id = $4 AND status = 'active' AND version = $5
+RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
+`
+
+type UpdateDirectoryConfigurationParams struct {
+	Name             string      `json:"name"`
+	SsoConnectionID  pgtype.Text `json:"sso_connection_id"`
+	SsoIdentityClaim pgtype.Text `json:"sso_identity_claim"`
+	ID               string      `json:"id"`
+	Version          int64       `json:"version"`
+}
+
+func (q *Queries) UpdateDirectoryConfiguration(ctx context.Context, arg UpdateDirectoryConfigurationParams) (Directory, error) {
+	row := q.db.QueryRow(ctx, updateDirectoryConfiguration,
+		arg.Name,
+		arg.SsoConnectionID,
+		arg.SsoIdentityClaim,
+		arg.ID,
+		arg.Version,
+	)
+	var i Directory
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.TokenPrefix,
+		&i.TokenHash,
+		&i.Status,
+		&i.Version,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ConfiguredByMemberID,
+		&i.ConfiguredByUserID,
+		&i.SsoConnectionID,
+		&i.SsoIdentityClaim,
+	)
+	return i, err
+}
+
 const updateDirectoryGroup = `-- name: UpdateDirectoryGroup :one
 UPDATE directory_groups SET display_name = $1, version = version + 1, updated_at = now()
 WHERE directory_id = $2 AND id = $3 AND version = $4
@@ -1063,37 +1198,6 @@ func (q *Queries) UpdateDirectoryGroup(ctx context.Context, arg UpdateDirectoryG
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
-	)
-	return i, err
-}
-
-const updateDirectoryName = `-- name: UpdateDirectoryName :one
-UPDATE directories SET name = $1, version = version + 1, updated_at = now()
-WHERE id = $2 AND status = 'active' AND version = $3
-RETURNING id, space_id, name, token_prefix, token_hash, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id
-`
-
-type UpdateDirectoryNameParams struct {
-	Name    string `json:"name"`
-	ID      string `json:"id"`
-	Version int64  `json:"version"`
-}
-
-func (q *Queries) UpdateDirectoryName(ctx context.Context, arg UpdateDirectoryNameParams) (Directory, error) {
-	row := q.db.QueryRow(ctx, updateDirectoryName, arg.Name, arg.ID, arg.Version)
-	var i Directory
-	err := row.Scan(
-		&i.ID,
-		&i.SpaceID,
-		&i.Name,
-		&i.TokenPrefix,
-		&i.TokenHash,
-		&i.Status,
-		&i.Version,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.ConfiguredByMemberID,
-		&i.ConfiguredByUserID,
 	)
 	return i, err
 }

@@ -11,6 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const associateExternalDirectoryUser = `-- name: AssociateExternalDirectoryUser :one
+UPDATE external_identities SET directory_user_id = $1
+WHERE id = $2 AND directory_user_id IS NULL
+RETURNING id
+`
+
+type AssociateExternalDirectoryUserParams struct {
+	DirectoryUserID pgtype.Text `json:"directory_user_id"`
+	ID              string      `json:"id"`
+}
+
+func (q *Queries) AssociateExternalDirectoryUser(ctx context.Context, arg AssociateExternalDirectoryUserParams) (string, error) {
+	row := q.db.QueryRow(ctx, associateExternalDirectoryUser, arg.DirectoryUserID, arg.ID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
+}
+
 const consumeSSOState = `-- name: ConsumeSSOState :exec
 UPDATE sso_states SET consumed_at = now()
 WHERE id = $1 AND consumed_at IS NULL
@@ -26,16 +44,17 @@ func (q *Queries) ConsumeSSOState(ctx context.Context, arg ConsumeSSOStateParams
 }
 
 const createExternalIdentity = `-- name: CreateExternalIdentity :one
-INSERT INTO external_identities (id, user_id, issuer, subject)
-VALUES ($1, $2, $3, $4)
-RETURNING id, user_id, issuer, subject, created_at
+INSERT INTO external_identities (id, user_id, issuer, subject, directory_user_id)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, user_id, issuer, subject, created_at, directory_user_id
 `
 
 type CreateExternalIdentityParams struct {
-	ID      string `json:"id"`
-	UserID  string `json:"user_id"`
-	Issuer  string `json:"issuer"`
-	Subject string `json:"subject"`
+	ID              string      `json:"id"`
+	UserID          string      `json:"user_id"`
+	Issuer          string      `json:"issuer"`
+	Subject         string      `json:"subject"`
+	DirectoryUserID pgtype.Text `json:"directory_user_id"`
 }
 
 func (q *Queries) CreateExternalIdentity(ctx context.Context, arg CreateExternalIdentityParams) (ExternalIdentity, error) {
@@ -44,6 +63,7 @@ func (q *Queries) CreateExternalIdentity(ctx context.Context, arg CreateExternal
 		arg.UserID,
 		arg.Issuer,
 		arg.Subject,
+		arg.DirectoryUserID,
 	)
 	var i ExternalIdentity
 	err := row.Scan(
@@ -52,6 +72,7 @@ func (q *Queries) CreateExternalIdentity(ctx context.Context, arg CreateExternal
 		&i.Issuer,
 		&i.Subject,
 		&i.CreatedAt,
+		&i.DirectoryUserID,
 	)
 	return i, err
 }
@@ -220,7 +241,7 @@ func (q *Queries) DisableSSOConnection(ctx context.Context, arg DisableSSOConnec
 }
 
 const getExternalIdentity = `-- name: GetExternalIdentity :one
-SELECT id, user_id, issuer, subject, created_at
+SELECT id, user_id, issuer, subject, created_at, directory_user_id
 FROM external_identities
 WHERE issuer = $1 AND subject = $2
 `
@@ -239,6 +260,7 @@ func (q *Queries) GetExternalIdentity(ctx context.Context, arg GetExternalIdenti
 		&i.Issuer,
 		&i.Subject,
 		&i.CreatedAt,
+		&i.DirectoryUserID,
 	)
 	return i, err
 }
