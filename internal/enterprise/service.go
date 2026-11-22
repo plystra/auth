@@ -239,24 +239,11 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		if s.Authorization == nil {
 			return apierr.New("unavailable", "authorization is unavailable")
 		}
-		decision, err := s.Authorization.CheckMutationTx(ctx, q, authorization.CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.connections:manage", ResourceSpace: spaceID,
-		})
-		if err != nil {
+		if err := s.Authorization.CheckSSOConnectionCreateTx(ctx, q, actorMemberID, spaceID, connectionID, in.RoleMappings); err != nil {
 			return err
-		}
-		if decision.Effect != engine.Allow {
-			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 		}
 		if _, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID}); err != nil {
 			return err
-		}
-		for _, roleID := range uniqueRoleIDs(in.RoleMappings) {
-			if _, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: roleID, SpaceID: spaceID}); errors.Is(err, pgx.ErrNoRows) {
-				return apierr.New("validation_failed", "role mapping references a role outside this Space")
-			} else if err != nil {
-				return err
-			}
 		}
 		if _, required := stepup.RequirementFromContext(ctx); required {
 			if s.StepUp == nil {
@@ -1439,19 +1426,6 @@ func displayName(claims idTokenClaims, email string) string {
 		name = name[:128]
 	}
 	return name
-}
-
-func uniqueRoleIDs(mappings map[string]string) []string {
-	seen := make(map[string]struct{}, len(mappings))
-	roles := make([]string, 0, len(mappings))
-	for _, roleID := range mappings {
-		if _, ok := seen[roleID]; ok {
-			continue
-		}
-		seen[roleID] = struct{}{}
-		roles = append(roles, roleID)
-	}
-	return roles
 }
 
 func connectionFromRow(row db.CreateSSOConnectionRow) Connection {
