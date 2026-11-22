@@ -111,7 +111,7 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 		t.Fatalf("SCIM version conflict = %d %s", wrongResponse.Code, wrongResponse.Body.String())
 	}
 
-	patchUser := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Users/"+user.ID, strings.NewReader(`{"active":false}`))
+	patchUser := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Users/"+user.ID, strings.NewReader(`{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"Replace","path":"active","value":false}]}`))
 	patchUser.Header.Set("Authorization", "Bearer "+directory.Token)
 	patchUser.Header.Set("Content-Type", "application/scim+json")
 	patchUser.Header.Set("If-Match", `W/"1"`)
@@ -183,6 +183,15 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	mux.ServeHTTP(putGroupResponse, putGroup)
 	if putGroupResponse.Code != http.StatusOK {
 		t.Fatalf("SCIM group replace = %d %s", putGroupResponse.Code, putGroupResponse.Body.String())
+	}
+	patchGroup := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Groups/"+group.ID, strings.NewReader(`{"Operations":[{"op":"replace","path":"displayName","value":"Engineering Final"}]}`))
+	patchGroup.Header.Set("Authorization", "Bearer "+directory.Token)
+	patchGroup.Header.Set("Content-Type", "application/scim+json")
+	patchGroup.Header.Set("If-Match", `W/"2"`)
+	patchGroupResponse := httptest.NewRecorder()
+	mux.ServeHTTP(patchGroupResponse, patchGroup)
+	if patchGroupResponse.Code != http.StatusOK || !strings.Contains(patchGroupResponse.Body.String(), "Engineering Final") {
+		t.Fatalf("SCIM group PATCH operations = %d %s", patchGroupResponse.Code, patchGroupResponse.Body.String())
 	}
 	var manualCount int
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM group_members WHERE group_id = (SELECT group_id FROM directory_groups WHERE id = $1) AND member_id = $2 AND source = 'manual'`, group.ID, owner.ID).Scan(&manualCount); err != nil {

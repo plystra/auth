@@ -511,7 +511,12 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		var updated enterprise.SCIMUser
 		if r.Method == http.MethodPatch {
-			updated, err = h.Enterprise.PatchSCIMUser(r.Context(), directoryID, token, resourceID, body.input(true), version)
+			input, inputErr := body.patchInput()
+			if inputErr != nil {
+				writeSCIMError(w, inputErr)
+				return
+			}
+			updated, err = h.Enterprise.PatchSCIMUser(r.Context(), directoryID, token, resourceID, input, version)
 		} else {
 			updated, err = h.Enterprise.ReplaceSCIMUser(r.Context(), directoryID, token, resourceID, body.input(false), version)
 		}
@@ -562,7 +567,12 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			writeSCIMError(w, err)
 			return
 		}
-		created, err := h.Enterprise.CreateSCIMGroup(r.Context(), directoryID, token, body.input())
+		input, inputErr := body.input()
+		if inputErr != nil {
+			writeSCIMError(w, inputErr)
+			return
+		}
+		created, err := h.Enterprise.CreateSCIMGroup(r.Context(), directoryID, token, input)
 		if err != nil {
 			writeSCIMError(w, err)
 			return
@@ -608,7 +618,15 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			writeSCIMError(w, err)
 			return
 		}
-		updated, err := h.Enterprise.ReplaceSCIMGroup(r.Context(), directoryID, token, resourceID, body.input(), version)
+		input, inputErr := body.input()
+		if r.Method == http.MethodPatch {
+			input, inputErr = body.patchInput()
+		}
+		if inputErr != nil {
+			writeSCIMError(w, inputErr)
+			return
+		}
+		updated, err := h.Enterprise.ReplaceSCIMGroup(r.Context(), directoryID, token, resourceID, input, version)
 		if err != nil {
 			writeSCIMError(w, err)
 			return
@@ -635,11 +653,12 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type scimUserBody struct {
-	Schemas     []string `json:"schemas,omitempty"`
-	ExternalID  string   `json:"externalId,omitempty"`
-	UserName    string   `json:"userName,omitempty"`
-	DisplayName string   `json:"displayName,omitempty"`
-	Active      *bool    `json:"active,omitempty"`
+	Schemas     []string        `json:"schemas,omitempty"`
+	ExternalID  string          `json:"externalId,omitempty"`
+	UserName    string          `json:"userName,omitempty"`
+	DisplayName string          `json:"displayName,omitempty"`
+	Active      *bool           `json:"active,omitempty"`
+	Operations  []scimOperation `json:"Operations,omitempty"`
 }
 
 func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
@@ -651,6 +670,67 @@ func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
 	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: b.DisplayName, Active: active, ActiveSet: activeSet || !patch}
 }
 
+func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
+	input := b.input(true)
+	for _, operation := range b.Operations {
+		op := strings.ToLower(strings.TrimSpace(operation.Op))
+		path := strings.ToLower(strings.TrimSpace(operation.Path))
+		if op != "add" && op != "replace" && op != "remove" {
+			return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH operation is unsupported")
+		}
+		if path == "" {
+			object, ok := operation.Value.(map[string]any)
+			if !ok {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH value is invalid")
+			}
+			if value, ok := object["userName"].(string); ok {
+				input.UserName = value
+			}
+			if value, ok := object["displayName"].(string); ok {
+				input.DisplayName = value
+			}
+			if value, ok := object["active"].(bool); ok {
+				input.Active, input.ActiveSet = value, true
+			}
+			continue
+		}
+		switch path {
+		case "username":
+			if op == "remove" {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "userName cannot be removed")
+			}
+			value, ok := operation.Value.(string)
+			if !ok {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "userName must be a string")
+			}
+			input.UserName = value
+		case "displayname":
+			if op == "remove" {
+				input.DisplayName = ""
+				continue
+			}
+			value, ok := operation.Value.(string)
+			if !ok {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "displayName must be a string")
+			}
+			input.DisplayName = value
+		case "active":
+			if op == "remove" {
+				input.Active, input.ActiveSet = false, true
+				continue
+			}
+			value, ok := operation.Value.(bool)
+			if !ok {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "active must be a boolean")
+			}
+			input.Active, input.ActiveSet = value, true
+		default:
+			return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH path is unsupported")
+		}
+	}
+	return input, nil
+}
+
 type scimGroupBody struct {
 	Schemas     []string `json:"schemas,omitempty"`
 	ExternalID  string   `json:"externalId,omitempty"`
@@ -658,14 +738,101 @@ type scimGroupBody struct {
 	Members     []struct {
 		Value string `json:"value"`
 	} `json:"members,omitempty"`
+	Operations []scimOperation `json:"Operations,omitempty"`
 }
 
-func (b scimGroupBody) input() enterprise.SCIMGroupInput {
+type scimOperation struct {
+	Op    string `json:"op"`
+	Path  string `json:"path,omitempty"`
+	Value any    `json:"value,omitempty"`
+}
+
+func (b scimGroupBody) input() (enterprise.SCIMGroupInput, error) {
 	members := make([]string, 0, len(b.Members))
 	for _, member := range b.Members {
 		members = append(members, member.Value)
 	}
-	return enterprise.SCIMGroupInput{ExternalID: b.ExternalID, DisplayName: b.DisplayName, MemberIDs: members}
+	return enterprise.SCIMGroupInput{ExternalID: b.ExternalID, DisplayName: b.DisplayName, MemberIDs: members}, nil
+}
+
+func (b scimGroupBody) patchInput() (enterprise.SCIMGroupInput, error) {
+	input, err := b.input()
+	if err != nil {
+		return enterprise.SCIMGroupInput{}, err
+	}
+	for _, operation := range b.Operations {
+		op := strings.ToLower(strings.TrimSpace(operation.Op))
+		path := strings.ToLower(strings.TrimSpace(operation.Path))
+		if op != "add" && op != "replace" && op != "remove" {
+			return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "SCIM PATCH operation is unsupported")
+		}
+		switch path {
+		case "displayname":
+			if op == "remove" {
+				return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "displayName cannot be removed")
+			}
+			value, ok := operation.Value.(string)
+			if !ok {
+				return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "displayName must be a string")
+			}
+			input.DisplayName = value
+		case "members":
+			values, ok := scimMemberValues(operation.Value)
+			if !ok {
+				return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "members must contain SCIM user values")
+			}
+			switch op {
+			case "replace":
+				input.MemberIDs = values
+			case "add":
+				input.MemberIDs = append(input.MemberIDs, values...)
+			case "remove":
+				input.MemberIDs = removeSCIMMembers(input.MemberIDs, values)
+			}
+		default:
+			return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "SCIM PATCH path is unsupported")
+		}
+	}
+	return input, nil
+}
+
+func scimMemberValues(raw any) ([]string, bool) {
+	var values []any
+	switch value := raw.(type) {
+	case []any:
+		values = value
+	case map[string]any:
+		values = []any{value}
+	default:
+		return nil, false
+	}
+	out := make([]string, 0, len(values))
+	for _, rawValue := range values {
+		object, ok := rawValue.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		value, ok := object["value"].(string)
+		if !ok || strings.TrimSpace(value) == "" {
+			return nil, false
+		}
+		out = append(out, value)
+	}
+	return out, true
+}
+
+func removeSCIMMembers(current, remove []string) []string {
+	blocked := make(map[string]struct{}, len(remove))
+	for _, value := range remove {
+		blocked[value] = struct{}{}
+	}
+	out := make([]string, 0, len(current))
+	for _, value := range current {
+		if _, ok := blocked[value]; !ok {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func scimBearerToken(r *http.Request) (string, error) {
