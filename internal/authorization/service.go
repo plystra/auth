@@ -652,7 +652,11 @@ func (s *Service) ListChildren(ctx context.Context, id string) ([]Space, error) 
 }
 
 func (s *Service) GetMemberForUser(ctx context.Context, userID, spaceID string) (Member, error) {
-	row, err := s.Store.Queries().GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: spaceID})
+	return s.GetMemberForUserTx(ctx, s.Store.Queries(), userID, spaceID)
+}
+
+func (s *Service) GetMemberForUserTx(ctx context.Context, q *db.Queries, userID, spaceID string) (Member, error) {
+	row, err := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: spaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, apierr.New("PERMISSION_DENIED", "The current user is not a member of this Space.")
 	}
@@ -692,7 +696,11 @@ func (s *Service) ListMembersForUser(ctx context.Context, userID, memberType str
 }
 
 func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Member, error) {
-	row, err := s.Store.Queries().GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
+	return s.GetMemberTx(ctx, s.Store.Queries(), memberID, spaceID)
+}
+
+func (s *Service) GetMemberTx(ctx context.Context, q *db.Queries, memberID, spaceID string) (Member, error) {
+	row, err := q.GetMemberInSpace(ctx, db.GetMemberInSpaceParams{ID: memberID, SpaceID: spaceID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, apierr.New("SUBJECT_NOT_FOUND", "The subject is not a member of the requested Space.")
 	}
@@ -709,7 +717,11 @@ func (s *Service) GetMember(ctx context.Context, memberID, spaceID string) (Memb
 // resource Space as the member's home Space. The authorization engine applies
 // the ancestor and scope rules after this lookup.
 func (s *Service) GetMemberAnySpace(ctx context.Context, memberID string) (Member, error) {
-	row, err := s.Store.Queries().GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	return s.GetMemberAnySpaceTx(ctx, s.Store.Queries(), memberID)
+}
+
+func (s *Service) GetMemberAnySpaceTx(ctx context.Context, q *db.Queries, memberID string) (Member, error) {
+	row, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Member{}, apierr.New("SUBJECT_NOT_FOUND", "The subject member was not found.")
 	}
@@ -817,7 +829,11 @@ func (s *Service) ResourceGroupForMember(ctx context.Context, memberID, spaceID 
 }
 
 func (s *Service) UserBoundToMember(ctx context.Context, userID, memberID string) (bool, error) {
-	row, err := s.Store.Queries().GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
+	return s.UserBoundToMemberTx(ctx, s.Store.Queries(), userID, memberID)
+}
+
+func (s *Service) UserBoundToMemberTx(ctx context.Context, q *db.Queries, userID, memberID string) (bool, error) {
+	row, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

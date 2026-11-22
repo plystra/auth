@@ -270,7 +270,8 @@ type businessAuditFixture struct {
 
 func newBusinessAuditFixture(t *testing.T) *businessAuditFixture {
 	t.Helper()
-	st, authz, owner, spaceID, rawKey, sessions := newServerFixture(t)
+	// A write transaction must be sufficient for every subject lookup.
+	st, authz, owner, spaceID, rawKey, sessions := newServerFixtureWithPoolLimit(t, 1)
 	for _, statement := range []string{
 		`UPDATE applications SET manifest_permissions = manifest_permissions || '["auth.audit:write"]'::jsonb`,
 		`UPDATE application_installations SET approved_permissions = approved_permissions || '["auth.audit:write"]'::jsonb`,
@@ -303,7 +304,9 @@ func (f *businessAuditFixture) post(body map[string]any, idempotencyKey string) 
 	if err != nil {
 		f.t.Fatal(err)
 	}
-	req := httptest.NewRequest(http.MethodPost, "/server/v1/audit/events", strings.NewReader(string(payload)))
+	ctx, cancel := context.WithTimeout(f.t.Context(), 10*time.Second)
+	defer cancel()
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/server/v1/audit/events", strings.NewReader(string(payload)))
 	req.Header.Set("Authorization", "Bearer "+f.rawKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Request-Id", "business-audit-test")

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,13 +410,27 @@ func TestTokenIntrospectionRejectsInvalidExpiredAndRevokedTokens(t *testing.T) {
 
 func newServerFixture(t *testing.T) (*store.Store, *authorization.Service, authorization.Member, string, string, *session.Service) {
 	t.Helper()
+	return newServerFixtureWithPoolLimit(t, 0)
+}
+
+func newServerFixtureWithPoolLimit(t *testing.T, maxConns int) (*store.Store, *authorization.Service, authorization.Member, string, string, *session.Service) {
+	t.Helper()
 	ctx := context.Background()
 	database, err := serverDB.Clone(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = database.Close(context.Background()) })
-	st, err := store.Open(ctx, database.URL)
+	u, err := url.Parse(database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if maxConns > 0 {
+		opts := u.Query()
+		opts.Set("pool_max_conns", fmt.Sprint(maxConns))
+		u.RawQuery = opts.Encode()
+	}
+	st, err := store.Open(ctx, u.String())
 	if err != nil {
 		t.Fatal(err)
 	}

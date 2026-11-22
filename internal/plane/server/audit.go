@@ -85,7 +85,7 @@ func (a *API) writeBusinessAudit(ctx context.Context, in *businessAuditInput) (*
 				return err
 			}
 		}
-		subject, err := a.resolveSubject(ctx, key, in.Body.Subject, spaceID)
+		subject, err := a.resolveSubjectWithQueries(ctx, q, key, in.Body.Subject, spaceID)
 		if err != nil {
 			return err
 		}

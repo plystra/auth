@@ -411,18 +411,36 @@ func (a *API) keyOperationDecision(ctx context.Context, key application.Key, per
 }
 
 func (a *API) resolveSubject(ctx context.Context, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
-	if subject.Token != "" {
-		if strings.HasPrefix(subject.Token, "ply_ag_") && a.Agents != nil {
-			credential, err := a.Agents.AuthenticateKey(ctx, subject.Token)
-			if err != nil {
-				return resolvedSubject{}, err
-			}
-			return resolvedSubject{ID: credential.MemberID, Type: "agent", SpaceID: credential.SpaceID}, nil
+	return a.resolveSubjectWithQueries(ctx, nil, key, subject, spaceID)
+}
+
+// Mutations supply their transaction's queries. For ordinary checks, only a
+// native Agent key needs a transaction to record credential usage.
+func (a *API) resolveSubjectWithQueries(ctx context.Context, q *db.Queries, key application.Key, subject CheckSubject, spaceID string) (resolvedSubject, error) {
+	if strings.HasPrefix(subject.Token, "ply_ag_") && a.Agents != nil {
+		var credential agent.Credential
+		var err error
+		if q == nil {
+			credential, err = a.Agents.AuthenticateKey(ctx, subject.Token)
+		} else {
+			credential, err = a.Agents.AuthenticateKeyTx(ctx, q, subject.Token)
 		}
+		if err != nil {
+			return resolvedSubject{}, err
+		}
+		return resolvedSubject{ID: credential.MemberID, Type: "agent", SpaceID: credential.SpaceID}, nil
+	}
+	if a.Authorization == nil || a.Authorization.Store == nil {
+		return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
+	}
+	if q == nil {
+		q = a.Authorization.Store.Queries()
+	}
+	if subject.Token != "" {
 		if a.Sessions == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
 		}
-		claims, active, err := a.Sessions.Introspect(ctx, subject.Token, key.ClientID)
+		claims, active, err := a.Sessions.IntrospectTx(ctx, q, subject.Token, key.ClientID)
 		if err != nil {
 			return resolvedSubject{}, err
 		}
@@ -435,24 +453,21 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 			}
 			return resolvedSubject{ID: claims.Subject, Type: "agent", SpaceID: claims.SpaceID, Scopes: claims.Scopes}, nil
 		}
-		if a.Authorization == nil {
-			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
-		}
 		if claims.MemberID != "" && subject.MemberID != "" && subject.MemberID != claims.MemberID {
 			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the subject token and member do not match")
 		}
 		var member authorization.Member
 		if claims.MemberID != "" {
 			if spaceID == "" {
-				member, err = a.Authorization.GetMemberAnySpace(ctx, claims.MemberID)
+				member, err = a.Authorization.GetMemberAnySpaceTx(ctx, q, claims.MemberID)
 			} else {
-				member, err = a.Authorization.GetMember(ctx, claims.MemberID, spaceID)
+				member, err = a.Authorization.GetMemberTx(ctx, q, claims.MemberID, spaceID)
 			}
 		} else {
 			if spaceID == "" {
 				return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "resource.space_id is required when the subject has no selected member")
 			}
-			member, err = a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
+			member, err = a.Authorization.GetMemberForUserTx(ctx, q, claims.Subject, spaceID)
 		}
 		if err != nil {
 			return resolvedSubject{}, err
@@ -468,21 +483,18 @@ func (a *API) resolveSubject(ctx context.Context, key application.Key, subject C
 	if !key.AllowSubjectAssertion {
 		return resolvedSubject{}, apierr.New("VALIDATION_FAILED", "member_id subject assertions are not enabled for this API key")
 	}
-	if a.Authorization == nil {
-		return resolvedSubject{ID: subject.MemberID, Type: "human", SpaceID: spaceID}, nil
-	}
 	var member authorization.Member
 	var err error
 	if spaceID == "" {
-		member, err = a.Authorization.GetMemberAnySpace(ctx, subject.MemberID)
+		member, err = a.Authorization.GetMemberAnySpaceTx(ctx, q, subject.MemberID)
 	} else {
-		member, err = a.Authorization.GetMember(ctx, subject.MemberID, spaceID)
+		member, err = a.Authorization.GetMemberTx(ctx, q, subject.MemberID, spaceID)
 	}
 	if err != nil {
 		return resolvedSubject{}, err
 	}
 	if subject.UserID != "" {
-		bound, err := a.Authorization.UserBoundToMember(ctx, subject.UserID, member.ID)
+		bound, err := a.Authorization.UserBoundToMemberTx(ctx, q, subject.UserID, member.ID)
 		if err != nil {
 			return resolvedSubject{}, err
 		}
