@@ -25,6 +25,16 @@ func HumanActorUserID(ctx context.Context, memberID string) string {
 // This only acquires locks; the directory credential and positive delta must be
 // checked separately in the same transaction.
 func LockProvisioningTx(ctx context.Context, q *db.Queries, spaceID string, userIDs, memberIDs []string) error {
+	if err := lockProvisioningUsersTx(ctx, q, userIDs); err != nil {
+		return err
+	}
+	if err := lockAuthorizationMembersTx(ctx, q, memberIDs...); err != nil {
+		return err
+	}
+	return lockAuthorizationNodesTx(ctx, q, spaceID, "")
+}
+
+func lockProvisioningUsersTx(ctx context.Context, q *db.Queries, userIDs []string) error {
 	users := slices.Clone(userIDs)
 	slices.Sort(users)
 	for _, id := range slices.Compact(users) {
@@ -34,10 +44,7 @@ func LockProvisioningTx(ctx context.Context, q *db.Queries, spaceID string, user
 			}
 		}
 	}
-	if err := lockAuthorizationMembersTx(ctx, q, memberIDs...); err != nil {
-		return err
-	}
-	return lockAuthorizationNodesTx(ctx, q, spaceID, "")
+	return nil
 }
 
 // ApplyDirectoryAuthorityTx uses the ordinary before/after evaluator for both

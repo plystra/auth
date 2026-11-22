@@ -81,14 +81,15 @@ const createSSOConnection = `-- name: CreateSSOConnection :one
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
     $8, $9, $10, 'active',
     $11, $12, $13,
-    $14, $15
+    $14, $15,
+    $16, $17
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
@@ -111,6 +112,8 @@ type CreateSSOConnectionParams struct {
 	SamlSsoBinding         pgtype.Text `json:"saml_sso_binding"`
 	SamlIdpCertificate     pgtype.Text `json:"saml_idp_certificate"`
 	CoversSubtree          bool        `json:"covers_subtree"`
+	ConfiguredByMemberID   pgtype.Text `json:"configured_by_member_id"`
+	ConfiguredByUserID     pgtype.Text `json:"configured_by_user_id"`
 }
 
 type CreateSSOConnectionRow struct {
@@ -150,6 +153,8 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		arg.SamlSsoBinding,
 		arg.SamlIdpCertificate,
 		arg.CoversSubtree,
+		arg.ConfiguredByMemberID,
+		arg.ConfiguredByUserID,
 	)
 	var i CreateSSOConnectionRow
 	err := row.Scan(
@@ -265,34 +270,11 @@ func (q *Queries) GetExternalIdentity(ctx context.Context, arg GetExternalIdenti
 	return i, err
 }
 
-const getRoleByNameInSpace = `-- name: GetRoleByNameInSpace :one
-SELECT id, space_id, name, description, managed, created_at
-FROM roles WHERE space_id = $1 AND name = $2
-`
-
-type GetRoleByNameInSpaceParams struct {
-	SpaceID string `json:"space_id"`
-	Name    string `json:"name"`
-}
-
-func (q *Queries) GetRoleByNameInSpace(ctx context.Context, arg GetRoleByNameInSpaceParams) (Role, error) {
-	row := q.db.QueryRow(ctx, getRoleByNameInSpace, arg.SpaceID, arg.Name)
-	var i Role
-	err := row.Scan(
-		&i.ID,
-		&i.SpaceID,
-		&i.Name,
-		&i.Description,
-		&i.Managed,
-		&i.CreatedAt,
-	)
-	return i, err
-}
-
 const getSSOConnection = `-- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
+    configured_by_member_id, configured_by_user_id
 FROM sso_connections WHERE id = $1
 `
 
@@ -322,6 +304,8 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 		&i.SamlSsoBinding,
 		&i.SamlIdpCertificate,
 		&i.CoversSubtree,
+		&i.ConfiguredByMemberID,
+		&i.ConfiguredByUserID,
 	)
 	return i, err
 }
@@ -399,7 +383,8 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 const lockSSOConnection = `-- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
+    configured_by_member_id, configured_by_user_id
 FROM sso_connections WHERE id = $1 FOR UPDATE
 `
 
@@ -429,6 +414,8 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 		&i.SamlSsoBinding,
 		&i.SamlIdpCertificate,
 		&i.CoversSubtree,
+		&i.ConfiguredByMemberID,
+		&i.ConfiguredByUserID,
 	)
 	return i, err
 }

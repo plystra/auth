@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/authorization"
@@ -108,6 +109,14 @@ func requireDirectorySSODenied(t *testing.T, response *httptest.ResponseRecorder
 
 func TestDirectoryOIDCSSOReusesProvisionedIdentityWithoutEmailOrRoleLinking(t *testing.T) {
 	f := newDirectorySSOFixture(t, "oid")
+	// A legacy connection's matched role has no verified configurator. A
+	// directory-provisioned identity must use its existing grants.
+	if _, err := f.st.Pool.Exec(context.Background(), `INSERT INTO roles (id,space_id,name,managed) VALUES ('rol_directory_jit',$1,'Directory mapping',false);
+		INSERT INTO role_permissions(role_id,permission_id) SELECT 'rol_directory_jit',id FROM permissions WHERE key='auth.members:read';
+		UPDATE sso_connections SET configured_by_member_id=NULL,configured_by_user_id=NULL,
+			role_mappings='{"administrators":"rol_directory_jit"}' WHERE id=$2`, pgx.QueryExecModeSimpleProtocol, f.spaceID, f.connection.ID); err != nil {
+		t.Fatal(err)
+	}
 	response := f.login(t, "oidc-subject-1", "different-idp-email@example.test", map[string]any{"oid": "Stable-Object-1"})
 	if response.Code != http.StatusOK {
 		t.Fatalf("provisioned SSO login failed: %d %s", response.Code, response.Body.String())
