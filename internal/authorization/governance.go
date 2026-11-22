@@ -30,6 +30,15 @@ func WithGovernanceApproval(ctx context.Context, id, operation, resourceID strin
 	})
 }
 
+// BindGovernanceApproval retains the submitted approval ID but binds its use
+// to the domain operation's actual resource and normalized inputs.
+func BindGovernanceApproval(ctx context.Context, operation, resourceID string, digest []byte) context.Context {
+	if proof, ok := ctx.Value(governanceApprovalKey{}).(governanceApproval); ok {
+		return WithGovernanceApproval(ctx, proof.id, operation, resourceID, digest)
+	}
+	return ctx
+}
+
 func (s *Service) checkGovernanceTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
 	decision, err := s.CheckTx(ctx, q, in)
 	if err != nil || decision.Code != "APPROVAL_REQUIRED" {
