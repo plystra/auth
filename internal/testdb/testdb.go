@@ -48,6 +48,7 @@ func Start(ctx context.Context) (*Harness, error) {
 		postgres.WithDatabase("postgres"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
+		postgres.BasicWaitStrategies(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("start postgres container: %w", err)
