@@ -20,6 +20,7 @@ import (
 	"github.com/beevik/etree"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/enterprise"
 	dsig "github.com/russellhaering/goxmldsig"
 )
@@ -114,14 +115,104 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 	}
 }
 
+func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testing.T) {
+	f := newJITMappingFixture(t, false)
+	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
+	defer cancel()
+	f.svc.Issuer = "https://auth.test"
+	notAfter := time.Now().Add(8 * time.Second).Truncate(time.Second)
+	metadata, signing := newSAMLTestIssuerUntil(t, notAfter)
+	actor := authorization.WithHumanActor(ctx, f.owner, "usr_sso_http_owner")
+	connection, err := f.svc.CreateConnection(actor, f.owner, f.space, enterprise.ConnectionInput{
+		Name: "Expiring IdP", Provider: "saml", SAMLMetadata: metadata,
+		RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mux http.ServeMux
+	(HTTP{Enterprise: f.svc}).Register(&mux)
+	path := "/v1/sso/" + connection.ID
+	start := httptest.NewRecorder()
+	mux.ServeHTTP(start, httptest.NewRequestWithContext(ctx, http.MethodGet, path+"/start", nil))
+	var result struct{ Data enterprise.StartResult }
+	if start.Code != http.StatusOK || json.Unmarshal(start.Body.Bytes(), &result) != nil || result.Data.State == "" {
+		t.Fatalf("SSO start did not return an authorization request: status=%d", start.Code)
+	}
+	var requestID string
+	if err := f.st.Pool.QueryRow(ctx, "SELECT request_id FROM sso_states WHERE connection_id=$1", connection.ID).Scan(&requestID); err != nil {
+		t.Fatal(err)
+	}
+	payload := signedSAMLTestResponse(t, signing, connection, requestID, "expiring-idp-subject", nil, false)
+	form := url.Values{"RelayState": {result.Data.State}, "SAMLResponse": {payload}}
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, path+"/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	before := f.counts(t)
+	gate, err := f.st.BeginIdempotency(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = gate.Rollback(context.Background()) }()
+	if err := f.st.InTx(gate.Context(ctx), func(q *db.Queries) error {
+		_, err := q.LockSSOConnection(ctx, db.LockSSOConnectionParams{ID: connection.ID})
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		done <- w
+	}()
+	for {
+		var waiting bool
+		if err := f.st.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
+			AND wait_event_type='Lock' AND query LIKE '%LockSSOConnection%')`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting {
+			break
+		}
+		select {
+		case w := <-done:
+			t.Fatalf("callback finished before the login lock: status=%d", w.Code)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if wait := time.Until(notAfter); wait > 0 {
+		time.Sleep(wait + time.Millisecond)
+	} else {
+		t.Fatal("certificate expired before the verified callback reached its login lock")
+	}
+	if err := gate.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	w := <-done
+	var refused struct{ Error struct{ Code string } }
+	if w.Code != http.StatusServiceUnavailable || json.Unmarshal(w.Body.Bytes(), &refused) != nil || refused.Error.Code != "temporarily_unavailable" {
+		t.Fatalf("callback after certificate expiry: status=%d code=%q", w.Code, refused.Error.Code)
+	}
+	if after := f.counts(t); after != before {
+		t.Fatalf("expired callback changed state, identity, grants, audit or sessions: before=%v after=%v", before, after)
+	}
+}
+
 func newSAMLTestIssuer(t *testing.T) (string, *dsig.SigningContext) {
+	t.Helper()
+	return newSAMLTestIssuerUntil(t, time.Now().Add(time.Hour))
+}
+
+func newSAMLTestIssuerUntil(t *testing.T, notAfter time.Time) (string, *dsig.SigningContext) {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "directory-idp"},
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature}
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature}
 	der, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)

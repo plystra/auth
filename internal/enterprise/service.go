@@ -971,13 +971,9 @@ func (s *Service) samlProvider(row db.SsoConnection) (*saml2.SAMLServiceProvider
 	if !row.SamlEntityID.Valid || !row.SamlSsoUrl.Valid || !row.SamlSsoBinding.Valid || !row.SamlIdpCertificate.Valid {
 		return nil, apierr.New("temporarily_unavailable", "SAML connection metadata is unavailable")
 	}
-	block, _ := pem.Decode([]byte(row.SamlIdpCertificate.String))
-	if block == nil {
-		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is unavailable")
-	}
-	certificate, err := x509.ParseCertificate(block.Bytes)
-	if err != nil || time.Now().UTC().Before(certificate.NotBefore) || time.Now().UTC().After(certificate.NotAfter) {
-		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
+	certificate, err := currentSAMLSigningCertificate(row.SamlIdpCertificate.String)
+	if err != nil {
+		return nil, err
 	}
 	certStore := dsig.MemoryX509CertificateStore{Roots: []*x509.Certificate{certificate}}
 	entityID := s.samlEntityID(row.ID)
@@ -987,6 +983,19 @@ func (s *Service) samlProvider(row db.SsoConnection) (*saml2.SAMLServiceProvider
 		ServiceProviderIssuer: entityID, AudienceURI: entityID, IDPCertificateStore: &certStore,
 		AllowMissingAttributes: false, MaximumDecompressedBodySize: 5 * 1024 * 1024, MaximumXMLTokens: 50000,
 	}, nil
+}
+
+func currentSAMLSigningCertificate(value string) (*x509.Certificate, error) {
+	block, _ := pem.Decode([]byte(value))
+	if block == nil {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is unavailable")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	now := time.Now()
+	if err != nil || now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
+	}
+	return certificate, nil
 }
 
 func (s *Service) samlEntityID(connectionID string) string {
@@ -1171,13 +1180,24 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if hint != nil {
 			metadata["directory_id"], metadata["directory_user_id"] = hint.directory.ID, hint.user.ID
 		}
-		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "sso", ActorID: connection.ID, MemberID: memberID, UserID: userID,
 			Action: "auth.sso.login", Outcome: "success", CredentialType: credentialType,
 			Resource:      audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: connection.SpaceID},
 			PolicyVersion: space.PolicyVersion,
 			Metadata:      metadata,
-		})
+		}); err != nil {
+			return err
+		}
+		if connection.Provider == "saml" {
+			// Identity and audit writes may wait on locks after signature verification.
+			if lockedConnection.SamlIdpCertificate != connection.SamlIdpCertificate {
+				return apierr.New("conflict", "SSO signing certificate changed; restart sign-in")
+			}
+			_, err := currentSAMLSigningCertificate(lockedConnection.SamlIdpCertificate.String)
+			return err
+		}
+		return nil
 	})
 	if err != nil {
 		return account.AuthResult{}, normalizeConnectionError(err)
