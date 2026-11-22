@@ -233,6 +233,7 @@ func (a *API) registerAuthorizationRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("groups.members.remove", "DELETE", "/v1/spaces/{id}/groups/{group_id}/members/{mid}", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.removeGroupMember)
 	route.Register(api, route.NewSpec("groups.members.list", "GET", "/v1/spaces/{id}/groups/{group_id}/members", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}), a.listGroupMembers)
 	route.Register(api, route.NewSpec("groups.move", "POST", "/v1/spaces/{id}/groups/{group_id}/move", route.Principal, "auth.groups:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.moveGroup)
+	a.registerEnterpriseRoutes(api)
 }
 
 func (a *API) createSpace(ctx context.Context, in *createSpaceInput) (*authorizationDataOutput[createdSpaceData], error) {

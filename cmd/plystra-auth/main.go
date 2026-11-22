@@ -31,6 +31,7 @@ import (
 	"github.com/plystra/auth/internal/config"
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/jobs"
@@ -287,8 +288,9 @@ func serve(ctx context.Context) error {
 	}
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
+	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authorizationSvc, Sessions: sessionSvc, StepUp: sessionSvc, DataKey: secret.New(dataKey), Passwords: security.DefaultPasswordHasher()}
 	accounts.Invitations = invitationSvc
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
@@ -329,7 +331,7 @@ func serve(ctx context.Context) error {
 	scfg := route.HumaConfig("Plystra Auth server", "1.0.0")
 	ocfg := route.HumaConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
-	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Accounts: accounts, Applications: apps, Sessions: sessionSvc, Authorization: authorizationSvc}.Register(principalMux)
+	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Accounts: accounts, Applications: apps, Sessions: sessionSvc, Authorization: authorizationSvc, Enterprise: enterpriseSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, signer)

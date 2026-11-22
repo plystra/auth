@@ -490,6 +490,7 @@ var administratorPermissions = []string{
 	"auth.audit:read",
 	"auth.authz:check",
 	"auth.tokens:introspect",
+	"auth.connections:manage",
 }
 
 func (s *Service) CreateSpace(ctx context.Context, userID, name, slug string) (Space, Member, error) {
@@ -572,6 +573,13 @@ func (s *Service) createSpace(ctx context.Context, userID, grantedBy, actorType,
 			return err
 		}
 		if err := addRolePermissions(ctx, q, role.ID, administratorPermissions); err != nil {
+			return err
+		}
+		memberRole, err := q.CreateRole(ctx, db.CreateRoleParams{ID: string(ids.New[ids.RoleID]("rol")), SpaceID: spaceRow.ID, Name: "member", Description: "Default member role", Managed: true})
+		if err != nil {
+			return err
+		}
+		if err := addRolePermissions(ctx, q, memberRole.ID, []string{"self:read"}); err != nil {
 			return err
 		}
 		grant, err := q.CreateGrant(ctx, db.CreateGrantParams{
@@ -2032,6 +2040,20 @@ func (s *Service) CheckNodeTx(ctx context.Context, q *db.Queries, in CheckReques
 		return engine.Decision{}, err
 	}
 	return s.CheckTx(ctx, q, in)
+}
+
+// CheckMutationTx is the transaction-safe governance entry point for writes
+// whose target is a persisted Space or group. It retains the actor, owner
+// chain, and resource-node locks while running the same engine decision used
+// by authz.check. Agent governance approvals are validated and consumed here.
+func (s *Service) CheckMutationTx(ctx context.Context, q *db.Queries, in CheckRequest) (engine.Decision, error) {
+	if err := lockAuthorizationActorTx(ctx, q, in.MemberID); err != nil {
+		return engine.Decision{}, err
+	}
+	if err := lockAuthorizationNodesTx(ctx, q, in.ResourceSpace, in.ResourceGroup); err != nil {
+		return engine.Decision{}, err
+	}
+	return s.checkGovernanceTx(ctx, q, in)
 }
 
 func (s *Service) authorizeTargetTx(ctx context.Context, q *db.Queries, actorMemberID, permission, spaceID, targetMemberID string, extraSpaceIDs ...string) error {

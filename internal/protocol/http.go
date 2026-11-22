@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
@@ -29,6 +30,7 @@ type HTTP struct {
 	Applications  *application.Service
 	Sessions      *session.Service
 	Authorization *authorization.Service
+	Enterprise    *enterprise.Service
 }
 
 func (h HTTP) Register(mux route.HandlerMux) {
@@ -42,8 +44,8 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.register", "POST", "/oauth/register", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.userinfo))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.users", "GET", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
-	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
-	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
+	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.ssoStart))
+	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(64<<10)), http.HandlerFunc(h.ssoCallback))
 }
 func (h HTTP) metadata(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(h.Issuer, "/")
@@ -355,6 +357,55 @@ func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
 }
 func (h HTTP) notImplemented(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, apierr.New("not_implemented", "protocol operation is not enabled for this deployment"))
+}
+
+func (h HTTP) ssoStart(w http.ResponseWriter, r *http.Request) {
+	if h.Enterprise == nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "enterprise SSO is unavailable"))
+		return
+	}
+	result, err := h.Enterprise.Start(r.Context(), r.PathValue("connection_id"), r.URL.Query().Get("redirect_uri"))
+	if err != nil {
+		writeProtocolErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result})
+}
+
+func (h HTTP) ssoCallback(w http.ResponseWriter, r *http.Request) {
+	if h.Enterprise == nil {
+		writeErr(w, apierr.New("temporarily_unavailable", "enterprise SSO is unavailable"))
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		writeErr(w, apierr.New("invalid_request", "JSON request body is required"))
+		return
+	}
+	var body struct {
+		State       string `json:"state"`
+		Code        string `json:"code"`
+		RedirectURI string `json:"redirect_uri"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil {
+		writeErr(w, apierr.New("invalid_request", "SSO callback body is invalid"))
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		writeErr(w, apierr.New("invalid_request", "SSO callback body is invalid"))
+		return
+	}
+	result, err := h.Enterprise.Callback(r.Context(), enterprise.CallbackInput{
+		ConnectionID: r.PathValue("connection_id"), State: body.State, Code: body.Code, RedirectURI: body.RedirectURI,
+	})
+	if err != nil {
+		writeProtocolErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
 func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {

@@ -104,6 +104,10 @@ func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Req
 			details.MemberID != "" || details.Kind != "human" || details.Policy != "shared" {
 			return Request{}, apierr.New("VALIDATION_FAILED", "shared member approval must target its Space")
 		}
+	} else if strings.HasPrefix(in.Operation, "sso_connections.") {
+		if in.Permission != "auth.connections:manage" || in.ResourceID != in.SpaceID || in.ResourceGroup != "" || details.MemberID != "" {
+			return Request{}, apierr.New("VALIDATION_FAILED", "SSO connection approval must target its Space")
+		}
 	} else if details.MemberID != in.ResourceID {
 		return Request{}, apierr.New("VALIDATION_FAILED", "governance approval details do not match the target")
 	}

@@ -244,6 +244,14 @@ type EmailVerificationToken struct {
 	ConsumedAt pgtype.Timestamptz `json:"consumed_at"`
 }
 
+type ExternalIdentity struct {
+	ID        string             `json:"id"`
+	UserID    string             `json:"user_id"`
+	Issuer    string             `json:"issuer"`
+	Subject   string             `json:"subject"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Factor struct {
 	ID               string             `json:"id"`
 	UserID           string             `json:"user_id"`
@@ -564,6 +572,34 @@ type SpaceEnvelopeEntry struct {
 	SpaceID      string `json:"space_id"`
 	PermissionID string `json:"permission_id"`
 	Mode         string `json:"mode"`
+}
+
+type SsoConnection struct {
+	ID                     string             `json:"id"`
+	SpaceID                string             `json:"space_id"`
+	Name                   string             `json:"name"`
+	Provider               string             `json:"provider"`
+	Issuer                 string             `json:"issuer"`
+	ClientID               string             `json:"client_id"`
+	ClientSecretCiphertext []byte             `json:"client_secret_ciphertext"`
+	RedirectUri            string             `json:"redirect_uri"`
+	GroupsClaim            string             `json:"groups_claim"`
+	RoleMappings           []byte             `json:"role_mappings"`
+	Status                 string             `json:"status"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+}
+
+type SsoState struct {
+	ID                     string             `json:"id"`
+	ConnectionID           string             `json:"connection_id"`
+	StateHash              []byte             `json:"state_hash"`
+	NonceHash              []byte             `json:"nonce_hash"`
+	PkceVerifierCiphertext []byte             `json:"pkce_verifier_ciphertext"`
+	RedirectUri            string             `json:"redirect_uri"`
+	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt             pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 }
 
 type User struct {

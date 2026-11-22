@@ -14,6 +14,7 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/invitation"
 	"github.com/plystra/auth/internal/requestinfo"
@@ -34,6 +35,7 @@ type API struct {
 	Factors       *factor.Service
 	Approvals     *approval.Service
 	Applications  *application.Service
+	Enterprise    *enterprise.Service
 }
 type AuthBody struct {
 	Email    string `json:"email"`

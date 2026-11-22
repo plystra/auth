@@ -70,6 +70,35 @@ func TestMeUpdateRouteDeclaresUserAccountSubject(t *testing.T) {
 	t.Fatal("me update route was not registered")
 }
 
+func TestSSOConnectionRoutesDeclareHumanAgentGovernanceContract(t *testing.T) {
+	api := &API{}
+	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
+	want := map[string]struct {
+		method string
+		path   string
+	}{
+		"sso_connections.list":   {method: http.MethodGet, path: "/v1/spaces/{id}/sso-connections"},
+		"sso_connections.create": {method: http.MethodPost, path: "/v1/spaces/{id}/sso-connections"},
+		"sso_connections.delete": {method: http.MethodDelete, path: "/v1/spaces/{id}/sso-connections/{conn_id}"},
+	}
+	for _, spec := range route.Specs() {
+		expected, ok := want[spec.Name]
+		if !ok {
+			continue
+		}
+		if spec.Method != expected.method || spec.Path != expected.path || spec.Plane != route.Principal || spec.Permission != "auth.connections:manage" || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
+			t.Fatalf("SSO route %q = %+v, want principal H/A auth.connections:manage", spec.Name, spec)
+		}
+		if spec.Name != "sso_connections.list" && (!spec.StepUp || !spec.AuthoritativeCheck) {
+			t.Fatalf("SSO mutation route %q = %+v, want step-up and authoritative checks", spec.Name, spec)
+		}
+		delete(want, spec.Name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("SSO connection routes missing: %v", want)
+	}
+}
+
 func TestMultiStepSignInRoutesAndOpenAPIContract(t *testing.T) {
 	api := &API{}
 	api.Register(humago.New(http.NewServeMux(), route.HumaConfig("principal test", "1.0.0")))
