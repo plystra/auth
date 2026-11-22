@@ -19,6 +19,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/lestrrat-go/jwx/v3/jwa"
+	"github.com/lestrrat-go/jwx/v3/jws"
 )
 
 type Claims struct {
@@ -266,23 +269,28 @@ func (s *Signer) DropRetiring(kid string) error {
 }
 
 func (s *Signer) Sign(c Claims) (string, error) {
+	return s.signJWT("at+jwt", c)
+}
+
+func (s *Signer) signJWT(tokenType string, claims any) (string, error) {
+	payload, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	header := map[string]string{"alg": "ES256", "kid": s.keyID, "typ": "at+jwt"}
-	h, _ := json.Marshal(header)
-	payload, _ := json.Marshal(c)
-	enc := func(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
-	input := enc(h) + "." + enc(payload)
-	hash := sha256.Sum256([]byte(input))
-	r, ss, e := ecdsa.Sign(rand.Reader, s.private, hash[:])
-	if e != nil {
-		return "", e
+	if s.private == nil || s.keyID == "" {
+		return "", ErrNoActiveSigningKey
 	}
-	sig := make([]byte, 64)
-	rb, sb := r.Bytes(), ss.Bytes()
-	copy(sig[32-len(rb):32], rb)
-	copy(sig[64-len(sb):], sb)
-	return input + "." + enc(sig), nil
+	headers := jws.NewHeaders()
+	if err := headers.Set(jws.KeyIDKey, s.keyID); err != nil {
+		return "", err
+	}
+	if err := headers.Set(jws.TypeKey, tokenType); err != nil {
+		return "", err
+	}
+	signed, err := jws.Sign(payload, jws.WithKey(jwa.ES256(), s.private, jws.WithProtectedHeaders(headers)))
+	return string(signed), err
 }
 func (s *Signer) Verify(token string, now time.Time, audience string) (Claims, error) {
 	var c Claims
