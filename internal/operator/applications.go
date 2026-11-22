@@ -24,7 +24,8 @@ type PublicApplicationReview struct {
 	ClientID                   string    `json:"client_id"`
 	RedirectURIs               []string  `json:"redirect_uris"`
 	ManifestPermissions        []string  `json:"manifest_permissions"`
-	PendingManifestPermissions []string  `json:"pending_manifest_permissions,omitempty"`
+	PendingManifestPermissions []string  `json:"pending_manifest_permissions,omitzero"`
+	HumanOIDCEnabled           bool      `json:"human_oidc_enabled"`
 	ReviewStatus               string    `json:"review_status"`
 	Status                     string    `json:"status"`
 	CreatedAt                  time.Time `json:"created_at"`
@@ -40,7 +41,7 @@ func (s *Service) ListPublicApplications(ctx context.Context, raw string) ([]Pub
 		out = make([]PublicApplicationReview, 0, len(rows))
 		for _, row := range rows {
 			item, err := publicApplicationReview(row.ID, row.SpaceID, row.Name, row.ClientID,
-				row.RedirectUris, row.ManifestPermissions, row.PendingManifestPermissions, row.ReviewStatus, row.Status, row.CreatedAt.Time)
+				row.RedirectUris, row.ManifestPermissions, row.PendingManifestPermissions, row.ReviewStatus, row.Status, row.CreatedAt.Time, row.HumanOidcEnabled)
 			if err != nil {
 				return err
 			}
@@ -56,8 +57,8 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 		return PublicApplicationReview{}, apierr.New("STEP_UP_REQUIRED", "Verify MFA for this manifest review.")
 	}
 	permissions = slices.Clone(permissions)
-	if len(permissions) == 0 || len(permissions) > 100 {
-		return PublicApplicationReview{}, apierr.New("VALIDATION_FAILED", "approved manifest must contain 1 to 100 permissions")
+	if permissions == nil || len(permissions) > 100 {
+		return PublicApplicationReview{}, apierr.New("VALIDATION_FAILED", "approved manifest must be an array of up to 100 permissions")
 	}
 	slices.Sort(permissions)
 	for i, key := range permissions {
@@ -80,6 +81,9 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 		}
 		if len(row.PendingManifestPermissions) == 0 {
 			return apierr.New("CONFLICT", "application has no pending manifest review")
+		}
+		if len(permissions) == 0 && !row.HumanOidcEnabled {
+			return apierr.New("VALIDATION_FAILED", "an empty approved manifest requires human OIDC sign-in")
 		}
 		var requested []string
 		if err := json.Unmarshal(row.PendingManifestPermissions, &requested); err != nil {
@@ -127,7 +131,7 @@ func (s *Service) ApprovePublicApplication(ctx context.Context, raw, application
 			return err
 		}
 		out, err = publicApplicationReview(row.ID, row.SpaceID, row.Name, row.ClientID,
-			row.RedirectUris, approved, nil, "approved", row.Status, row.CreatedAt.Time)
+			row.RedirectUris, approved, nil, "approved", row.Status, row.CreatedAt.Time, row.HumanOidcEnabled)
 		return err
 	})
 	return out, err
@@ -227,9 +231,9 @@ func (s *Service) SuspendApplication(ctx context.Context, raw, applicationID str
 	})
 }
 
-func publicApplicationReview(id, spaceID, name, clientID string, redirectsJSON, manifestJSON, pendingJSON []byte, reviewStatus, status string, createdAt time.Time) (PublicApplicationReview, error) {
+func publicApplicationReview(id, spaceID, name, clientID string, redirectsJSON, manifestJSON, pendingJSON []byte, reviewStatus, status string, createdAt time.Time, humanOIDCEnabled bool) (PublicApplicationReview, error) {
 	out := PublicApplicationReview{ID: id, SpaceID: spaceID, Name: name, ClientID: clientID,
-		ReviewStatus: reviewStatus, Status: status, CreatedAt: createdAt}
+		ReviewStatus: reviewStatus, Status: status, CreatedAt: createdAt, HumanOIDCEnabled: humanOIDCEnabled}
 	if err := json.Unmarshal(redirectsJSON, &out.RedirectURIs); err != nil {
 		return PublicApplicationReview{}, err
 	}

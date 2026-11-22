@@ -22,8 +22,9 @@ type registerApplicationInput struct {
 	Body          struct {
 		Name                string   `json:"name" minLength:"1" maxLength:"120"`
 		RedirectURIs        []string `json:"redirect_uris,omitempty" maxItems:"20"`
-		ManifestPermissions []string `json:"manifest_permissions" minItems:"1" maxItems:"100"`
+		ManifestPermissions []string `json:"manifest_permissions" maxItems:"100"`
 		Visibility          string   `json:"visibility,omitempty" enum:"private,public"`
+		HumanOIDCEnabled    *bool    `json:"human_oidc_enabled,omitempty"`
 	}
 }
 
@@ -34,6 +35,7 @@ type updateApplicationInput struct {
 		Name                *string   `json:"name,omitempty" maxLength:"120"`
 		RedirectURIs        *[]string `json:"redirect_uris,omitempty" maxItems:"20"`
 		ManifestPermissions *[]string `json:"manifest_permissions,omitempty" maxItems:"100"`
+		HumanOIDCEnabled    *bool     `json:"human_oidc_enabled,omitempty" doc:"Changing this setting requires request-bound step-up."`
 	}
 }
 
@@ -375,6 +377,9 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	if in.Body.Visibility != "" {
 		stepUpRequest["visibility"] = in.Body.Visibility
 	}
+	if in.Body.HumanOIDCEnabled != nil {
+		stepUpRequest["human_oidc_enabled"] = *in.Body.HumanOIDCEnabled
+	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.register", stepUpRequest)
 	if err != nil {
 		return nil, err
@@ -382,6 +387,7 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	registered, err := a.Applications.Register(ctx, actor.ID, application.RegisterInput{
 		SpaceID: in.ID, Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs,
 		ManifestPermissions: in.Body.ManifestPermissions, Visibility: in.Body.Visibility,
+		HumanOIDCEnabled: in.Body.HumanOIDCEnabled != nil && *in.Body.HumanOIDCEnabled,
 	})
 	if err != nil {
 		return nil, err
@@ -396,8 +402,24 @@ func (a *API) updateApplication(ctx context.Context, in *updateApplicationInput)
 	if err != nil {
 		return nil, err
 	}
+	if in.Body.HumanOIDCEnabled != nil {
+		request := map[string]any{"application_id": in.ApplicationID, "human_oidc_enabled": *in.Body.HumanOIDCEnabled}
+		if in.Body.Name != nil {
+			request["name"] = *in.Body.Name
+		}
+		if in.Body.RedirectURIs != nil {
+			request["redirect_uris"] = *in.Body.RedirectURIs
+		}
+		if in.Body.ManifestPermissions != nil {
+			request["manifest_permissions"] = *in.Body.ManifestPermissions
+		}
+		ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.update", request)
+		if err != nil {
+			return nil, err
+		}
+	}
 	updated, err := a.Applications.Update(ctx, actorID, in.ApplicationID, application.UpdateInput{
-		Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs, ManifestPermissions: in.Body.ManifestPermissions,
+		Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs, ManifestPermissions: in.Body.ManifestPermissions, HumanOIDCEnabled: in.Body.HumanOIDCEnabled,
 	})
 	if err != nil {
 		return nil, err

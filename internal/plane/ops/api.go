@@ -93,7 +93,7 @@ type PublicApplicationApprovalInput struct {
 	Authorization string `header:"Authorization"`
 	ID            string `path:"id"`
 	Body          struct {
-		ManifestPermissions []string `json:"manifest_permissions" minItems:"1" maxItems:"100"`
+		ManifestPermissions []string `json:"manifest_permissions" maxItems:"100"`
 	}
 }
 type OperatorsInput struct {

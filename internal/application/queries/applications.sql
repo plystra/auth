@@ -31,23 +31,23 @@ WHERE id = sqlc.arg(id) AND secret_hash = sqlc.arg(previous_hash)
 
 -- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-                          manifest_permissions, visibility, review_status, pending_manifest_permissions)
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled)
 VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb),
         COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash),
-        sqlc.arg(manifest_permissions), sqlc.arg(visibility), sqlc.arg(review_status), sqlc.narg(pending_manifest_permissions))
+        sqlc.arg(manifest_permissions), sqlc.arg(visibility), sqlc.arg(review_status), sqlc.narg(pending_manifest_permissions), sqlc.arg(human_oidc_enabled))
 RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-          manifest_permissions, visibility, review_status, pending_manifest_permissions, status, created_at;
+          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at;
 
 -- name: ListPublishedApplications :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 FROM applications
 WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
 -- name: LockApplicationForUpdate :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 FROM applications WHERE id = sqlc.arg(application_id)
 FOR UPDATE;
 
@@ -57,10 +57,11 @@ SET name = sqlc.arg(name), redirect_uris = sqlc.arg(redirect_uris),
     manifest_permissions = sqlc.arg(manifest_permissions),
     allowed_scopes = sqlc.arg(manifest_permissions),
     pending_manifest_permissions = sqlc.narg(pending_manifest_permissions),
-    review_status = sqlc.arg(review_status)
+    review_status = sqlc.arg(review_status),
+    human_oidc_enabled = sqlc.arg(human_oidc_enabled)
 WHERE id = sqlc.arg(application_id)
 RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions,
-          pending_manifest_permissions, visibility, review_status, status, created_at;
+          pending_manifest_permissions, visibility, review_status, human_oidc_enabled, status, created_at;
 
 -- name: TrimInstallationApprovalsToManifest :exec
 UPDATE application_installations i
@@ -271,14 +272,14 @@ SELECT id FROM ancestors;
 
 -- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, status, created_at
+       visibility, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE client_id = sqlc.arg(client_id)
 LIMIT 1;
 
 -- name: GetOAuthClientByID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, status, created_at
+       visibility, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE id = sqlc.arg(id)
 FOR UPDATE;

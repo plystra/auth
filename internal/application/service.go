@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -44,7 +45,8 @@ type PublishedApplication struct {
 	ClientID                   string    `json:"client_id"`
 	RedirectURIs               []string  `json:"redirect_uris"`
 	ManifestPermissions        []string  `json:"manifest_permissions"`
-	PendingManifestPermissions []string  `json:"pending_manifest_permissions,omitempty"`
+	PendingManifestPermissions []string  `json:"pending_manifest_permissions,omitzero"`
+	HumanOIDCEnabled           bool      `json:"human_oidc_enabled"`
 	Visibility                 string    `json:"visibility"`
 	ReviewStatus               string    `json:"review_status"`
 	Status                     string    `json:"status"`
@@ -57,6 +59,7 @@ type RegisterInput struct {
 	RedirectURIs        []string
 	ManifestPermissions []string
 	Visibility          string
+	HumanOIDCEnabled    bool
 }
 
 // Register records a publisher-owned application. Registration does not
@@ -76,13 +79,13 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 	if in.Name == "" || utf8.RuneCountInString(in.Name) > 120 {
 		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application name must contain 1 to 120 characters")
 	}
-	if len(in.ManifestPermissions) == 0 || len(in.ManifestPermissions) > 100 {
-		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest must contain 1 to 100 permissions")
+	if in.ManifestPermissions == nil || len(in.ManifestPermissions) > 100 || len(in.ManifestPermissions) == 0 && !in.HumanOIDCEnabled {
+		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest needs 1 to 100 permissions or an empty list for human OIDC sign-in")
 	}
 	if len(in.RedirectURIs) > 20 {
 		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application has too many redirect URIs")
 	}
-	permissions := append([]string(nil), in.ManifestPermissions...)
+	permissions := append([]string{}, in.ManifestPermissions...)
 	slices.Sort(permissions)
 	for index, key := range permissions {
 		if strings.TrimSpace(key) != key || key == "" || (index > 0 && key == permissions[index-1]) {
@@ -149,7 +152,7 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 			ID: id, SpaceID: in.SpaceID, Name: in.Name, ClientID: id,
 			RedirectUris: redirectJSON, AllowedScopes: effectiveManifest,
 			ManifestPermissions: effectiveManifest, PendingManifestPermissions: pendingManifest,
-			Visibility: in.Visibility, ReviewStatus: reviewStatus,
+			Visibility: in.Visibility, ReviewStatus: reviewStatus, HumanOidcEnabled: in.HumanOIDCEnabled,
 		})
 		if err != nil {
 			return err
@@ -157,13 +160,14 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: row.ID,
 			Action: "application.register", Outcome: "success", Permission: "auth.applications:manage",
+			Metadata: map[string]string{"human_oidc_enabled": strconv.FormatBool(in.HumanOIDCEnabled)},
 			Resource: audit.Resource{Type: "application", ID: row.ID, SpaceID: row.SpaceID},
 		}); err != nil {
 			return err
 		}
 		out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,
 			RedirectURIs: redirects, Visibility: row.Visibility, ReviewStatus: row.ReviewStatus,
-			Status: row.Status, CreatedAt: row.CreatedAt.Time}
+			Status: row.Status, CreatedAt: row.CreatedAt.Time, HumanOIDCEnabled: row.HumanOidcEnabled}
 		if in.Visibility == "public" {
 			out.ManifestPermissions = []string{}
 			out.PendingManifestPermissions = permissions
@@ -213,7 +217,7 @@ func (s *Service) ListPublished(ctx context.Context, actorMemberID, spaceID stri
 				Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects,
 				ManifestPermissions: permissions, PendingManifestPermissions: pending,
 				Visibility: row.Visibility, ReviewStatus: row.ReviewStatus, Status: row.Status,
-				CreatedAt: row.CreatedAt.Time})
+				CreatedAt: row.CreatedAt.Time, HumanOIDCEnabled: row.HumanOidcEnabled})
 		}
 		return nil
 	})
@@ -239,6 +243,7 @@ type OAuthClient struct {
 	RedirectURIs     []string
 	AllowedScopes    []string
 	ClientSecretHash []byte
+	HumanOIDCEnabled bool
 }
 
 type AuthorizationCode struct {
@@ -453,7 +458,7 @@ func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient
 	if err := json.Unmarshal(row.AllowedScopes, &allowedScopes); err != nil {
 		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
 	}
-	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash}, nil
+	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled}, nil
 }
 
 func (s *Service) OAuthClientInstalled(ctx context.Context, applicationID, spaceID string) (bool, error) {
@@ -493,7 +498,7 @@ func (s *Service) OAuthClientByIDTx(ctx context.Context, q *db.Queries, id strin
 	if json.Unmarshal(row.RedirectUris, &redirects) != nil || json.Unmarshal(row.AllowedScopes, &scopes) != nil {
 		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
 	}
-	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects, AllowedScopes: scopes, ClientSecretHash: row.ClientSecretHash}, nil
+	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects, AllowedScopes: scopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled}, nil
 }
 
 // AuthenticateOAuthClient resolves a registered OAuth client and verifies its

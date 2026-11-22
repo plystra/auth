@@ -35,7 +35,7 @@ func TestPrincipalStepUpAcceptsApplicationAndInvitationOperations(t *testing.T) 
 		humago.New(mux, route.HumaConfig("step-up operations test", "1.0.0")))
 	handler := route.Middleware(route.Principal, mux)
 	for _, operation := range []string{
-		"applications.register", "applications.keys.create", "applications.keys.rotate",
+		"applications.register", "applications.update", "applications.keys.create", "applications.keys.rotate",
 		"installations.create", "invitations.create",
 	} {
 		t.Run(operation, func(t *testing.T) {

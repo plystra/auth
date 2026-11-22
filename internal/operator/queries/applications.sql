@@ -1,13 +1,13 @@
 -- name: ListPublicApplicationReviews :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE visibility = 'public'
 ORDER BY created_at, id;
 
 -- name: LockPublicApplicationReview :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE id = sqlc.arg(application_id) AND visibility = 'public'
 FOR UPDATE;
@@ -44,6 +44,6 @@ WHERE id = sqlc.arg(member_id) AND type = 'application' AND status = 'active';
 -- name: RejectPublicApplicationReview :execrows
 UPDATE applications
 SET pending_manifest_permissions = NULL,
-    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
+    review_status = CASE WHEN review_status = 'approved' THEN 'approved' ELSE 'rejected' END
 WHERE id = sqlc.arg(application_id) AND visibility = 'public'
   AND pending_manifest_permissions IS NOT NULL;

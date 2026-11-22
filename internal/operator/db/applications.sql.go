@@ -80,7 +80,7 @@ func (q *Queries) ListApplicationSuspensionMembers(ctx context.Context, arg List
 
 const listPublicApplicationReviews = `-- name: ListPublicApplicationReviews :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE visibility = 'public'
 ORDER BY created_at, id
@@ -95,6 +95,7 @@ type ListPublicApplicationReviewsRow struct {
 	ManifestPermissions        []byte             `json:"manifest_permissions"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	ReviewStatus               string             `json:"review_status"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -117,6 +118,7 @@ func (q *Queries) ListPublicApplicationReviews(ctx context.Context) ([]ListPubli
 			&i.ManifestPermissions,
 			&i.PendingManifestPermissions,
 			&i.ReviewStatus,
+			&i.HumanOidcEnabled,
 			&i.Status,
 			&i.CreatedAt,
 		); err != nil {
@@ -132,7 +134,7 @@ func (q *Queries) ListPublicApplicationReviews(ctx context.Context) ([]ListPubli
 
 const lockPublicApplicationReview = `-- name: LockPublicApplicationReview :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE id = $1 AND visibility = 'public'
 FOR UPDATE
@@ -151,6 +153,7 @@ type LockPublicApplicationReviewRow struct {
 	ManifestPermissions        []byte             `json:"manifest_permissions"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	ReviewStatus               string             `json:"review_status"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -167,6 +170,7 @@ func (q *Queries) LockPublicApplicationReview(ctx context.Context, arg LockPubli
 		&i.ManifestPermissions,
 		&i.PendingManifestPermissions,
 		&i.ReviewStatus,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -176,7 +180,7 @@ func (q *Queries) LockPublicApplicationReview(ctx context.Context, arg LockPubli
 const rejectPublicApplicationReview = `-- name: RejectPublicApplicationReview :execrows
 UPDATE applications
 SET pending_manifest_permissions = NULL,
-    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
+    review_status = CASE WHEN review_status = 'approved' THEN 'approved' ELSE 'rejected' END
 WHERE id = $1 AND visibility = 'public'
   AND pending_manifest_permissions IS NOT NULL
 `

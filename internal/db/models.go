@@ -117,6 +117,7 @@ type Application struct {
 	Status                     string             `json:"status"`
 	ReviewStatus               string             `json:"review_status"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 }
 
 type ApplicationInstallation struct {
