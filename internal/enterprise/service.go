@@ -593,7 +593,7 @@ func (s *Service) discovery(ctx context.Context, issuer string) (discoveryDocume
 	if err != nil {
 		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
 	}
@@ -723,7 +723,7 @@ func hexDigest(value string) string {
 
 func validateIssuer(raw string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && u.Hostname() == "localhost")) {
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !isSecureOIDCURL(u) {
 		return apierr.New("validation_failed", "issuer must be an HTTPS URL without user info, query, or fragment")
 	}
 	return nil
@@ -731,7 +731,7 @@ func validateIssuer(raw string) error {
 
 func validateEndpoint(raw, issuer string) error {
 	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Scheme != "https" && !(u.Scheme == "http" && u.Hostname() == "localhost")) {
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !isSecureOIDCURL(u) {
 		return errors.New("unsafe OIDC endpoint")
 	}
 	base, err := url.Parse(issuer)
@@ -746,10 +746,14 @@ func validateRedirectURI(raw string) error {
 	if err != nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || strings.ContainsAny(raw, "*\r\n\t ") {
 		return apierr.New("validation_failed", "redirect_uri must be an exact URL without wildcards")
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && u.Hostname() == "localhost") {
+	if !isSecureOIDCURL(u) {
 		return apierr.New("validation_failed", "redirect_uri must use HTTPS")
 	}
 	return nil
+}
+
+func isSecureOIDCURL(u *url.URL) bool {
+	return u.Scheme == "https" || u.Scheme == "http" && u.Hostname() == "localhost"
 }
 
 func displayName(claims idTokenClaims, email string) string {
