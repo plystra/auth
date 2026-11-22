@@ -307,6 +307,61 @@ func (s *Service) ListConnections(ctx context.Context, actorMemberID, spaceID st
 	return out, nil
 }
 
+func ConnectionDetailRequest(spaceID, connectionID string) map[string]string {
+	return map[string]string{"operation": "sso_connections.get", "space_id": spaceID, "connection_id": connectionID}
+}
+
+func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (Connection, error) {
+	digest, err := stepup.DigestValue(ConnectionDetailRequest(spaceID, connectionID))
+	if err != nil {
+		return Connection{}, err
+	}
+	ctx = authorization.BindGovernanceApproval(ctx, "sso_connections.get", spaceID, digest)
+	var out Connection
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+			return err
+		}
+		actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
+		if err != nil {
+			return err
+		}
+		if actor.Type != "human" && actor.Type != "agent" {
+			return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "SSO connection details require a human or Agent member")
+		}
+		if actor.Type == "human" {
+			proof, ok := stepup.RequirementFromContext(ctx)
+			if !ok || proof.Operation != "sso_connections.get" || !bytes.Equal(proof.Digest, digest) {
+				return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
+			}
+			issued, err := q.GetSession(ctx, db.GetSessionParams{ID: proof.SessionID})
+			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				return err
+			}
+			validUser := issued.UserID != "" && issued.UserID == authorization.HumanActorUserID(ctx, actorMemberID)
+			if !validUser || issued.MemberID.Valid && issued.MemberID.String != actorMemberID {
+				return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
+			}
+			if err := s.consumeStepUp(ctx, q); err != nil {
+				return err
+			}
+		}
+		row, err := q.GetSSOConnectionInSpace(ctx, db.GetSSOConnectionInSpaceParams{SpaceID: spaceID, ID: connectionID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("not_found", "SSO connection was not found")
+		}
+		if err != nil {
+			return err
+		}
+		out = connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
+		return nil
+	})
+	if err != nil {
+		return Connection{}, normalizeConnectionError(err)
+	}
+	return out, nil
+}
+
 func (s *Service) DisableConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) error {
 	return normalizeConnectionError(s.Store.InTx(ctx, func(q *db.Queries) error {
 		if s.Authorization == nil {

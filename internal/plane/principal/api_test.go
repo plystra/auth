@@ -78,6 +78,7 @@ func TestSSOConnectionRoutesDeclareHumanAgentGovernanceContract(t *testing.T) {
 		path   string
 	}{
 		"sso_connections.list":   {method: http.MethodGet, path: "/v1/spaces/{id}/sso-connections"},
+		"sso_connections.get":    {method: http.MethodGet, path: "/v1/spaces/{id}/sso-connections/{conn_id}"},
 		"sso_connections.create": {method: http.MethodPost, path: "/v1/spaces/{id}/sso-connections"},
 		"sso_connections.delete": {method: http.MethodDelete, path: "/v1/spaces/{id}/sso-connections/{conn_id}"},
 	}
@@ -90,7 +91,7 @@ func TestSSOConnectionRoutesDeclareHumanAgentGovernanceContract(t *testing.T) {
 			t.Fatalf("SSO route %q = %+v, want principal H/A auth.connections:manage", spec.Name, spec)
 		}
 		if spec.Name != "sso_connections.list" && (!spec.StepUp || !spec.AuthoritativeCheck) {
-			t.Fatalf("SSO mutation route %q = %+v, want step-up and authoritative checks", spec.Name, spec)
+			t.Fatalf("SSO connection route %q = %+v, want step-up and authoritative checks", spec.Name, spec)
 		}
 		delete(want, spec.Name)
 	}

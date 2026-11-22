@@ -310,6 +310,54 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 	return i, err
 }
 
+const getSSOConnectionInSpace = `-- name: GetSSOConnectionInSpace :one
+SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at
+FROM sso_connections WHERE space_id = $1 AND id = $2
+`
+
+type GetSSOConnectionInSpaceParams struct {
+	SpaceID string `json:"space_id"`
+	ID      string `json:"id"`
+}
+
+type GetSSOConnectionInSpaceRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetSSOConnectionInSpace(ctx context.Context, arg GetSSOConnectionInSpaceParams) (GetSSOConnectionInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, getSSOConnectionInSpace, arg.SpaceID, arg.ID)
+	var i GetSSOConnectionInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Provider,
+		&i.Issuer,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.GroupsClaim,
+		&i.RoleMappings,
+		&i.Status,
+		&i.CoversSubtree,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getSSOMembershipForUser = `-- name: GetSSOMembershipForUser :one
 SELECT m.id, (m.type = 'human' AND m.status = 'active' AND b.status = 'active'
     AND b.revoked_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp()))::boolean AS active
