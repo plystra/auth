@@ -43,6 +43,9 @@ func TestSAMLConnectionParsesMetadataBuildsBoundRequestAndRejectsInvalidResponse
 		t.Fatal(err)
 	}
 	metadata := testSAMLMetadata(t, key)
+	if _, err := parseSAMLMetadata(`<EntitiesDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata">` + metadata + `</EntitiesDescriptor>`); err != nil {
+		t.Fatalf("SAML EntitiesDescriptor metadata was rejected: %v", err)
+	}
 	service := &Service{Store: st, Authorization: authorizer, DataKey: secret.New(strings.Repeat("s", 32)), Issuer: "https://auth.example.test"}
 	requestCtx := authorization.WithHumanActor(ctx, owner.ID, "usr_saml_owner")
 	connection, err := service.CreateConnection(requestCtx, owner.ID, space.ID, ConnectionInput{

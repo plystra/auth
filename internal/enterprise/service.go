@@ -1240,12 +1240,34 @@ func validateIssuer(raw string) error {
 
 func parseSAMLMetadata(raw string) (samlConnectionDetails, error) {
 	var metadata types.EntityDescriptor
-	decoder := xml.NewDecoder(strings.NewReader(raw))
-	if err := decoder.Decode(&metadata); err != nil {
-		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata is invalid")
+	_ = xml.Unmarshal([]byte(raw), &metadata)
+	if metadata.IDPSSODescriptor == nil {
+		var bundle struct {
+			Descriptors []types.EntityDescriptor `xml:"EntityDescriptor"`
+		}
+		if err := xml.Unmarshal([]byte(raw), &bundle); err != nil || len(bundle.Descriptors) == 0 {
+			return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata does not contain an IdP descriptor")
+		}
+		var found *types.EntityDescriptor
+		for i := range bundle.Descriptors {
+			if bundle.Descriptors[i].IDPSSODescriptor == nil {
+				continue
+			}
+			if found != nil {
+				return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata contains multiple IdP descriptors")
+			}
+			found = &bundle.Descriptors[i]
+		}
+		if found == nil {
+			return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata does not contain an IdP descriptor")
+		}
+		metadata = *found
 	}
 	if metadata.EntityID == "" || metadata.IDPSSODescriptor == nil {
 		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata does not contain an IdP descriptor")
+	}
+	if !metadata.ValidUntil.IsZero() && !metadata.ValidUntil.After(time.Now().UTC()) {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata has expired")
 	}
 	var endpoint types.SingleSignOnService
 	for _, candidate := range metadata.IDPSSODescriptor.SingleSignOnServices {
