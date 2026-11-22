@@ -39,6 +39,13 @@ SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 FOR UPDATE;
 
+-- name: LockSSOMappingRoles :many
+SELECT id, name FROM roles
+WHERE space_id = sqlc.arg(space_id)
+    AND (id = ANY(sqlc.arg(mapped_role_ids)::text[]) OR name = 'member')
+ORDER BY id
+FOR UPDATE;
+
 -- name: RoleIsApplicationInstallation :one
 SELECT EXISTS (SELECT 1 FROM application_installations WHERE role_id = sqlc.arg(role_id));
 
@@ -86,7 +93,7 @@ SELECT id, space_id, name, description, managed, created_at FROM roles
 WHERE space_id = sqlc.arg(space_id) ORDER BY name, id;
 
 -- name: ListRolePermissions :many
-SELECT p.key, p.status, p.delegable
+SELECT p.key, p.status, p.delegable, p.principal_kinds
 FROM role_permissions rp
 JOIN permissions p ON p.id = rp.permission_id
 WHERE rp.role_id = sqlc.arg(role_id)

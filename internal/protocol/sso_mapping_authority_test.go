@@ -30,6 +30,18 @@ func TestSSOConnectionChecksMappedGrantAuthority(t *testing.T) {
 			SELECT @space,id,CASE WHEN key='auth.members:read' THEN 'use' ELSE 'delegate' END FROM permissions WHERE delegable`, wantCode: "AUTHORITY_DELTA_NOT_COVERED"},
 		{name: "assignment management required", setup: `UPDATE permissions SET status='disabled' WHERE key='auth.grants:assign'`, wantCode: "PERMISSION_DISABLED"},
 		{name: "deprecated grant", setup: `UPDATE permissions SET status='deprecated' WHERE key='auth.members:read'`, wantCode: "AUTHORITY_DELTA_NOT_COVERED"},
+		{name: "agent-only permission adds no human authority", setup: revokeRights + `;
+			UPDATE permissions SET principal_kinds='["agent"]' WHERE key='auth.members:read'`},
+		{name: "mixed role needs only the human permission covered", setup: revokeRights + `;
+			UPDATE permissions SET principal_kinds='["agent"]' WHERE key='auth.members:read';
+			INSERT INTO role_permissions (role_id,permission_id) SELECT 'rol_mapping',id FROM permissions WHERE key='auth.roles:manage';
+			INSERT INTO assign_rights (id,holder_member_id,permission_keys,anchor_space_id,covers_subtree,can_redelegate,source)
+			VALUES ('ar_mapping_human',@owner,'["auth.roles:manage"]',@space,false,false,'system')`},
+		{name: "mixed role still requires human permission coverage", setup: revokeRights + `;
+			UPDATE permissions SET principal_kinds='["agent"]' WHERE key='auth.members:read';
+			INSERT INTO role_permissions (role_id,permission_id) SELECT 'rol_mapping',id FROM permissions WHERE key='auth.roles:manage'`, wantCode: "AUTHORITY_DELTA_NOT_COVERED"},
+		{name: "deprecated cannot be newly granted even in an agent-only role", setup: `
+			UPDATE permissions SET principal_kinds='["agent"]',status='deprecated' WHERE key='auth.members:read'`, wantCode: "AUTHORITY_DELTA_NOT_COVERED"},
 		{name: "installation role", setup: `INSERT INTO applications (id,space_id,name,client_id) VALUES ('app_mapping',@space,'App','mapping');
 			INSERT INTO members (id,space_id,name,type) VALUES ('mem_mapping_app',@space,'App','application');
 			INSERT INTO application_installations (id,application_id,space_id,member_id,role_id,scope,approved_permissions,installed_by)
@@ -138,7 +150,7 @@ func TestSSOMappingRechecksRoleAfterConcurrentEdit(t *testing.T) {
 		}
 		var waiting bool
 		if err := st.Pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname=current_database()
-			AND wait_event_type='Lock' AND query LIKE '%LockRoleInSpace%')`).Scan(&waiting); err != nil {
+			AND wait_event_type='Lock' AND query LIKE '%LockSSOMappingRoles%')`).Scan(&waiting); err != nil {
 			t.Fatal(err)
 		}
 		if waiting {
@@ -152,6 +164,34 @@ func TestSSOMappingRechecksRoleAfterConcurrentEdit(t *testing.T) {
 	var apiErr *apierr.Error
 	if err := <-done; !errors.As(err, &apiErr) || apiErr.Code != "AUTHORITY_DELTA_NOT_COVERED" {
 		t.Fatalf("configuration after role expansion = %v", err)
+	}
+}
+
+func TestSSOMappingUsesCurrentDefaultHumanRoleAsBaseline(t *testing.T) {
+	ctx := context.Background()
+	st, authorizer, svc, owner, spaceID, provider := newSSOHTTPFixture(t)
+	role, err := authorizer.CreateRole(ctx, owner.ID, spaceID, "Default-equivalent reader", "", []string{"self:read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, "UPDATE assign_rights SET revoked_at=now() WHERE holder_member_id=$1", owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	ctx = authorization.WithHumanActor(ctx, owner.ID, "usr_sso_http_owner")
+	in := ssoMappingInput(provider.issuer, role.ID)
+	if _, err := svc.CreateConnection(ctx, owner.ID, spaceID, in); err != nil {
+		t.Fatalf("overlapping default role required an assignment right: %v", err)
+	}
+	if _, err := st.Pool.Exec(ctx, `DELETE FROM role_permissions
+		WHERE role_id=(SELECT id FROM roles WHERE space_id=$1 AND name='member')
+		AND permission_id=(SELECT id FROM permissions WHERE key='self:read')`, spaceID); err != nil {
+		t.Fatal(err)
+	}
+	in.Name = "Updated baseline"
+	_, err = svc.CreateConnection(ctx, owner.ID, spaceID, in)
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "AUTHORITY_DELTA_NOT_COVERED" {
+		t.Fatalf("mapping used an obsolete default role: %v", err)
 	}
 }
 

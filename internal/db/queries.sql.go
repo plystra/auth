@@ -2761,7 +2761,7 @@ func (q *Queries) ListPasskeysForUser(ctx context.Context, arg ListPasskeysForUs
 }
 
 const listRolePermissions = `-- name: ListRolePermissions :many
-SELECT p.key, p.status, p.delegable
+SELECT p.key, p.status, p.delegable, p.principal_kinds
 FROM role_permissions rp
 JOIN permissions p ON p.id = rp.permission_id
 WHERE rp.role_id = $1
@@ -2773,9 +2773,10 @@ type ListRolePermissionsParams struct {
 }
 
 type ListRolePermissionsRow struct {
-	Key       string `json:"key"`
-	Status    string `json:"status"`
-	Delegable bool   `json:"delegable"`
+	Key            string `json:"key"`
+	Status         string `json:"status"`
+	Delegable      bool   `json:"delegable"`
+	PrincipalKinds []byte `json:"principal_kinds"`
 }
 
 func (q *Queries) ListRolePermissions(ctx context.Context, arg ListRolePermissionsParams) ([]ListRolePermissionsRow, error) {
@@ -2787,7 +2788,12 @@ func (q *Queries) ListRolePermissions(ctx context.Context, arg ListRolePermissio
 	items := []ListRolePermissionsRow{}
 	for rows.Next() {
 		var i ListRolePermissionsRow
-		if err := rows.Scan(&i.Key, &i.Status, &i.Delegable); err != nil {
+		if err := rows.Scan(
+			&i.Key,
+			&i.Status,
+			&i.Delegable,
+			&i.PrincipalKinds,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -3126,6 +3132,44 @@ func (q *Queries) LockRoleInSpace(ctx context.Context, arg LockRoleInSpaceParams
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const lockSSOMappingRoles = `-- name: LockSSOMappingRoles :many
+SELECT id, name FROM roles
+WHERE space_id = $1
+    AND (id = ANY($2::text[]) OR name = 'member')
+ORDER BY id
+FOR UPDATE
+`
+
+type LockSSOMappingRolesParams struct {
+	SpaceID       string   `json:"space_id"`
+	MappedRoleIds []string `json:"mapped_role_ids"`
+}
+
+type LockSSOMappingRolesRow struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (q *Queries) LockSSOMappingRoles(ctx context.Context, arg LockSSOMappingRolesParams) ([]LockSSOMappingRolesRow, error) {
+	rows, err := q.db.Query(ctx, lockSSOMappingRoles, arg.SpaceID, arg.MappedRoleIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []LockSSOMappingRolesRow{}
+	for rows.Next() {
+		var i LockSSOMappingRolesRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const lockTOTPFactors = `-- name: LockTOTPFactors :many
