@@ -18,6 +18,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,6 +52,7 @@ const (
 	maxRoleMappings       = 100
 	maxIdentityGroups     = 200
 	maxExternalSubjectLen = 512
+	maxDiscoveryBytes     = 256 << 10
 	domainTXTLabel        = "_plystra-auth"
 )
 
@@ -135,13 +137,6 @@ type CallbackInput struct {
 	Code         string
 	RedirectURI  string
 	SAMLResponse string
-}
-
-type discoveryDocument struct {
-	Issuer                string `json:"issuer"`
-	AuthorizationEndpoint string `json:"authorization_endpoint"`
-	TokenEndpoint         string `json:"token_endpoint"`
-	JWKSURI               string `json:"jwks_uri"`
 }
 
 type samlConnectionDetails struct {
@@ -640,7 +635,7 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 	if row.Provider == "saml" {
 		return s.startSAML(ctx, row, redirectURI)
 	}
-	doc, _, err := s.discovery(ctx, row.Issuer)
+	provider, err := s.discovery(ctx, row.Issuer)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -683,7 +678,7 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
-	return StartResult{AuthorizationURL: doc.AuthorizationEndpoint + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, nil
+	return StartResult{AuthorizationURL: provider.Endpoint().AuthURL + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, nil
 }
 
 func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string) (StartResult, error) {
@@ -800,7 +795,7 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 	if err != nil {
 		return account.AuthResult{}, apierr.New("temporarily_unavailable", "SSO state is unavailable")
 	}
-	doc, provider, err := s.discovery(ctx, row.Issuer)
+	provider, err := s.discovery(ctx, row.Issuer)
 	if err != nil {
 		return account.AuthResult{}, err
 	}
@@ -824,9 +819,6 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 	}
 	if claims.Nonce == "" || !equalDigest(state.NonceHash, claims.Nonce) || claims.Subject == "" || len(claims.Subject) > maxExternalSubjectLen || claims.Email == "" || !claims.EmailVerified {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC identity is not valid for this connection")
-	}
-	if err := validateIssuer(doc.Issuer); err != nil || doc.Issuer != row.Issuer {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC issuer is invalid")
 	}
 	result, err := s.finishCallback(ctx, row, state, claims)
 	if err != nil {
@@ -1154,42 +1146,54 @@ func (s *Service) rolesForLogin(ctx context.Context, q *db.Queries, connection d
 	return roles, nil
 }
 
-func (s *Service) discovery(ctx context.Context, issuer string) (discoveryDocument, *oidc.Provider, error) {
+func (s *Service) discovery(ctx context.Context, issuer string) (*oidc.Provider, error) {
 	if err := validateIssuer(issuer); err != nil {
-		return discoveryDocument{}, nil, err
+		return nil, err
 	}
 	client := s.httpClient()
 	requestCtx := context.WithValue(ctx, oauth2.HTTPClient, client)
 	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, discoveryURL, nil)
 	if err != nil {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
+		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
+		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
+		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is unavailable")
 	}
-	var doc discoveryDocument
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 256<<10)).Decode(&doc); err != nil {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiscoveryBytes+1))
+	if err != nil || len(body) > maxDiscoveryBytes {
+		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
 	}
-	if doc.Issuer != issuer || doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" || doc.JWKSURI == "" {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
+	var doc oidc.ProviderConfig
+	if err := json.Unmarshal(body, &doc); err != nil || doc.IssuerURL != issuer {
+		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
 	}
-	for _, endpoint := range []string{doc.AuthorizationEndpoint, doc.TokenEndpoint, doc.JWKSURI} {
+	for _, endpoint := range []string{doc.AuthURL, doc.TokenURL, doc.JWKSURL} {
 		if err := validateEndpoint(endpoint, issuer); err != nil {
-			return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC discovery contains an unsafe endpoint")
+			return nil, apierr.New("temporarily_unavailable", "OIDC discovery contains an unsafe endpoint")
 		}
 	}
-	provider, err := oidc.NewProvider(requestCtx, issuer)
-	if err != nil {
-		return discoveryDocument{}, nil, apierr.New("temporarily_unavailable", "OIDC provider discovery is unavailable")
+	if doc.Algorithms != nil {
+		doc.Algorithms = slices.DeleteFunc(doc.Algorithms, func(alg string) bool {
+			switch alg {
+			case oidc.RS256, oidc.RS384, oidc.RS512, oidc.ES256, oidc.ES384, oidc.ES512,
+				oidc.PS256, oidc.PS384, oidc.PS512, oidc.EdDSA:
+				return false
+			default:
+				return true
+			}
+		})
+		if len(doc.Algorithms) == 0 {
+			return nil, apierr.New("temporarily_unavailable", "OIDC discovery contains no supported signing algorithm")
+		}
 	}
-	return doc, provider, nil
+	// The code exchange and signature verifier must use the metadata checked above.
+	return doc.NewProvider(requestCtx), nil
 }
 
 func parseIDToken(ctx context.Context, provider *oidc.Provider, raw, clientID, groupsClaim string) (idTokenClaims, error) {

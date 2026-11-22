@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,11 +37,12 @@ type oidcTestCode struct {
 }
 
 type oidcTestProvider struct {
-	server *httptest.Server
-	issuer string
-	key    *rsa.PrivateKey
-	mu     sync.Mutex
-	codes  map[string]oidcTestCode
+	discoveryRequests atomic.Int32
+	server            *httptest.Server
+	issuer            string
+	key               *rsa.PrivateKey
+	mu                sync.Mutex
+	codes             map[string]oidcTestCode
 }
 
 func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
@@ -57,6 +59,7 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
+			provider.discoveryRequests.Add(1)
 			writeOIDCTestJSON(w, map[string]any{
 				"issuer": provider.issuer, "authorization_endpoint": provider.issuer + "/authorize",
 				"token_endpoint": provider.issuer + "/token", "jwks_uri": provider.issuer + "/jwks",
@@ -241,6 +244,9 @@ func TestOIDCSSOHTTPEnforcesReplayCrossConnectionUnverifiedEmailAndDisable(t *te
 	}
 
 	first := start(connection.ID)
+	if got := provider.discoveryRequests.Load(); got != 1 {
+		t.Fatalf("SSO start made %d discovery requests, want one", got)
+	}
 	firstURL, err := url.Parse(first.AuthorizationURL)
 	if err != nil {
 		t.Fatal(err)
@@ -248,7 +254,10 @@ func TestOIDCSSOHTTPEnforcesReplayCrossConnectionUnverifiedEmailAndDisable(t *te
 	provider.addCode("sso-valid-code", oidcTestCode{nonce: firstURL.Query().Get("nonce"), subject: "idp-user-1", email: "sso-user@example.test", emailVerified: true, groups: []string{"engineering"}})
 	valid := callback(connection.ID, map[string]string{"state": first.State, "code": "sso-valid-code", "redirect_uri": connection.RedirectURI})
 	if valid.Code != http.StatusOK || !strings.Contains(valid.Body.String(), `"email":"sso-user@example.test"`) || !strings.Contains(valid.Body.String(), `"access_token"`) {
-		t.Fatalf("valid OIDC callback = %d %s", valid.Code, valid.Body.String())
+		t.Fatalf("valid OIDC callback did not issue the expected session (HTTP %d)", valid.Code)
+	}
+	if got := provider.discoveryRequests.Load(); got != 2 {
+		t.Fatalf("expected one discovery request for start and one for callback, got %d", got)
 	}
 	if replay := callback(connection.ID, map[string]string{"state": first.State, "code": "sso-valid-code", "redirect_uri": connection.RedirectURI}); replay.Code != http.StatusBadRequest || !strings.Contains(replay.Body.String(), "invalid_grant") {
 		t.Fatalf("replayed OIDC state = %d %s", replay.Code, replay.Body.String())
