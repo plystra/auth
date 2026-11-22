@@ -1060,11 +1060,15 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				}
 				userEmail, userStatus, userCreated = user.Email, user.Status, user.CreatedAt.Time
 			}
-			member, memberErr := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: connection.SpaceID})
-			if (memberErr == nil || errors.Is(memberErr, pgx.ErrNoRows)) && member.ID != plan.memberID {
-				return apierr.New("conflict", "SSO membership changed; restart sign-in")
+			member, memberErr := q.GetSSOMembershipForUser(ctx, db.GetSSOMembershipForUserParams{UserID: userID, SpaceID: connection.SpaceID})
+			newMembership = errors.Is(memberErr, pgx.ErrNoRows)
+			if memberErr != nil && !newMembership {
+				return memberErr
 			}
-			if errors.Is(memberErr, pgx.ErrNoRows) {
+			if member.ID != plan.memberID || !newMembership && !member.Active {
+				return apierr.New("invalid_grant", "the SSO identity is not valid for this connection")
+			}
+			if newMembership {
 				if !slices.ContainsFunc(plan.roles, func(role db.LockSSOMappingRolesRow) bool { return role.Name == "member" }) {
 					return apierr.New("temporarily_unavailable", "the Space has no default member role")
 				}
@@ -1083,9 +1087,6 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				if err := q.LinkUserMember(ctx, db.LinkUserMemberParams{UserID: userID, MemberID: memberID}); err != nil {
 					return err
 				}
-				newMembership = true
-			} else if memberErr != nil {
-				return memberErr
 			} else {
 				memberID = member.ID
 			}

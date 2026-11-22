@@ -34,7 +34,7 @@ func lockSSOLoginTx(ctx context.Context, q *db.Queries, c db.SsoConnection, clai
 		return nil, err
 	}
 	if err == nil {
-		member, err := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: external.UserID, SpaceID: c.SpaceID})
+		member, err := q.GetSSOMembershipForUser(ctx, db.GetSSOMembershipForUserParams{UserID: external.UserID, SpaceID: c.SpaceID})
 		if err == nil {
 			if err := authorization.LockProvisioningTx(ctx, q, c.SpaceID, []string{external.UserID}, []string{member.ID}); err != nil {
 				return nil, err

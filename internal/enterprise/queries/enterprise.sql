@@ -68,6 +68,16 @@ SELECT id, user_id, issuer, subject, created_at, directory_user_id
 FROM external_identities
 WHERE issuer = sqlc.arg(issuer) AND subject = sqlc.arg(subject);
 
+-- name: GetSSOMembershipForUser :one
+-- An inactive row records a prior binding that JIT must not replace. Prefer
+-- any live binding and use wall time when the callback has waited on locks.
+SELECT m.id, (m.type = 'human' AND m.status = 'active' AND b.status = 'active'
+    AND b.revoked_at IS NULL AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp()))::boolean AS active
+FROM user_members b JOIN members m ON m.id = b.member_id
+WHERE b.user_id = sqlc.arg(user_id) AND m.space_id = sqlc.arg(space_id)
+ORDER BY active DESC, m.created_at, m.id
+LIMIT 1;
+
 -- name: CreateExternalIdentity :one
 INSERT INTO external_identities (id, user_id, issuer, subject, directory_user_id)
 VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(issuer), sqlc.arg(subject), sqlc.narg(directory_user_id))
