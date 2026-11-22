@@ -1,6 +1,7 @@
 package principal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,9 +17,11 @@ import (
 	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
+	"github.com/pquerna/otp/totp"
 )
 
 func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.T) {
@@ -204,6 +207,8 @@ func verifyEnterpriseListAuthorization(t *testing.T, operation, collection strin
 	t.Helper()
 	ctx := t.Context()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	factors := &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32)), StepUp: sessions}
+	sessions.Factors = factors
 	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "auth.connections:manage")
 	enterpriseService := &enterprise.Service{Store: st, Authorization: authz, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32))}
 	approvals := &approval.Service{Store: st, Authorization: authz, StepUp: sessions}
@@ -217,6 +222,35 @@ func verifyEnterpriseListAuthorization(t *testing.T, operation, collection strin
 	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
+	stepUp := func(operation string, request any) {
+		t.Helper()
+		enrolled, err := factors.EnrollTOTPForUser(ctx, "usr_principal_actor", "actor@example.test", operation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, err := totp.GenerateCode(enrolled.Secret.Value(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := json.Marshal(map[string]any{"operation": operation, "request": request, "mfa_code": code})
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/v1/auth/step-up", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+humanTokens.AccessToken)
+		res, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("public TOTP step-up for %s returned HTTP %d", operation, res.StatusCode)
+		}
+	}
 	requestList := func(path, token, approvalID string) (int, []byte) {
 		t.Helper()
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/spaces/"+spaceID+"/"+path, nil)
@@ -254,7 +288,7 @@ func verifyEnterpriseListAuthorization(t *testing.T, operation, collection strin
 	requireStepUp()
 	seedStepUpProof(t, st, claims.SessionID, operation, enterprise.SettingsListRequest(operation, "spc_other"))
 	requireStepUp()
-	seedStepUpProof(t, st, claims.SessionID, operation, enterprise.SettingsListRequest(operation, spaceID))
+	stepUp(operation, enterprise.SettingsListRequest(operation, spaceID))
 	status, body := requestList(collection, humanTokens.AccessToken, "")
 	if status != http.StatusOK || !strings.Contains(string(body), `"data":[]`) {
 		t.Fatalf("human %s returned HTTP %d without the expected list", operation, status)
@@ -287,7 +321,7 @@ func verifyEnterpriseListAuthorization(t *testing.T, operation, collection strin
 	if approvalID == "" {
 		t.Fatal("Agent approval response omitted approval_id")
 	}
-	seedStepUpProof(t, st, claims.SessionID, "approvals.approve", map[string]any{"approval_id": approvalID})
+	stepUp("approvals.approve", map[string]any{"approval_id": approvalID})
 	approved := applicationAuditRequest(t, handler, http.MethodPost, "/v1/approvals/"+approvalID+"/approve", humanTokens.AccessToken, "req_approve_sso_list", nil)
 	if approved.Code != http.StatusOK {
 		t.Fatalf("owner approval returned HTTP %d", approved.Code)

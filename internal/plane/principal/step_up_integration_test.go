@@ -135,6 +135,20 @@ func TestPrincipalStepUpRouteRequiresUserAccount(t *testing.T) {
 	t.Fatal("step-up route was not registered")
 }
 
+func TestPrincipalStepUpAcceptsRegisteredEnterpriseSettingsOperations(t *testing.T) {
+	(&API{}).Register(humago.New(http.NewServeMux(), route.HumaConfig("enterprise step-up", "1.0.0")))
+	for _, spec := range route.Specs() {
+		if spec.Plane == route.Principal && spec.Permission == "auth.connections:manage" && spec.StepUp && !principalStepUpOperation(spec.Name) {
+			t.Errorf("registered enterprise operation %s cannot obtain its required proof", spec.Name)
+		}
+	}
+	for _, unsupported := range []string{"domains", "domains.export", "directories.unknown", "ops.directories.list"} {
+		if principalStepUpOperation(unsupported) {
+			t.Errorf("accepted unsupported operation %q", unsupported)
+		}
+	}
+}
+
 func TestBackupCodeFactorEndpointRequiresStepUpAndReturnsCodesOnce(t *testing.T) {
 	ctx := context.Background()
 	st, authz, actor, _, sessions, signer := newPrincipalFixture(t)

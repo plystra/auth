@@ -424,6 +424,10 @@ func (a *API) stepUp(ctx context.Context, in *StepUpInput) (*StepUpOutput, error
 
 func principalStepUpOperation(operation string) bool {
 	switch operation {
+	case "sso_connections.list", "sso_connections.get", "sso_connections.create", "sso_connections.delete",
+		"domains.list", "domains.create", "domains.verify", "domains.delete",
+		"directories.list", "directories.create", "directories.update", "directories.delete":
+		return true
 	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete", "approvals.approve", "approvals.reject", "applications.register", "applications.update", "applications.keys.create", "applications.keys.rotate", "installations.create", "invitations.create":
 		return true
 	default:
