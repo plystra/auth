@@ -236,6 +236,49 @@ type AuthorizationPolicyState struct {
 	Version int64 `json:"version"`
 }
 
+type Directory struct {
+	ID          string             `json:"id"`
+	SpaceID     string             `json:"space_id"`
+	Name        string             `json:"name"`
+	TokenPrefix string             `json:"token_prefix"`
+	TokenHash   []byte             `json:"token_hash"`
+	Status      string             `json:"status"`
+	Version     int64              `json:"version"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DirectoryGroup struct {
+	ID          string             `json:"id"`
+	DirectoryID string             `json:"directory_id"`
+	ExternalID  string             `json:"external_id"`
+	GroupID     string             `json:"group_id"`
+	DisplayName string             `json:"display_name"`
+	Version     int64              `json:"version"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type DirectoryGroupMember struct {
+	DirectoryGroupID string             `json:"directory_group_id"`
+	MemberID         string             `json:"member_id"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+}
+
+type DirectoryUser struct {
+	ID          string             `json:"id"`
+	DirectoryID string             `json:"directory_id"`
+	ExternalID  string             `json:"external_id"`
+	UserID      string             `json:"user_id"`
+	MemberID    string             `json:"member_id"`
+	UserName    string             `json:"user_name"`
+	DisplayName string             `json:"display_name"`
+	Active      bool               `json:"active"`
+	Version     int64              `json:"version"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type EmailVerificationToken struct {
 	ID         string             `json:"id"`
 	UserID     string             `json:"user_id"`

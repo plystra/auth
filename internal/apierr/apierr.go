@@ -52,6 +52,8 @@ func Status(code string) int {
 		return http.StatusForbidden
 	case "not_found", "subject_not_found":
 		return http.StatusNotFound
+	case "precondition_failed":
+		return http.StatusPreconditionFailed
 	case "conflict":
 		return http.StatusConflict
 	case "rate_limited":

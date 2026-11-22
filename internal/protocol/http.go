@@ -8,7 +8,9 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
@@ -43,7 +45,18 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.device_authorization", "POST", "/oauth/device_authorization", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.register", "POST", "/oauth/register", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.notImplemented))
 	route.RegisterNonJSON(mux, route.NewSpec("oauth.userinfo", "GET", "/oauth/userinfo", route.Principal, "", []route.Subject{route.HumanAgent}, route.WithNonJSON()), http.HandlerFunc(h.userinfo))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.users.create", "POST", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.users", "GET", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.user.get", "GET", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.user.replace", "PUT", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.user.patch", "PATCH", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.user.delete", "DELETE", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.groups.create", "POST", "/scim/v2/{dir_id}/Groups", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.groups", "GET", "/scim/v2/{dir_id}/Groups", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.group.get", "GET", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.group.replace", "PUT", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.group.patch", "PATCH", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.group.delete", "DELETE", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.ssoStart))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(64<<10)), http.HandlerFunc(h.ssoCallback))
 }
@@ -423,11 +436,358 @@ func (h HTTP) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": result})
 }
 func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
-	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"}, "detail": "SCIM bearer token required", "status": "401"})
+	if h.Enterprise == nil {
+		writeSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": 0, "Resources": []any{}})
+	token, err := scimBearerToken(r)
+	if err != nil {
+		writeSCIMError(w, err)
+		return
+	}
+	directoryID := r.PathValue("dir_id")
+	resourceID := r.PathValue("id")
+	switch r.Method {
+	case http.MethodPost:
+		if resourceID != "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
+			return
+		}
+		var body scimUserBody
+		if err := decodeSCIMJSON(w, r, &body); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		created, err := h.Enterprise.CreateSCIMUser(r.Context(), directoryID, token, body.input(true))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		writeSCIMResource(w, http.StatusCreated, scimUserResource(created))
+	case http.MethodGet:
+		if resourceID != "" {
+			user, err := h.Enterprise.GetSCIMUser(r.Context(), directoryID, token, resourceID)
+			if err != nil {
+				writeSCIMError(w, err)
+				return
+			}
+			writeSCIMResource(w, http.StatusOK, scimUserResource(user))
+			return
+		}
+		start, count, err := scimPagination(r)
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		filter, err := parseSCIMUserFilter(r.URL.Query().Get("filter"))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		users, total, err := h.Enterprise.ListSCIMUsers(r.Context(), directoryID, token, filter, start, count)
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		resources := make([]any, 0, len(users))
+		for _, user := range users {
+			resources = append(resources, scimUserResource(user))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
+	case http.MethodPut, http.MethodPatch:
+		if resourceID == "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			return
+		}
+		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		var body scimUserBody
+		if err := decodeSCIMJSON(w, r, &body); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		var updated enterprise.SCIMUser
+		if r.Method == http.MethodPatch {
+			updated, err = h.Enterprise.PatchSCIMUser(r.Context(), directoryID, token, resourceID, body.input(true), version)
+		} else {
+			updated, err = h.Enterprise.ReplaceSCIMUser(r.Context(), directoryID, token, resourceID, body.input(false), version)
+		}
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		writeSCIMResource(w, http.StatusOK, scimUserResource(updated))
+	case http.MethodDelete:
+		if resourceID == "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			return
+		}
+		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		if _, err := h.Enterprise.DeleteSCIMUser(r.Context(), directoryID, token, resourceID, version); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
+	}
+}
+
+func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
+	if h.Enterprise == nil {
+		writeSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
+		return
+	}
+	token, err := scimBearerToken(r)
+	if err != nil {
+		writeSCIMError(w, err)
+		return
+	}
+	directoryID, resourceID := r.PathValue("dir_id"), r.PathValue("id")
+	switch r.Method {
+	case http.MethodPost:
+		if resourceID != "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
+			return
+		}
+		var body scimGroupBody
+		if err := decodeSCIMJSON(w, r, &body); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		created, err := h.Enterprise.CreateSCIMGroup(r.Context(), directoryID, token, body.input())
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		writeSCIMResource(w, http.StatusCreated, scimGroupResource(created))
+	case http.MethodGet:
+		if resourceID != "" {
+			group, err := h.Enterprise.GetSCIMGroup(r.Context(), directoryID, token, resourceID)
+			if err != nil {
+				writeSCIMError(w, err)
+				return
+			}
+			writeSCIMResource(w, http.StatusOK, scimGroupResource(group))
+			return
+		}
+		start, count, err := scimPagination(r)
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		groups, total, err := h.Enterprise.ListSCIMGroups(r.Context(), directoryID, token, start, count)
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		resources := make([]any, 0, len(groups))
+		for _, group := range groups {
+			resources = append(resources, scimGroupResource(group))
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
+	case http.MethodPut, http.MethodPatch:
+		if resourceID == "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			return
+		}
+		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		var body scimGroupBody
+		if err := decodeSCIMJSON(w, r, &body); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		updated, err := h.Enterprise.ReplaceSCIMGroup(r.Context(), directoryID, token, resourceID, body.input(), version)
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		writeSCIMResource(w, http.StatusOK, scimGroupResource(updated))
+	case http.MethodDelete:
+		if resourceID == "" {
+			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			return
+		}
+		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
+		if err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		if err := h.Enterprise.DeleteSCIMGroup(r.Context(), directoryID, token, resourceID, version); err != nil {
+			writeSCIMError(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
+	}
+}
+
+type scimUserBody struct {
+	Schemas     []string `json:"schemas,omitempty"`
+	ExternalID  string   `json:"externalId,omitempty"`
+	UserName    string   `json:"userName,omitempty"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Active      *bool    `json:"active,omitempty"`
+}
+
+func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
+	active := true
+	activeSet := b.Active != nil
+	if b.Active != nil {
+		active = *b.Active
+	}
+	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: b.DisplayName, Active: active, ActiveSet: activeSet || !patch}
+}
+
+type scimGroupBody struct {
+	Schemas     []string `json:"schemas,omitempty"`
+	ExternalID  string   `json:"externalId,omitempty"`
+	DisplayName string   `json:"displayName,omitempty"`
+	Members     []struct {
+		Value string `json:"value"`
+	} `json:"members,omitempty"`
+}
+
+func (b scimGroupBody) input() enterprise.SCIMGroupInput {
+	members := make([]string, 0, len(b.Members))
+	for _, member := range b.Members {
+		members = append(members, member.Value)
+	}
+	return enterprise.SCIMGroupInput{ExternalID: b.ExternalID, DisplayName: b.DisplayName, MemberIDs: members}
+}
+
+func scimBearerToken(r *http.Request) (string, error) {
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
+		return "", apierr.New("unauthenticated", "SCIM bearer token required")
+	}
+	return parts[1], nil
+}
+
+func decodeSCIMJSON(w http.ResponseWriter, r *http.Request, value any) error {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || (mediaType != "application/scim+json" && mediaType != "application/json") {
+		return apierr.New("invalid_request", "SCIM JSON body is required")
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(value); err != nil {
+		return apierr.New("invalid_request", "SCIM JSON body is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return apierr.New("invalid_request", "SCIM JSON body is invalid")
+	}
+	return nil
+}
+
+func scimPagination(r *http.Request) (int32, int32, error) {
+	start, count := int64(1), int64(100)
+	var err error
+	if raw := strings.TrimSpace(r.URL.Query().Get("startIndex")); raw != "" {
+		start, err = strconv.ParseInt(raw, 10, 32)
+		if err != nil {
+			return 0, 0, apierr.New("invalid_request", "startIndex is invalid")
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("count")); raw != "" {
+		count, err = strconv.ParseInt(raw, 10, 32)
+		if err != nil {
+			return 0, 0, apierr.New("invalid_request", "count is invalid")
+		}
+	}
+	if start < 1 || count < 1 || count > 100 {
+		return 0, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
+	}
+	return int32(start), int32(count), nil
+}
+
+func parseSCIMUserFilter(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	const prefix = `userName eq "`
+	if !strings.HasPrefix(raw, prefix) || !strings.HasSuffix(raw, `"`) || len(raw) <= len(prefix)+1 {
+		return "", apierr.New("invalid_filter", "only userName eq \"…\" is supported")
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(raw, prefix), `"`)
+	if strings.Contains(value, `"`) || !validSCIMFilterEmail(value) {
+		return "", apierr.New("invalid_filter", "the userName filter is invalid")
+	}
+	return strings.ToLower(value), nil
+}
+
+func validSCIMFilterEmail(value string) bool {
+	if len(value) == 0 || len(value) > 320 || strings.ContainsAny(value, " \t\r\n") {
+		return false
+	}
+	at := strings.LastIndexByte(value, '@')
+	return at > 0 && at < len(value)-1 && !strings.Contains(value[at+1:], "@")
+}
+
+func parseSCIMIfMatch(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, `W/"`) || !strings.HasSuffix(raw, `"`) {
+		return 0, apierr.New("precondition_failed", "If-Match must contain the resource version")
+	}
+	version, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(raw, `W/"`), `"`), 10, 64)
+	if err != nil || version < 1 {
+		return 0, apierr.New("precondition_failed", "If-Match must contain the resource version")
+	}
+	return version, nil
+}
+
+func scimUserResource(user enterprise.SCIMUser) map[string]any {
+	return map[string]any{"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:User"}, "id": user.ID, "externalId": user.ExternalID, "userName": user.UserName, "displayName": user.DisplayName, "active": user.Active, "meta": scimMeta("User", user.Version, user.CreatedAt, user.UpdatedAt)}
+}
+
+func scimGroupResource(group enterprise.SCIMGroup) map[string]any {
+	members := make([]map[string]string, 0, len(group.MemberIDs))
+	for _, id := range group.MemberIDs {
+		members = append(members, map[string]string{"value": id, "type": "User"})
+	}
+	return map[string]any{"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:Group"}, "id": group.ID, "externalId": group.ExternalID, "displayName": group.DisplayName, "members": members, "meta": scimMeta("Group", group.Version, group.CreatedAt, group.UpdatedAt)}
+}
+
+func scimMeta(resourceType string, version int64, createdAt, updatedAt time.Time) map[string]any {
+	return map[string]any{"resourceType": resourceType, "version": `W/"` + strconv.FormatInt(version, 10) + `"`, "created": createdAt.UTC().Format(time.RFC3339Nano), "lastModified": updatedAt.UTC().Format(time.RFC3339Nano)}
+}
+
+func writeSCIMResource(w http.ResponseWriter, status int, resource map[string]any) {
+	w.Header().Set("Content-Type", "application/scim+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(resource)
+}
+
+func writeSCIMError(w http.ResponseWriter, err error) {
+	var public *apierr.Error
+	if !errors.As(err, &public) {
+		public = apierr.New("temporarily_unavailable", "SCIM operation is unavailable")
+	}
+	status := apierr.Status(public.Code)
+	scimType := ""
+	if public.Code == "invalid_filter" {
+		status, scimType = http.StatusBadRequest, "invalidFilter"
+	}
+	if public.Code == "precondition_failed" {
+		status = http.StatusPreconditionFailed
+	}
+	w.Header().Set("Content-Type", "application/scim+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"}, "detail": public.Message, "status": strconv.Itoa(status), "scimType": scimType})
 }
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")

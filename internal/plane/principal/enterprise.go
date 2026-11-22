@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -94,7 +95,49 @@ type domainsOutput struct {
 	}
 }
 
+type directoriesInput struct {
+	Authorization string `header:"Authorization"`
+	ID            string `path:"id"`
+}
+
+type createDirectoryInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+	Body          struct {
+		Name string `json:"name"`
+	}
+}
+
+type directoryPathInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	IfMatch       string `header:"If-Match"`
+	ID            string `path:"id"`
+	DirectoryID   string `path:"dir_id"`
+	Body          struct {
+		Name        string `json:"name,omitempty"`
+		RotateToken bool   `json:"rotate_token,omitempty"`
+	}
+}
+
+type directoryOutput struct {
+	Body struct {
+		Data enterprise.Directory `json:"data"`
+	}
+}
+
+type directoriesOutput struct {
+	Body struct {
+		Data []enterprise.Directory `json:"data"`
+	}
+}
+
 func (a *API) registerEnterpriseRoutes(api huma.API) {
+	route.Register(api, route.NewSpec("directories.list", "GET", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listDirectories)
+	route.Register(api, route.NewSpec("directories.create", "POST", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectory)
+	route.Register(api, route.NewSpec("directories.update", "PATCH", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDirectory)
+	route.Register(api, route.NewSpec("directories.delete", "DELETE", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDirectory)
 	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listDomains)
 	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
 	route.Register(api, route.NewSpec("domains.verify", "POST", "/v1/spaces/{id}/domains/{domain_id}/verify", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.verifyDomain)
@@ -102,6 +145,113 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("sso_connections.list", "GET", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listSSOConnections)
 	route.Register(api, route.NewSpec("sso_connections.create", "POST", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createSSOConnection)
 	route.Register(api, route.NewSpec("sso_connections.delete", "DELETE", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteSSOConnection)
+}
+
+func (a *API) listDirectories(ctx context.Context, in *directoriesInput) (*directoriesOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
+	}
+	request := map[string]any{"operation": "directories.list", "space_id": in.ID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, "", in.ID, "", "auth.connections:manage", "directories.list", request)
+	if err != nil {
+		return nil, err
+	}
+	directories, err := a.Enterprise.ListDirectories(ctx, actor.ID, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &directoriesOutput{}
+	out.Body.Data = directories
+	return out, nil
+}
+
+func (a *API) createDirectory(ctx context.Context, in *createDirectoryInput) (*directoryOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
+	}
+	request := map[string]any{"operation": "directories.create", "space_id": in.ID, "name": strings.TrimSpace(in.Body.Name)}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.create", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "directories.create", request)
+	if err != nil {
+		return nil, err
+	}
+	directory, err := a.Enterprise.CreateDirectory(ctx, actor.ID, in.ID, enterprise.DirectoryInput{Name: in.Body.Name})
+	if err != nil {
+		return nil, err
+	}
+	out := &directoryOutput{}
+	out.Body.Data = directory
+	return out, nil
+}
+
+func (a *API) updateDirectory(ctx context.Context, in *directoryPathInput) (*directoryOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
+	}
+	version, err := parseDirectoryIfMatch(in.IfMatch)
+	if err != nil {
+		return nil, err
+	}
+	request := map[string]any{"operation": "directories.update", "space_id": in.ID, "directory_id": in.DirectoryID, "name": strings.TrimSpace(in.Body.Name), "rotate_token": in.Body.RotateToken}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.update", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "directories.update", request)
+	if err != nil {
+		return nil, err
+	}
+	var directory enterprise.Directory
+	if in.Body.RotateToken {
+		directory, err = a.Enterprise.RotateDirectoryToken(ctx, actor.ID, in.ID, in.DirectoryID, version)
+	} else {
+		directory, err = a.Enterprise.UpdateDirectory(ctx, actor.ID, in.ID, in.DirectoryID, enterprise.DirectoryUpdate{Name: in.Body.Name}, version)
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := &directoryOutput{}
+	out.Body.Data = directory
+	return out, nil
+}
+
+func (a *API) deleteDirectory(ctx context.Context, in *directoryPathInput) (*authorizationDataOutput[acceptedData], error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
+	}
+	version, err := parseDirectoryIfMatch(in.IfMatch)
+	if err != nil {
+		return nil, err
+	}
+	request := map[string]any{"operation": "directories.delete", "space_id": in.ID, "directory_id": in.DirectoryID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.delete", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "directories.delete", request)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Enterprise.DisableDirectory(ctx, actor.ID, in.ID, in.DirectoryID, version); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func parseDirectoryIfMatch(raw string) (int64, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.HasPrefix(raw, `W/"`) || !strings.HasSuffix(raw, `"`) {
+		return 0, apierr.New("precondition_failed", "If-Match must contain the directory version")
+	}
+	value := strings.TrimSuffix(strings.TrimPrefix(raw, `W/"`), `"`)
+	version, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || version < 1 {
+		return 0, apierr.New("precondition_failed", "If-Match must contain the directory version")
+	}
+	return version, nil
 }
 
 func (a *API) listDomains(ctx context.Context, in *domainsInput) (*domainsOutput, error) {
