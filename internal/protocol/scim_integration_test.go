@@ -49,14 +49,14 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if directory.Token == "" {
+	if directory.Token.Value() == "" {
 		t.Fatal("directory creation did not return a token")
 	}
 	var storedHash []byte
 	if err := st.Pool.QueryRow(ctx, `SELECT token_hash FROM directories WHERE id = $1`, directory.ID).Scan(&storedHash); err != nil {
 		t.Fatal(err)
 	}
-	if string(storedHash) == directory.Token {
+	if string(storedHash) == directory.Token.Value() {
 		t.Fatal("SCIM token was stored in plaintext")
 	}
 
@@ -70,11 +70,11 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 		mux.ServeHTTP(res, req)
 		return res
 	}
-	created := postUser(directory.Token, `{"externalId":"idp-1","userName":"Alice@Example.test","displayName":"Alice","active":true}`)
+	created := postUser(directory.Token.Value(), `{"externalId":"idp-1","userName":"Alice@Example.test","displayName":"Alice","active":true}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("SCIM user create = %d %s", created.Code, created.Body.String())
 	}
-	if strings.Contains(created.Body.String(), directory.Token) {
+	if strings.Contains(created.Body.String(), directory.Token.Value()) {
 		t.Fatal("SCIM token leaked in resource response")
 	}
 	var user struct {
@@ -98,11 +98,11 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 		mux.ServeHTTP(res, req)
 		return res
 	}
-	if response := get(directory.Token, user.ID); response.Code != http.StatusOK {
+	if response := get(directory.Token.Value(), user.ID); response.Code != http.StatusOK {
 		t.Fatalf("SCIM user get = %d %s", response.Code, response.Body.String())
 	}
-	wrongVersion := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Users/"+user.ID, strings.NewReader(`{"displayName":"Changed"}`))
-	wrongVersion.Header.Set("Authorization", "Bearer "+directory.Token)
+	wrongVersion := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Users/"+user.ID, strings.NewReader(`{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"displayName","value":"Changed"}]}`))
+	wrongVersion.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	wrongVersion.Header.Set("Content-Type", "application/scim+json")
 	wrongVersion.Header.Set("If-Match", `W/"9"`)
 	wrongResponse := httptest.NewRecorder()
@@ -112,7 +112,7 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	}
 
 	patchUser := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Users/"+user.ID, strings.NewReader(`{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"Replace","path":"active","value":false}]}`))
-	patchUser.Header.Set("Authorization", "Bearer "+directory.Token)
+	patchUser.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	patchUser.Header.Set("Content-Type", "application/scim+json")
 	patchUser.Header.Set("If-Match", `W/"1"`)
 	patchResponse := httptest.NewRecorder()
@@ -127,7 +127,7 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if bindingStatus != "revoked" {
 		t.Fatalf("SCIM deactivation binding status = %q, want revoked", bindingStatus)
 	}
-	secondResponse := postUser(directory.Token, `{"externalId":"idp-2","userName":"bob@example.test","displayName":"Bob","active":true}`)
+	secondResponse := postUser(directory.Token.Value(), `{"externalId":"idp-2","userName":"bob@example.test","displayName":"Bob","active":true}`)
 	if secondResponse.Code != http.StatusCreated {
 		t.Fatalf("second SCIM user create = %d %s", secondResponse.Code, secondResponse.Body.String())
 	}
@@ -138,14 +138,14 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	filteredRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=userName%20eq%20%22bob%40example.test%22&count=1`, nil)
-	filteredRequest.Header.Set("Authorization", "Bearer "+directory.Token)
+	filteredRequest.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	filteredResponse := httptest.NewRecorder()
 	mux.ServeHTTP(filteredResponse, filteredRequest)
 	if filteredResponse.Code != http.StatusOK || !strings.Contains(filteredResponse.Body.String(), `"totalResults":1`) {
 		t.Fatalf("SCIM user filter = %d %s", filteredResponse.Code, filteredResponse.Body.String())
 	}
 	invalidFilterRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=displayName%20eq%20%22Bob%22`, nil)
-	invalidFilterRequest.Header.Set("Authorization", "Bearer "+directory.Token)
+	invalidFilterRequest.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	invalidFilterResponse := httptest.NewRecorder()
 	mux.ServeHTTP(invalidFilterResponse, invalidFilterRequest)
 	if invalidFilterResponse.Code != http.StatusBadRequest || !strings.Contains(invalidFilterResponse.Body.String(), "invalidFilter") {
@@ -153,7 +153,7 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	}
 	postGroup := func(payload string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/scim/v2/"+directory.ID+"/Groups", strings.NewReader(payload))
-		req.Header.Set("Authorization", "Bearer "+directory.Token)
+		req.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 		req.Header.Set("Content-Type", "application/scim+json")
 		res := httptest.NewRecorder()
 		mux.ServeHTTP(res, req)
@@ -176,7 +176,7 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	putGroup := httptest.NewRequest(http.MethodPut, "/scim/v2/"+directory.ID+"/Groups/"+group.ID, strings.NewReader(`{"externalId":"group-1","displayName":"Engineering Updated","members":[{"value":"`+secondUser.ID+`"}]}`))
-	putGroup.Header.Set("Authorization", "Bearer "+directory.Token)
+	putGroup.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	putGroup.Header.Set("Content-Type", "application/scim+json")
 	putGroup.Header.Set("If-Match", group.Meta.Version)
 	putGroupResponse := httptest.NewRecorder()
@@ -184,8 +184,8 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if putGroupResponse.Code != http.StatusOK {
 		t.Fatalf("SCIM group replace = %d %s", putGroupResponse.Code, putGroupResponse.Body.String())
 	}
-	patchGroup := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Groups/"+group.ID, strings.NewReader(`{"Operations":[{"op":"replace","path":"displayName","value":"Engineering Final"}]}`))
-	patchGroup.Header.Set("Authorization", "Bearer "+directory.Token)
+	patchGroup := httptest.NewRequest(http.MethodPatch, "/scim/v2/"+directory.ID+"/Groups/"+group.ID, strings.NewReader(`{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[{"op":"replace","path":"displayName","value":"Engineering Final"}]}`))
+	patchGroup.Header.Set("Authorization", "Bearer "+directory.Token.Value())
 	patchGroup.Header.Set("Content-Type", "application/scim+json")
 	patchGroup.Header.Set("If-Match", `W/"2"`)
 	patchGroupResponse := httptest.NewRecorder()
@@ -205,16 +205,16 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if get(directory.Token, user.ID).Code != http.StatusUnauthorized {
+	if get(directory.Token.Value(), user.ID).Code != http.StatusUnauthorized {
 		t.Fatal("old SCIM token remained valid after rotation")
 	}
-	if get(rotated.Token, user.ID).Code != http.StatusOK {
+	if get(rotated.Token.Value(), user.ID).Code != http.StatusOK {
 		t.Fatal("rotated SCIM token was not accepted")
 	}
 	if err := svc.DisableDirectory(requestCtx, owner.ID, space.ID, directory.ID, rotated.Version); err != nil {
 		t.Fatal(err)
 	}
-	if get(rotated.Token, user.ID).Code != http.StatusUnauthorized {
+	if get(rotated.Token.Value(), user.ID).Code != http.StatusUnauthorized {
 		t.Fatal("disabled SCIM directory still accepted requests")
 	}
 }

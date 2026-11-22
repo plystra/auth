@@ -103,6 +103,24 @@ func WriteAccountEvent(ctx context.Context, q *db.Queries, in SecurityEvent) err
 	return appendSecurityEvent(ctx, q, in, "", []MemberSnapshot{}, true)
 }
 
+// WriteDirectoryEvent records a credential-authenticated directory operation
+// without pretending the directory is a member. Its persisted Space controls
+// tenant visibility in the same way as other structured security events.
+func WriteDirectoryEvent(ctx context.Context, q *db.Queries, in SecurityEvent) error {
+	if in.ActorType != "directory" || in.ActorID == "" || in.MemberID != "" ||
+		in.Resource.Type == "" || in.Resource.ID == "" || in.Resource.SpaceID == "" {
+		return errors.New("directory audit requires a directory identity and explicit resource")
+	}
+	directory, err := q.GetDirectory(ctx, db.GetDirectoryParams{ID: in.ActorID})
+	if err != nil {
+		return err
+	}
+	if directory.SpaceID != in.Resource.SpaceID {
+		return errors.New("directory audit resource belongs to another Space")
+	}
+	return appendSecurityEvent(ctx, q, in, "", []MemberSnapshot{}, true)
+}
+
 func appendSecurityEvent(ctx context.Context, q *db.Queries, in SecurityEvent, memberType string, owners []MemberSnapshot, chainComplete bool) error {
 	caller, _ := ctx.Value(callerKey{}).(Caller)
 	if in.UserID == "" {

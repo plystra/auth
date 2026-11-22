@@ -13,15 +13,17 @@ import (
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 )
 
 type SCIMUserInput struct {
-	ExternalID  string
-	UserName    string
-	DisplayName string
-	Active      bool
-	ActiveSet   bool
+	ExternalID     string
+	UserName       string
+	DisplayName    string
+	Active         bool
+	ActiveSet      bool
+	DisplayNameSet bool
 }
 
 type SCIMUser struct {
@@ -51,11 +53,7 @@ type SCIMGroup struct {
 	UpdatedAt   time.Time
 }
 
-func (s *Service) AuthenticateDirectory(ctx context.Context, directoryID, token string) (db.Directory, error) {
-	return s.authenticateDirectory(ctx, directoryID, token)
-}
-
-func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string, in SCIMUserInput) (SCIMUser, error) {
+func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token secret.String, in SCIMUserInput) (SCIMUser, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return SCIMUser{}, err
@@ -67,10 +65,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string,
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM user fields are invalid")
 	}
 	var out SCIMUser
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
-			return err
-		}
+	err = s.withDirectoryTx(ctx, directory, token, true, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
 		if _, err := q.GetDirectoryUserByExternalID(ctx, db.GetDirectoryUserByExternalIDParams{DirectoryID: directory.ID, ExternalID: in.ExternalID}); err == nil {
 			return apierr.New("conflict", "externalId already exists in this directory")
 		} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -94,7 +89,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string,
 			return err
 		}
 		user, err := q.CreateDirectoryProvisionedUser(ctx, db.CreateDirectoryProvisionedUserParams{
-			ID: string(ids.New[ids.UserID]("usr")), Email: in.UserName, EmailNormalized: in.UserName, PasswordHash: passwordHash,
+			ID: string(ids.New[ids.UserID]("usr")), Email: in.UserName, EmailNormalized: in.UserName, PasswordHash: passwordHash, DisplayName: in.DisplayName,
 		})
 		if err != nil {
 			return err
@@ -108,12 +103,13 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string,
 		if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: user.ID, MemberID: memberRow.ID}); err != nil {
 			return err
 		}
-		if _, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: directory.SpaceID}); err != nil {
+		policyVersion, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: directory.SpaceID})
+		if err != nil {
 			return err
 		}
 		created, err := q.CreateDirectoryUser(ctx, db.CreateDirectoryUserParams{
 			ID: string(ids.New[ids.ID]("dusr")), DirectoryID: directory.ID, ExternalID: in.ExternalID,
-			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName,
+			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active,
 		})
 		if err != nil {
 			return err
@@ -124,8 +120,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string,
 			}
 		}
 		out = scimUserFromRow(created)
-		out.Active = in.Active
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.user.create", created.ID, "success", map[string]string{"external_id": in.ExternalID, "active": boolString(in.Active), "space_id": directory.SpaceID})
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: memberRow.ID, Action: "scim.user.create", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: created.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"external_id": in.ExternalID, "active": boolString(in.Active), "space_id": directory.SpaceID}})
 	})
 	if err != nil {
 		return SCIMUser{}, normalizeSCIMError(err)
@@ -133,7 +128,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID, token string,
 	return out, nil
 }
 
-func (s *Service) ListSCIMUsers(ctx context.Context, directoryID, token, filter string, startIndex, count int32) ([]SCIMUser, int64, error) {
+func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token secret.String, filter string, startIndex, count int32) ([]SCIMUser, int64, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return nil, 0, err
@@ -141,54 +136,66 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID, token, filter 
 	if startIndex < 1 || count < 1 || count > 100 {
 		return nil, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
 	}
-	rows, err := s.Store.Queries().ListDirectoryUsers(ctx, db.ListDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter, OffsetCount: startIndex - 1, LimitCount: count})
+	users := []SCIMUser{}
+	var total int64
+	err = s.withDirectoryTx(ctx, directory, token, false, func(ctx context.Context, q *db.Queries, _ db.Directory) error {
+		rows, e := q.ListDirectoryUsers(ctx, db.ListDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter, OffsetCount: startIndex - 1, LimitCount: count})
+		if e != nil {
+			return e
+		}
+		total, e = q.CountDirectoryUsers(ctx, db.CountDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter})
+		if e != nil {
+			return e
+		}
+		for _, row := range rows {
+			users = append(users, scimUserFromRow(row))
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, 0, err
-	}
-	total, err := s.Store.Queries().CountDirectoryUsers(ctx, db.CountDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter})
-	if err != nil {
-		return nil, 0, err
-	}
-	users := make([]SCIMUser, 0, len(rows))
-	for _, row := range rows {
-		users = append(users, scimUserFromRow(row))
 	}
 	return users, total, nil
 }
 
-func (s *Service) GetSCIMUser(ctx context.Context, directoryID, token, userID string) (SCIMUser, error) {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return SCIMUser{}, err
-	}
-	row, err := s.Store.Queries().GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directory.ID, ID: strings.TrimSpace(userID)})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return SCIMUser{}, apierr.New("not_found", "SCIM user was not found")
-	}
-	if err != nil {
-		return SCIMUser{}, err
-	}
-	return scimUserFromRow(row), nil
-}
-
-func (s *Service) ReplaceSCIMUser(ctx context.Context, directoryID, token, userID string, in SCIMUserInput, version int64) (SCIMUser, error) {
-	return s.mutateSCIMUser(ctx, directoryID, token, userID, in, version, false)
-}
-
-func (s *Service) PatchSCIMUser(ctx context.Context, directoryID, token, userID string, in SCIMUserInput, version int64) (SCIMUser, error) {
-	return s.mutateSCIMUser(ctx, directoryID, token, userID, in, version, true)
-}
-
-func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID, token, userID string, version int64) (SCIMUser, error) {
+func (s *Service) GetSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string) (SCIMUser, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return SCIMUser{}, err
 	}
 	var out SCIMUser
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
+	err = s.withDirectoryTx(ctx, directory, token, false, func(ctx context.Context, q *db.Queries, _ db.Directory) error {
+		row, err := q.GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directory.ID, ID: strings.TrimSpace(userID)})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("not_found", "SCIM user was not found")
+		}
+		if err != nil {
 			return err
 		}
+		out = scimUserFromRow(row)
+		return nil
+	})
+	if err != nil {
+		return SCIMUser{}, err
+	}
+	return out, nil
+}
+
+func (s *Service) ReplaceSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string, in SCIMUserInput, version int64) (SCIMUser, error) {
+	return s.mutateSCIMUser(ctx, directoryID, token, userID, in, version, false)
+}
+
+func (s *Service) PatchSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string, in SCIMUserInput, version int64) (SCIMUser, error) {
+	return s.mutateSCIMUser(ctx, directoryID, token, userID, in, version, true)
+}
+
+func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string, version int64) (SCIMUser, error) {
+	directory, err := s.authenticateDirectory(ctx, directoryID, token)
+	if err != nil {
+		return SCIMUser{}, err
+	}
+	var out SCIMUser
+	err = s.withDirectoryTx(ctx, directory, token, true, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
 		row, err := q.LockDirectoryUser(ctx, db.LockDirectoryUserParams{DirectoryID: directory.ID, ID: strings.TrimSpace(userID)})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("not_found", "SCIM user was not found")
@@ -200,7 +207,7 @@ func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID, token, userID
 			return apierr.New("precondition_failed", "SCIM resource version does not match")
 		}
 		if row.Active {
-			if err := revokeDirectoryBindingTx(ctx, q, row); err != nil {
+			if err := revokeDirectoryBindingTx(ctx, q, directory, row); err != nil {
 				return err
 			}
 		}
@@ -208,8 +215,12 @@ func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID, token, userID
 		if err != nil {
 			return err
 		}
+		policyVersion, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: directory.SpaceID})
+		if err != nil {
+			return err
+		}
 		out = scimUserFromRow(deleted)
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.user.delete", row.ID, "success", map[string]string{"space_id": directory.SpaceID})
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: row.MemberID, Action: "scim.user.delete", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: row.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"space_id": directory.SpaceID}})
 	})
 	if err != nil {
 		return SCIMUser{}, normalizeSCIMError(err)
@@ -217,7 +228,7 @@ func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID, token, userID
 	return out, nil
 }
 
-func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID string, in SCIMUserInput, version int64, patch bool) (SCIMUser, error) {
+func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string, in SCIMUserInput, version int64, patch bool) (SCIMUser, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return SCIMUser{}, err
@@ -229,10 +240,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM user fields are invalid")
 	}
 	var out SCIMUser
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
-			return err
-		}
+	err = s.withDirectoryTx(ctx, directory, token, true, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
 		row, err := q.LockDirectoryUser(ctx, db.LockDirectoryUserParams{DirectoryID: directory.ID, ID: strings.TrimSpace(userID)})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("not_found", "SCIM user was not found")
@@ -249,7 +257,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID
 		if in.UserName == "" {
 			in.UserName = row.UserName
 		}
-		if in.DisplayName == "" && patch {
+		if !in.DisplayNameSet && patch {
 			in.DisplayName = row.DisplayName
 		}
 		if patch && !in.ActiveSet {
@@ -275,11 +283,16 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID
 			return err
 		}
 		if row.Active && !in.Active {
-			if err := revokeDirectoryBindingTx(ctx, q, row); err != nil {
+			if err := revokeDirectoryBindingTx(ctx, q, directory, row); err != nil {
 				return err
 			}
 		} else if !row.Active && in.Active {
-			if err := q.BindUserMember(ctx, db.BindUserMemberParams{UserID: row.UserID, MemberID: row.MemberID}); err != nil {
+			if s.Authorization == nil {
+				return apierr.New("temporarily_unavailable", "directory authorization service is unavailable")
+			}
+			if err := s.Authorization.ApplyDirectoryAuthorityTx(ctx, q, directory.ConfiguredByMemberID.String, directory.SpaceID, "", []string{row.MemberID}, func() error {
+				return q.BindUserMember(ctx, db.BindUserMemberParams{UserID: row.UserID, MemberID: row.MemberID})
+			}); err != nil {
 				return err
 			}
 		}
@@ -287,8 +300,12 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID
 		if err != nil {
 			return err
 		}
+		policyVersion, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: directory.SpaceID})
+		if err != nil {
+			return err
+		}
 		out = scimUserFromRow(updated)
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.user.update", row.ID, "success", map[string]string{"active": boolString(in.Active), "space_id": directory.SpaceID})
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: row.MemberID, Action: "scim.user.update", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: row.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"active": boolString(in.Active), "space_id": directory.SpaceID}})
 	})
 	if err != nil {
 		return SCIMUser{}, normalizeSCIMError(err)
@@ -296,191 +313,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID, token, userID
 	return out, nil
 }
 
-func (s *Service) CreateSCIMGroup(ctx context.Context, directoryID, token string, in SCIMGroupInput) (SCIMGroup, error) {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return SCIMGroup{}, err
-	}
-	in.ExternalID = strings.TrimSpace(in.ExternalID)
-	in.DisplayName = strings.TrimSpace(in.DisplayName)
-	if in.ExternalID == "" || len(in.ExternalID) > 512 || in.DisplayName == "" || len(in.DisplayName) > 256 {
-		return SCIMGroup{}, apierr.New("invalid_request", "SCIM group fields are invalid")
-	}
-	var out SCIMGroup
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
-			return err
-		}
-		if _, err := q.GetDirectoryGroupByExternalID(ctx, db.GetDirectoryGroupByExternalIDParams{DirectoryID: directory.ID, ExternalID: in.ExternalID}); err == nil {
-			return apierr.New("conflict", "externalId already exists in this directory")
-		} else if !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-		group, err := q.CreateStandardGroup(ctx, db.CreateStandardGroupParams{ID: string(ids.New[ids.GroupID]("grp")), SpaceID: directory.SpaceID, Name: in.DisplayName, ParentID: pgtype.Text{}})
-		if err != nil {
-			return err
-		}
-		created, err := q.CreateDirectoryGroup(ctx, db.CreateDirectoryGroupParams{ID: string(ids.New[ids.ID]("dgrp")), DirectoryID: directory.ID, ExternalID: in.ExternalID, GroupID: group.ID, DisplayName: in.DisplayName})
-		if err != nil {
-			return err
-		}
-		if err := syncDirectoryGroupMembersTx(ctx, q, directory.ID, directory.SpaceID, created.ID, group.ID, in.MemberIDs); err != nil {
-			return err
-		}
-		members, err := q.ListDirectoryGroupUserIDs(ctx, db.ListDirectoryGroupUserIDsParams{DirectoryID: directory.ID, DirectoryGroupID: created.ID})
-		if err != nil {
-			return err
-		}
-		out = scimGroupFromRow(created, members)
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.group.create", created.ID, "success", map[string]string{"space_id": directory.SpaceID})
-	})
-	if err != nil {
-		return SCIMGroup{}, normalizeSCIMError(err)
-	}
-	return out, nil
-}
-
-func (s *Service) ListSCIMGroups(ctx context.Context, directoryID, token string, startIndex, count int32) ([]SCIMGroup, int64, error) {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return nil, 0, err
-	}
-	if startIndex < 1 || count < 1 || count > 100 {
-		return nil, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
-	}
-	rows, err := s.Store.Queries().ListDirectoryGroups(ctx, db.ListDirectoryGroupsParams{DirectoryID: directory.ID, OffsetCount: startIndex - 1, LimitCount: count})
-	if err != nil {
-		return nil, 0, err
-	}
-	total, err := s.Store.Queries().CountDirectoryGroups(ctx, db.CountDirectoryGroupsParams{DirectoryID: directory.ID})
-	if err != nil {
-		return nil, 0, err
-	}
-	groups := make([]SCIMGroup, 0, len(rows))
-	for _, row := range rows {
-		members, err := s.Store.Queries().ListDirectoryGroupUserIDs(ctx, db.ListDirectoryGroupUserIDsParams{DirectoryID: directory.ID, DirectoryGroupID: row.ID})
-		if err != nil {
-			return nil, 0, err
-		}
-		groups = append(groups, scimGroupFromRow(row, members))
-	}
-	return groups, total, nil
-}
-
-func (s *Service) GetSCIMGroup(ctx context.Context, directoryID, token, groupID string) (SCIMGroup, error) {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return SCIMGroup{}, err
-	}
-	row, err := s.Store.Queries().GetDirectoryGroupByID(ctx, db.GetDirectoryGroupByIDParams{DirectoryID: directory.ID, ID: strings.TrimSpace(groupID)})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return SCIMGroup{}, apierr.New("not_found", "SCIM group was not found")
-	}
-	if err != nil {
-		return SCIMGroup{}, err
-	}
-	members, err := s.Store.Queries().ListDirectoryGroupUserIDs(ctx, db.ListDirectoryGroupUserIDsParams{DirectoryID: directory.ID, DirectoryGroupID: row.ID})
-	if err != nil {
-		return SCIMGroup{}, err
-	}
-	return scimGroupFromRow(row, members), nil
-}
-
-func (s *Service) ReplaceSCIMGroup(ctx context.Context, directoryID, token, groupID string, in SCIMGroupInput, version int64) (SCIMGroup, error) {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return SCIMGroup{}, err
-	}
-	in.DisplayName = strings.TrimSpace(in.DisplayName)
-	if in.DisplayName == "" || len(in.DisplayName) > 256 {
-		return SCIMGroup{}, apierr.New("invalid_request", "SCIM group fields are invalid")
-	}
-	var out SCIMGroup
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
-			return err
-		}
-		row, err := q.LockDirectoryGroup(ctx, db.LockDirectoryGroupParams{DirectoryID: directory.ID, ID: strings.TrimSpace(groupID)})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("not_found", "SCIM group was not found")
-		}
-		if err != nil {
-			return err
-		}
-		if row.Version != version {
-			return apierr.New("precondition_failed", "SCIM resource version does not match")
-		}
-		updated, err := q.UpdateDirectoryGroup(ctx, db.UpdateDirectoryGroupParams{DirectoryID: directory.ID, ID: row.ID, DisplayName: in.DisplayName, Version: row.Version})
-		if err != nil {
-			return err
-		}
-		if err := syncDirectoryGroupMembersTx(ctx, q, directory.ID, directory.SpaceID, row.ID, row.GroupID, in.MemberIDs); err != nil {
-			return err
-		}
-		members, err := q.ListDirectoryGroupUserIDs(ctx, db.ListDirectoryGroupUserIDsParams{DirectoryID: directory.ID, DirectoryGroupID: row.ID})
-		if err != nil {
-			return err
-		}
-		out = scimGroupFromRow(updated, members)
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.group.update", row.ID, "success", map[string]string{"space_id": directory.SpaceID})
-	})
-	if err != nil {
-		return SCIMGroup{}, normalizeSCIMError(err)
-	}
-	return out, nil
-}
-
-func (s *Service) DeleteSCIMGroup(ctx context.Context, directoryID, token, groupID string, version int64) error {
-	directory, err := s.authenticateDirectory(ctx, directoryID, token)
-	if err != nil {
-		return err
-	}
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockActiveDirectory(ctx, q, directory.ID); err != nil {
-			return err
-		}
-		row, err := q.LockDirectoryGroup(ctx, db.LockDirectoryGroupParams{DirectoryID: directory.ID, ID: strings.TrimSpace(groupID)})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("not_found", "SCIM group was not found")
-		}
-		if err != nil {
-			return err
-		}
-		if row.Version != version {
-			return apierr.New("precondition_failed", "SCIM resource version does not match")
-		}
-		if err := q.DeleteDirectoryManagedGroupMembers(ctx, db.DeleteDirectoryManagedGroupMembersParams{GroupID: row.GroupID, SpaceID: directory.SpaceID}); err != nil {
-			return err
-		}
-		if err := q.RemoveDirectoryBackedGroup(ctx, db.RemoveDirectoryBackedGroupParams{GroupID: row.GroupID, SpaceID: directory.SpaceID}); err != nil {
-			return err
-		}
-		if err := q.DeleteDirectoryGroupMembers(ctx, db.DeleteDirectoryGroupMembersParams{DirectoryGroupID: row.ID}); err != nil {
-			return err
-		}
-		if err := q.DeleteDirectoryGroup(ctx, db.DeleteDirectoryGroupParams{DirectoryID: directory.ID, ID: row.ID, Version: row.Version}); err != nil {
-			return err
-		}
-		return audit.WriteWithMetadata(ctx, q, "directory", directory.ID, "scim.group.delete", row.ID, "success", map[string]string{"space_id": directory.SpaceID})
-	})
-	return normalizeSCIMError(err)
-}
-
-func lockActiveDirectory(ctx context.Context, q *db.Queries, directoryID string) error {
-	row, err := q.LockDirectory(ctx, db.LockDirectoryParams{ID: directoryID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return apierr.New("not_found", "SCIM directory was not found")
-	}
-	if err != nil {
-		return err
-	}
-	if row.Status != "active" {
-		return apierr.New("unauthenticated", "SCIM directory is disabled")
-	}
-	return nil
-}
-
-func revokeDirectoryBindingTx(ctx context.Context, q *db.Queries, row db.DirectoryUser) error {
+func revokeDirectoryBindingTx(ctx context.Context, q *db.Queries, directory db.Directory, row db.DirectoryUser) error {
 	if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: row.UserID, MemberID: row.MemberID}); err != nil {
 		return err
 	}
@@ -488,8 +321,15 @@ func revokeDirectoryBindingTx(ctx context.Context, q *db.Queries, row db.Directo
 	if err != nil {
 		return err
 	}
+	space, err := q.GetSpace(ctx, db.GetSpaceParams{ID: directory.SpaceID})
+	if err != nil {
+		return err
+	}
 	for _, agentID := range agents {
 		if err := member.SetAgentSubtreeStatusTx(ctx, q, agentID, "suspended"); err != nil {
+			return err
+		}
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: agentID, Action: "agent.binding.suspend", Outcome: "success", PolicyVersion: space.PolicyVersion + 1, Metadata: map[string]string{"binding_user_id": row.UserID, "binding_member_id": row.MemberID}}); err != nil {
 			return err
 		}
 	}
@@ -514,7 +354,7 @@ func syncDirectoryGroupMembersTx(ctx context.Context, q *db.Queries, directoryID
 		}
 		seen[userID] = struct{}{}
 		user, err := q.GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directoryID, ID: userID})
-		if errors.Is(err, pgx.ErrNoRows) || !user.Active {
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && !user.Active {
 			return apierr.New("invalid_request", "group members must reference active users in this directory")
 		}
 		if err != nil {
@@ -550,7 +390,7 @@ func validSCIMEmail(value string) bool {
 		return false
 	}
 	at := strings.LastIndexByte(value, '@')
-	return at > 0 && at < len(value)-1 && !strings.Contains(value[at+1:], "@")
+	return at > 0 && at < len(value)-1 && strings.Count(value, "@") == 1
 }
 
 func boolString(value bool) string {

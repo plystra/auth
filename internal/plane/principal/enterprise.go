@@ -121,6 +121,14 @@ type directoryPathInput struct {
 	}
 }
 
+type deleteDirectoryInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	IfMatch       string `header:"If-Match"`
+	ID            string `path:"id"`
+	DirectoryID   string `path:"dir_id"`
+}
+
 type directoryOutput struct {
 	Body struct {
 		Data enterprise.Directory `json:"data"`
@@ -195,7 +203,7 @@ func (a *API) updateDirectory(ctx context.Context, in *directoryPathInput) (*dir
 	if err != nil {
 		return nil, err
 	}
-	request := map[string]any{"operation": "directories.update", "space_id": in.ID, "directory_id": in.DirectoryID, "name": strings.TrimSpace(in.Body.Name), "rotate_token": in.Body.RotateToken}
+	request := map[string]any{"operation": "directories.update", "space_id": in.ID, "directory_id": in.DirectoryID, "version": version, "name": strings.TrimSpace(in.Body.Name), "rotate_token": in.Body.RotateToken}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.update", request)
 	if err != nil {
 		return nil, err
@@ -218,7 +226,7 @@ func (a *API) updateDirectory(ctx context.Context, in *directoryPathInput) (*dir
 	return out, nil
 }
 
-func (a *API) deleteDirectory(ctx context.Context, in *directoryPathInput) (*authorizationDataOutput[acceptedData], error) {
+func (a *API) deleteDirectory(ctx context.Context, in *deleteDirectoryInput) (*authorizationDataOutput[acceptedData], error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
 	}
@@ -226,7 +234,7 @@ func (a *API) deleteDirectory(ctx context.Context, in *directoryPathInput) (*aut
 	if err != nil {
 		return nil, err
 	}
-	request := map[string]any{"operation": "directories.delete", "space_id": in.ID, "directory_id": in.DirectoryID}
+	request := map[string]any{"operation": "directories.delete", "space_id": in.ID, "directory_id": in.DirectoryID, "version": version}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "directories.delete", request)
 	if err != nil {
 		return nil, err

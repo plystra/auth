@@ -237,15 +237,17 @@ type AuthorizationPolicyState struct {
 }
 
 type Directory struct {
-	ID          string             `json:"id"`
-	SpaceID     string             `json:"space_id"`
-	Name        string             `json:"name"`
-	TokenPrefix string             `json:"token_prefix"`
-	TokenHash   []byte             `json:"token_hash"`
-	Status      string             `json:"status"`
-	Version     int64              `json:"version"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	ID                   string             `json:"id"`
+	SpaceID              string             `json:"space_id"`
+	Name                 string             `json:"name"`
+	TokenPrefix          string             `json:"token_prefix"`
+	TokenHash            []byte             `json:"token_hash"`
+	Status               string             `json:"status"`
+	Version              int64              `json:"version"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
+	ConfiguredByMemberID pgtype.Text        `json:"configured_by_member_id"`
+	ConfiguredByUserID   pgtype.Text        `json:"configured_by_user_id"`
 }
 
 type DirectoryGroup struct {
@@ -257,6 +259,7 @@ type DirectoryGroup struct {
 	Version     int64              `json:"version"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
 }
 
 type DirectoryGroupMember struct {
@@ -277,6 +280,7 @@ type DirectoryUser struct {
 	Version     int64              `json:"version"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
 }
 
 type EmailVerificationToken struct {

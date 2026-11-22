@@ -7,10 +7,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
+	"github.com/plystra/auth/internal/secret"
 )
 
 type DirectoryInput struct {
@@ -22,14 +25,14 @@ type DirectoryUpdate struct {
 }
 
 type Directory struct {
-	ID        string    `json:"id"`
-	SpaceID   string    `json:"space_id"`
-	Name      string    `json:"name"`
-	Token     string    `json:"token,omitempty"`
-	Status    string    `json:"status"`
-	Version   int64     `json:"version"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID        string        `json:"id"`
+	SpaceID   string        `json:"space_id"`
+	Name      string        `json:"name"`
+	Token     secret.String `json:"token,omitempty"`
+	Status    string        `json:"status"`
+	Version   int64         `json:"version"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
 }
 
 func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID string, in DirectoryInput) (Directory, error) {
@@ -55,12 +58,13 @@ func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID st
 		row, err := q.CreateDirectory(ctx, db.CreateDirectoryParams{
 			ID: string(ids.New[ids.ID]("dir")), SpaceID: spaceID, Name: name,
 			TokenPrefix: directoryTokenPrefix(token), TokenHash: digest(token),
+			ConfiguredByMemberID: pgtype.Text{String: actorMemberID, Valid: true}, ConfiguredByUserID: actorUserID(ctx, actorMemberID),
 		})
 		if err != nil {
 			return err
 		}
 		out = directoryFromRow(row)
-		out.Token = token
+		out.Token = secret.New(token)
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
 			Action: "directory.create", Outcome: "success", Permission: "auth.connections:manage",
@@ -120,14 +124,15 @@ func (s *Service) RotateDirectoryToken(ctx context.Context, actorMemberID, space
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
 		}
-		if err := q.RotateDirectoryToken(ctx, db.RotateDirectoryTokenParams{
+		updated, err := q.RotateDirectoryToken(ctx, db.RotateDirectoryTokenParams{
 			ID: row.ID, Version: row.Version, TokenPrefix: directoryTokenPrefix(token), TokenHash: digest(token),
-		}); err != nil {
+			ConfiguredByMemberID: pgtype.Text{String: actorMemberID, Valid: true}, ConfiguredByUserID: actorUserID(ctx, actorMemberID),
+		})
+		if err != nil {
 			return err
 		}
-		out = directoryFromRow(row)
-		out.Token = token
-		out.Version++
+		out = directoryFromRow(updated)
+		out.Token = secret.New(token)
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
 			Action: "directory.token.rotate", Outcome: "success", Permission: "auth.connections:manage",
@@ -213,11 +218,11 @@ func (s *Service) DisableDirectory(ctx context.Context, actorMemberID, spaceID, 
 	}))
 }
 
-func (s *Service) authenticateDirectory(ctx context.Context, directoryID, token string) (db.Directory, error) {
-	if strings.TrimSpace(token) == "" {
+func (s *Service) authenticateDirectory(ctx context.Context, directoryID string, token secret.String) (db.Directory, error) {
+	if strings.TrimSpace(token.Value()) == "" {
 		return db.Directory{}, apierr.New("unauthenticated", "SCIM bearer token required")
 	}
-	row, err := s.Store.Queries().GetDirectoryByTokenHash(ctx, db.GetDirectoryByTokenHashParams{TokenHash: digest(strings.TrimSpace(token))})
+	row, err := s.Store.Queries().GetDirectoryByTokenHash(ctx, db.GetDirectoryByTokenHashParams{TokenHash: digest(strings.TrimSpace(token.Value()))})
 	if errors.Is(err, pgx.ErrNoRows) || err == nil && row.ID != strings.TrimSpace(directoryID) {
 		return db.Directory{}, apierr.New("unauthenticated", "SCIM bearer token is invalid")
 	}
@@ -243,4 +248,9 @@ func directoryFromRow(row db.Directory) Directory {
 
 func directoryFromListRow(row db.ListDirectoriesRow) Directory {
 	return Directory{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Status: row.Status, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+}
+
+func actorUserID(ctx context.Context, memberID string) pgtype.Text {
+	id := authorization.HumanActorUserID(ctx, memberID)
+	return pgtype.Text{String: id, Valid: id != ""}
 }

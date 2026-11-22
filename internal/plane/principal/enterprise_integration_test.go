@@ -3,6 +3,7 @@ package principal
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -18,6 +19,72 @@ import (
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 )
+
+func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
+	service := &enterprise.Service{Store: st, Authorization: authz, StepUp: sessions}
+	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Enterprise: service}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("directory management", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	tokens, err := sessions.CreateForMember(ctx, "usr_principal_actor", owner.ID, nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sessions.VerifyAccess(tokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, path, body, version string, want int) *httptest.ResponseRecorder {
+		t.Helper()
+		req := httptest.NewRequest(method, "/v1/spaces/"+spaceID+"/directories"+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("If-Match", version)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != want {
+			t.Fatalf("%s directory endpoint = %d, want %d", method, res.Code, want)
+		}
+		return res
+	}
+	request("POST", "", `{"name":"Workforce"}`, "", 403)
+	seedStepUpProof(t, st, claims.SessionID, "directories.create", map[string]any{"operation": "directories.create", "space_id": spaceID, "name": "Workforce"})
+	created := request("POST", "", `{"name":"Workforce"}`, "", 200)
+	var result struct {
+		Data enterprise.Directory `json:"data"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &result); err != nil || result.Data.Token.Value() == "" {
+		t.Fatal("directory creation did not return its one-time credential")
+	}
+	directory := result.Data
+	listed := request("GET", "", "", "", 200)
+	if strings.Contains(listed.Body.String(), `"token"`) || strings.Contains(fmt.Sprintf("%+v", directory), directory.Token.Value()) {
+		t.Fatal("directory credential leaked through listing or formatting")
+	}
+	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{"operation": "directories.update", "space_id": spaceID,
+		"directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1)})
+	request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"2"`, 412)
+	rotated := request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"1"`, 200)
+	if err := json.Unmarshal(rotated.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Data.Version != 2 || !result.Data.UpdatedAt.After(directory.UpdatedAt) || result.Data.Token.Value() == directory.Token.Value() {
+		t.Fatal("rotation did not return the committed version, timestamp and new token")
+	}
+	seedStepUpProof(t, st, claims.SessionID, "directories.update", map[string]any{"operation": "directories.update", "space_id": spaceID, "directory_id": directory.ID, "name": "", "rotate_token": true, "version": int64(1)})
+	request("PATCH", "/"+directory.ID, `{"rotate_token":true}`, `W/"2"`, 403)
+	seedStepUpProof(t, st, claims.SessionID, "directories.delete", map[string]any{"operation": "directories.delete", "space_id": spaceID,
+		"directory_id": directory.ID, "version": int64(2)})
+	request("DELETE", "/"+directory.ID, "", `W/"2"`, 200)
+	var status string
+	if err := st.Pool.QueryRow(ctx, `SELECT status FROM directories WHERE id=$1`, directory.ID).Scan(&status); err != nil || status != "disabled" {
+		t.Fatalf("directory delete status = %s, %v", status, err)
+	}
+}
 
 type principalTXTResolver struct{ values []string }
 

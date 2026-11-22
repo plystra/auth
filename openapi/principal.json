@@ -5490,16 +5490,6 @@
             }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DirectoryPathInputBody"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "content": {
