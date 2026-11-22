@@ -342,6 +342,15 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 		if !op.Active || op.DisabledAt.Valid || row.AssuranceLevel < 2 {
 			return invalidCredentials()
 		}
+		// Both the session and identity are now locked. Only a still-live
+		// session may extend its idle deadline or exercise a capability.
+		_, err = q.TouchOperatorSession(ctx, db.TouchOperatorSessionParams{ID: row.ID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return invalidCredentials()
+		}
+		if err != nil {
+			return err
+		}
 		actor = row.UserID
 		current := Session{ID: row.ID, UserID: row.UserID, ExpiresAt: row.AccessExpiresAt.Time}
 		if err := json.Unmarshal(op.Capabilities, &current.Capabilities); err != nil {
@@ -358,9 +367,6 @@ func (s *Service) Run(ctx context.Context, raw, operation, capability string, di
 			if err != nil {
 				return err
 			}
-		}
-		if err := q.TouchOperatorSession(ctx, db.TouchOperatorSessionParams{ID: row.ID}); err != nil {
-			return err
 		}
 		if err := fn(q, current); err != nil {
 			return err
@@ -408,6 +414,13 @@ func (s *Service) Validate(ctx context.Context, raw string) error {
 			return err
 		}
 		if !op.Active || op.DisabledAt.Valid || row.AssuranceLevel < 2 {
+			return invalidCredentials()
+		}
+		live, err := q.OperatorSessionIsCurrent(ctx, db.OperatorSessionIsCurrentParams{ID: row.ID})
+		if err != nil {
+			return err
+		}
+		if !live {
 			return invalidCredentials()
 		}
 		return nil
