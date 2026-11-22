@@ -78,6 +78,8 @@ func TestSSOConnectionRoutesDeclareHumanAgentGovernanceContract(t *testing.T) {
 		path   string
 	}{
 		"sso_connections.list":   {method: http.MethodGet, path: "/v1/spaces/{id}/sso-connections"},
+		"domains.list":           {method: http.MethodGet, path: "/v1/spaces/{id}/domains"},
+		"directories.list":       {method: http.MethodGet, path: "/v1/spaces/{id}/directories"},
 		"sso_connections.get":    {method: http.MethodGet, path: "/v1/spaces/{id}/sso-connections/{conn_id}"},
 		"sso_connections.create": {method: http.MethodPost, path: "/v1/spaces/{id}/sso-connections"},
 		"sso_connections.delete": {method: http.MethodDelete, path: "/v1/spaces/{id}/sso-connections/{conn_id}"},

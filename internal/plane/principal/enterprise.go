@@ -15,7 +15,7 @@ import (
 	"github.com/plystra/auth/internal/secret"
 )
 
-type ssoConnectionsInput struct {
+type enterpriseSettingsListInput struct {
 	Authorization string `header:"Authorization"`
 	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
@@ -58,12 +58,6 @@ type ssoConnectionsOutput struct {
 	}
 }
 
-type domainsInput struct {
-	Authorization string `header:"Authorization"`
-	ApprovalID    string `header:"Approval-Id"`
-	ID            string `path:"id"`
-}
-
 type createDomainInput struct {
 	Authorization string `header:"Authorization"`
 	ApprovalID    string `header:"Approval-Id"`
@@ -93,11 +87,6 @@ type domainsOutput struct {
 	Body struct {
 		Data []enterprise.Domain `json:"data"`
 	}
-}
-
-type directoriesInput struct {
-	Authorization string `header:"Authorization"`
-	ID            string `path:"id"`
 }
 
 type createDirectoryInput struct {
@@ -146,11 +135,11 @@ type directoriesOutput struct {
 }
 
 func (a *API) registerEnterpriseRoutes(api huma.API) {
-	route.Register(api, route.NewSpec("directories.list", "GET", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listDirectories)
+	route.Register(api, route.NewSpec("directories.list", "GET", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDirectories)
 	route.Register(api, route.NewSpec("directories.create", "POST", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectory)
 	route.Register(api, route.NewSpec("directories.update", "PATCH", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDirectory)
 	route.Register(api, route.NewSpec("directories.delete", "DELETE", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDirectory)
-	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listDomains)
+	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDomains)
 	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
 	route.Register(api, route.NewSpec("domains.verify", "POST", "/v1/spaces/{id}/domains/{domain_id}/verify", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.verifyDomain)
 	route.Register(api, route.NewSpec("domains.delete", "DELETE", "/v1/spaces/{id}/domains/{domain_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDomain)
@@ -160,16 +149,25 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("sso_connections.delete", "DELETE", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteSSOConnection)
 }
 
-func (a *API) listDirectories(ctx context.Context, in *directoriesInput) (*directoriesOutput, error) {
+func (a *API) enterpriseSettingsListActor(ctx context.Context, in *enterpriseSettingsListInput, operation string) (string, context.Context, error) {
+	request := enterprise.SettingsListRequest(operation, in.ID)
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
+	if err != nil {
+		return "", ctx, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
+	return actor.ID, ctx, err
+}
+
+func (a *API) listDirectories(ctx context.Context, in *enterpriseSettingsListInput) (*directoriesOutput, error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
 	}
-	request := map[string]any{"operation": "directories.list", "space_id": in.ID}
-	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, "", in.ID, "", "auth.connections:manage", "directories.list", request)
+	actorID, ctx, err := a.enterpriseSettingsListActor(ctx, in, "directories.list")
 	if err != nil {
 		return nil, err
 	}
-	directories, err := a.Enterprise.ListDirectories(ctx, actor.ID, in.ID)
+	directories, err := a.Enterprise.ListDirectories(ctx, actorID, in.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -283,16 +281,15 @@ func parseDirectoryIfMatch(raw string) (int64, error) {
 	return version, nil
 }
 
-func (a *API) listDomains(ctx context.Context, in *domainsInput) (*domainsOutput, error) {
+func (a *API) listDomains(ctx context.Context, in *enterpriseSettingsListInput) (*domainsOutput, error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
 	}
-	request := map[string]any{"operation": "domains.list", "space_id": in.ID}
-	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "domains.list", request)
+	actorID, ctx, err := a.enterpriseSettingsListActor(ctx, in, "domains.list")
 	if err != nil {
 		return nil, err
 	}
-	domains, err := a.Enterprise.ListDomains(ctx, actor.ID, in.ID)
+	domains, err := a.Enterprise.ListDomains(ctx, actorID, in.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -406,20 +403,15 @@ func (a *API) getSSOConnection(ctx context.Context, in *ssoConnectionPathInput) 
 	return out, nil
 }
 
-func (a *API) listSSOConnections(ctx context.Context, in *ssoConnectionsInput) (*ssoConnectionsOutput, error) {
+func (a *API) listSSOConnections(ctx context.Context, in *enterpriseSettingsListInput) (*ssoConnectionsOutput, error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
 	}
-	request := enterprise.ConnectionListRequest(in.ID)
-	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "sso_connections.list", request)
+	actorID, ctx, err := a.enterpriseSettingsListActor(ctx, in, "sso_connections.list")
 	if err != nil {
 		return nil, err
 	}
-	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "sso_connections.list", request)
-	if err != nil {
-		return nil, err
-	}
-	connections, err := a.Enterprise.ListConnections(ctx, actor.ID, in.ID)
+	connections, err := a.Enterprise.ListConnections(ctx, actorID, in.ID)
 	if err != nil {
 		return nil, err
 	}
