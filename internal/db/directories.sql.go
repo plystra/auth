@@ -602,7 +602,7 @@ func (q *Queries) GetSCIMStandardRoot(ctx context.Context, arg GetSCIMStandardRo
 }
 
 const listDirectories = `-- name: ListDirectories :many
-SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
+SELECT id, space_id, name, status, version, created_at, updated_at, sso_connection_id, sso_identity_claim
 FROM directories WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -612,18 +612,15 @@ type ListDirectoriesParams struct {
 }
 
 type ListDirectoriesRow struct {
-	ID                   string             `json:"id"`
-	SpaceID              string             `json:"space_id"`
-	Name                 string             `json:"name"`
-	TokenPrefix          string             `json:"token_prefix"`
-	Status               string             `json:"status"`
-	Version              int64              `json:"version"`
-	CreatedAt            pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt            pgtype.Timestamptz `json:"updated_at"`
-	ConfiguredByMemberID pgtype.Text        `json:"configured_by_member_id"`
-	ConfiguredByUserID   pgtype.Text        `json:"configured_by_user_id"`
-	SsoConnectionID      pgtype.Text        `json:"sso_connection_id"`
-	SsoIdentityClaim     pgtype.Text        `json:"sso_identity_claim"`
+	ID               string             `json:"id"`
+	SpaceID          string             `json:"space_id"`
+	Name             string             `json:"name"`
+	Status           string             `json:"status"`
+	Version          int64              `json:"version"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
+	SsoConnectionID  pgtype.Text        `json:"sso_connection_id"`
+	SsoIdentityClaim pgtype.Text        `json:"sso_identity_claim"`
 }
 
 func (q *Queries) ListDirectories(ctx context.Context, arg ListDirectoriesParams) ([]ListDirectoriesRow, error) {
@@ -639,13 +636,10 @@ func (q *Queries) ListDirectories(ctx context.Context, arg ListDirectoriesParams
 			&i.ID,
 			&i.SpaceID,
 			&i.Name,
-			&i.TokenPrefix,
 			&i.Status,
 			&i.Version,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.ConfiguredByMemberID,
-			&i.ConfiguredByUserID,
 			&i.SsoConnectionID,
 			&i.SsoIdentityClaim,
 		); err != nil {

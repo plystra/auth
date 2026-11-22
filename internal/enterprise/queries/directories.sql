@@ -13,7 +13,7 @@ SELECT id, space_id, name, token_prefix, token_hash, status, version, created_at
 FROM directories WHERE id = sqlc.arg(id);
 
 -- name: ListDirectories :many
-SELECT id, space_id, name, token_prefix, status, version, created_at, updated_at, configured_by_member_id, configured_by_user_id, sso_connection_id, sso_identity_claim
+SELECT id, space_id, name, status, version, created_at, updated_at, sso_connection_id, sso_identity_claim
 FROM directories WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 

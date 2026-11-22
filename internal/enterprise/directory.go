@@ -91,7 +91,7 @@ func (s *Service) CreateDirectory(ctx context.Context, actorMemberID, spaceID st
 func (s *Service) ListDirectories(ctx context.Context, actorMemberID, spaceID string) ([]Directory, error) {
 	var rows []db.ListDirectoriesRow
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+		if err := s.authorizeSettingsReadTx(ctx, q, actorMemberID, SettingsListRequest("directories.list", spaceID)); err != nil {
 			return err
 		}
 		var err error

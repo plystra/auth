@@ -102,7 +102,7 @@ func TestSSOConnectionListProtectsSpaceProjectionAndRollsBackProof(t *testing.T)
 		t.Run(kind, func(t *testing.T) {
 			token, approvalID := human.AccessToken, ""
 			if kind == "human" {
-				seedStepUpProof(t, st, claims.SessionID, "sso_connections.list", enterprise.ConnectionListRequest(space))
+				seedStepUpProof(t, st, claims.SessionID, "sso_connections.list", enterprise.SettingsListRequest("sso_connections.list", space))
 			} else {
 				token = agentTokens.AccessToken
 				pending := get(t, token, "", "", 403)
@@ -118,7 +118,7 @@ func TestSSOConnectionListProtectsSpaceProjectionAndRollsBackProof(t *testing.T)
 				if r := get(t, token, approvalID, "/"+first, 403); r.Error.Code != "APPROVAL_REQUIRED" {
 					t.Fatalf("detail accepted list approval: %q", r.Error.Code)
 				}
-				digest, err := stepup.DigestValue(enterprise.ConnectionListRequest(space))
+				digest, err := stepup.DigestValue(enterprise.SettingsListRequest("sso_connections.list", space))
 				if err != nil {
 					t.Fatal(err)
 				}

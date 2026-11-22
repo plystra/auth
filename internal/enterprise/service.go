@@ -285,7 +285,7 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 func (s *Service) ListConnections(ctx context.Context, actorMemberID, spaceID string) ([]Connection, error) {
 	var out []Connection
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeConnectionReadTx(ctx, q, actorMemberID, ConnectionListRequest(spaceID)); err != nil {
+		if err := s.authorizeSettingsReadTx(ctx, q, actorMemberID, SettingsListRequest("sso_connections.list", spaceID)); err != nil {
 			return err
 		}
 		rows, err := q.ListSSOConnections(ctx, db.ListSSOConnectionsParams{SpaceID: spaceID})
@@ -308,15 +308,15 @@ func (s *Service) ListConnections(ctx context.Context, actorMemberID, spaceID st
 	return out, nil
 }
 
-func ConnectionListRequest(spaceID string) map[string]string {
-	return map[string]string{"operation": "sso_connections.list", "space_id": spaceID}
+func SettingsListRequest(operation, spaceID string) map[string]string {
+	return map[string]string{"operation": operation, "space_id": spaceID}
 }
 
 func ConnectionDetailRequest(spaceID, connectionID string) map[string]string {
 	return map[string]string{"operation": "sso_connections.get", "space_id": spaceID, "connection_id": connectionID}
 }
 
-func (s *Service) authorizeConnectionReadTx(ctx context.Context, q *db.Queries, actorMemberID string, request map[string]string) error {
+func (s *Service) authorizeSettingsReadTx(ctx context.Context, q *db.Queries, actorMemberID string, request map[string]string) error {
 	digest, err := stepup.DigestValue(request)
 	if err != nil {
 		return err
@@ -334,7 +334,7 @@ func (s *Service) authorizeConnectionReadTx(ctx context.Context, q *db.Queries, 
 		return nil
 	}
 	if actor.Type != "human" {
-		return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "reading SSO connections requires a human or Agent member")
+		return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "reading enterprise connection settings requires a human or Agent member")
 	}
 	proof, ok := stepup.RequirementFromContext(ctx)
 	if !ok || proof.Operation != operation || !bytes.Equal(proof.Digest, digest) {
@@ -354,7 +354,7 @@ func (s *Service) authorizeConnectionReadTx(ctx context.Context, q *db.Queries, 
 func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (Connection, error) {
 	var out Connection
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeConnectionReadTx(ctx, q, actorMemberID, ConnectionDetailRequest(spaceID, connectionID)); err != nil {
+		if err := s.authorizeSettingsReadTx(ctx, q, actorMemberID, ConnectionDetailRequest(spaceID, connectionID)); err != nil {
 			return err
 		}
 		row, err := q.GetSSOConnectionInSpace(ctx, db.GetSSOConnectionInSpaceParams{SpaceID: spaceID, ID: connectionID})
@@ -488,7 +488,7 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 func (s *Service) ListDomains(ctx context.Context, actorMemberID, spaceID string) ([]Domain, error) {
 	var rows []db.ListSSODomainsRow
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+		if err := s.authorizeSettingsReadTx(ctx, q, actorMemberID, SettingsListRequest("domains.list", spaceID)); err != nil {
 			return err
 		}
 		var err error
