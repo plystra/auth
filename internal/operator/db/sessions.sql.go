@@ -14,7 +14,8 @@ import (
 const consumeOperatorStepUp = `-- name: ConsumeOperatorStepUp :one
 UPDATE operator_sessions SET step_up_operation = NULL, step_up_digest = NULL, step_up_expires_at = NULL
 WHERE id = $1 AND step_up_operation = $2 AND step_up_digest = $3
-  AND step_up_expires_at > now() AND revoked_at IS NULL AND access_expires_at > now()
+  AND step_up_expires_at > clock_timestamp() AND revoked_at IS NULL
+  AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
 RETURNING id
 `
 
@@ -83,7 +84,7 @@ func (q *Queries) CreateOperatorSession(ctx context.Context, arg CreateOperatorS
 const lockOperatorSession = `-- name: LockOperatorSession :one
 SELECT s.id, s.user_id, s.token_hash, s.created_at, s.last_seen_at, s.expires_at, s.idle_expires_at, s.access_expires_at, s.revoked_at, s.assurance_level, s.step_up_operation, s.step_up_digest, s.step_up_expires_at, s.ip, s.user_agent FROM operator_sessions s
 WHERE s.token_hash = $1 AND s.revoked_at IS NULL
-  AND s.expires_at > now() AND s.idle_expires_at > now() AND s.access_expires_at > now()
+  AND s.expires_at > clock_timestamp() AND s.idle_expires_at > clock_timestamp() AND s.access_expires_at > clock_timestamp()
 FOR UPDATE
 `
 
@@ -112,6 +113,25 @@ func (q *Queries) LockOperatorSession(ctx context.Context, arg LockOperatorSessi
 		&i.UserAgent,
 	)
 	return i, err
+}
+
+const operatorSessionIsCurrent = `-- name: OperatorSessionIsCurrent :one
+SELECT EXISTS (
+    SELECT 1 FROM operator_sessions
+    WHERE id = $1 AND revoked_at IS NULL
+      AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
+)
+`
+
+type OperatorSessionIsCurrentParams struct {
+	ID string `json:"id"`
+}
+
+func (q *Queries) OperatorSessionIsCurrent(ctx context.Context, arg OperatorSessionIsCurrentParams) (bool, error) {
+	row := q.db.QueryRow(ctx, operatorSessionIsCurrent, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const revokeOperatorSession = `-- name: RevokeOperatorSession :exec
@@ -163,17 +183,21 @@ func (q *Queries) StepUpOperatorSession(ctx context.Context, arg StepUpOperatorS
 	return i, err
 }
 
-const touchOperatorSession = `-- name: TouchOperatorSession :exec
+const touchOperatorSession = `-- name: TouchOperatorSession :one
 UPDATE operator_sessions
-SET last_seen_at = now(), idle_expires_at = LEAST(expires_at, now() + interval '30 minutes')
-WHERE id = $1
+SET last_seen_at = clock_timestamp(), idle_expires_at = LEAST(expires_at, clock_timestamp() + interval '30 minutes')
+WHERE id = $1 AND revoked_at IS NULL
+  AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
+RETURNING id
 `
 
 type TouchOperatorSessionParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) TouchOperatorSession(ctx context.Context, arg TouchOperatorSessionParams) error {
-	_, err := q.db.Exec(ctx, touchOperatorSession, arg.ID)
-	return err
+func (q *Queries) TouchOperatorSession(ctx context.Context, arg TouchOperatorSessionParams) (string, error) {
+	row := q.db.QueryRow(ctx, touchOperatorSession, arg.ID)
+	var id string
+	err := row.Scan(&id)
+	return id, err
 }

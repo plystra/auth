@@ -6,13 +6,22 @@ RETURNING *;
 -- name: LockOperatorSession :one
 SELECT s.* FROM operator_sessions s
 WHERE s.token_hash = sqlc.arg(token_hash) AND s.revoked_at IS NULL
-  AND s.expires_at > now() AND s.idle_expires_at > now() AND s.access_expires_at > now()
+  AND s.expires_at > clock_timestamp() AND s.idle_expires_at > clock_timestamp() AND s.access_expires_at > clock_timestamp()
 FOR UPDATE;
 
--- name: TouchOperatorSession :exec
+-- name: OperatorSessionIsCurrent :one
+SELECT EXISTS (
+    SELECT 1 FROM operator_sessions
+    WHERE id = sqlc.arg(id) AND revoked_at IS NULL
+      AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
+);
+
+-- name: TouchOperatorSession :one
 UPDATE operator_sessions
-SET last_seen_at = now(), idle_expires_at = LEAST(expires_at, now() + interval '30 minutes')
-WHERE id = sqlc.arg(id);
+SET last_seen_at = clock_timestamp(), idle_expires_at = LEAST(expires_at, clock_timestamp() + interval '30 minutes')
+WHERE id = sqlc.arg(id) AND revoked_at IS NULL
+  AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
+RETURNING id;
 
 -- name: StepUpOperatorSession :one
 UPDATE operator_sessions
@@ -23,7 +32,8 @@ RETURNING *;
 -- name: ConsumeOperatorStepUp :one
 UPDATE operator_sessions SET step_up_operation = NULL, step_up_digest = NULL, step_up_expires_at = NULL
 WHERE id = sqlc.arg(id) AND step_up_operation = sqlc.arg(operation) AND step_up_digest = sqlc.arg(digest)
-  AND step_up_expires_at > now() AND revoked_at IS NULL AND access_expires_at > now()
+  AND step_up_expires_at > clock_timestamp() AND revoked_at IS NULL
+  AND expires_at > clock_timestamp() AND idle_expires_at > clock_timestamp() AND access_expires_at > clock_timestamp()
 RETURNING id;
 
 -- name: RevokeOperatorSession :exec

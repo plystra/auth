@@ -13,8 +13,7 @@ VALUES (
     sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id)
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree;
+    role_mappings, status, covers_subtree, created_at, updated_at;
 
 -- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
@@ -30,8 +29,7 @@ FROM sso_connections WHERE space_id = sqlc.arg(space_id) AND id = sqlc.arg(id);
 
 -- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree
+    role_mappings, status, covers_subtree, created_at, updated_at
 FROM sso_connections WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 

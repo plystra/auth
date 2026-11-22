@@ -28,9 +28,9 @@ SET step_up_operation = NULL,
 WHERE sessions.id = sqlc.arg(id)
   AND step_up_operation = sqlc.arg(operation)
   AND step_up_digest = sqlc.arg(digest)
-  AND step_up_expires_at > now()
+  AND step_up_expires_at > clock_timestamp()
   AND revoked_at IS NULL
-  AND expires_at > now()
+  AND expires_at > clock_timestamp()
   AND (step_up_method = 'totp' OR (
       step_up_method = 'password'
       AND step_up_operation = 'me.factors.create'

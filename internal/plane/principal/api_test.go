@@ -90,7 +90,7 @@ func TestSSOConnectionRoutesDeclareHumanAgentGovernanceContract(t *testing.T) {
 		if spec.Method != expected.method || spec.Path != expected.path || spec.Plane != route.Principal || spec.Permission != "auth.connections:manage" || len(spec.Subjects) != 1 || spec.Subjects[0] != route.HumanAgent {
 			t.Fatalf("SSO route %q = %+v, want principal H/A auth.connections:manage", spec.Name, spec)
 		}
-		if spec.Name != "sso_connections.list" && (!spec.StepUp || !spec.AuthoritativeCheck) {
+		if !spec.StepUp || !spec.AuthoritativeCheck {
 			t.Fatalf("SSO connection route %q = %+v, want step-up and authoritative checks", spec.Name, spec)
 		}
 		delete(want, spec.Name)

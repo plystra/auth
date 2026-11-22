@@ -265,7 +265,10 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		if err != nil {
 			return err
 		}
-		out = connectionFromRow(row)
+		out, err = connectionFromPublicRow(db.ListSSOConnectionsRow(row))
+		if err != nil {
+			return err
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
 			Action: "sso.connection.create", Outcome: "success", Permission: "auth.connections:manage",
@@ -280,71 +283,79 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 }
 
 func (s *Service) ListConnections(ctx context.Context, actorMemberID, spaceID string) ([]Connection, error) {
-	if s.Authorization == nil {
-		return nil, apierr.New("unavailable", "authorization is unavailable")
-	}
-	var rows []db.ListSSOConnectionsRow
+	var out []Connection
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		decision, err := s.Authorization.CheckMutationTx(ctx, q, authorization.CheckRequest{
-			MemberID: actorMemberID, Permission: "auth.connections:manage", ResourceSpace: spaceID,
-		})
+		if err := s.authorizeConnectionReadTx(ctx, q, actorMemberID, ConnectionListRequest(spaceID)); err != nil {
+			return err
+		}
+		rows, err := q.ListSSOConnections(ctx, db.ListSSOConnectionsParams{SpaceID: spaceID})
 		if err != nil {
 			return err
 		}
-		if decision.Effect != engine.Allow {
-			return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+		out = make([]Connection, 0, len(rows))
+		for _, row := range rows {
+			connection, err := connectionFromPublicRow(row)
+			if err != nil {
+				return err
+			}
+			out = append(out, connection)
 		}
-		rows, err = q.ListSSOConnections(ctx, db.ListSSOConnectionsParams{SpaceID: spaceID})
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, normalizeConnectionError(err)
 	}
-	out := make([]Connection, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, connectionFromListRow(row))
-	}
 	return out, nil
+}
+
+func ConnectionListRequest(spaceID string) map[string]string {
+	return map[string]string{"operation": "sso_connections.list", "space_id": spaceID}
 }
 
 func ConnectionDetailRequest(spaceID, connectionID string) map[string]string {
 	return map[string]string{"operation": "sso_connections.get", "space_id": spaceID, "connection_id": connectionID}
 }
 
-func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (Connection, error) {
-	digest, err := stepup.DigestValue(ConnectionDetailRequest(spaceID, connectionID))
+func (s *Service) authorizeConnectionReadTx(ctx context.Context, q *db.Queries, actorMemberID string, request map[string]string) error {
+	digest, err := stepup.DigestValue(request)
 	if err != nil {
-		return Connection{}, err
+		return err
 	}
-	ctx = authorization.BindGovernanceApproval(ctx, "sso_connections.get", spaceID, digest)
+	operation, spaceID := request["operation"], request["space_id"]
+	ctx = authorization.BindGovernanceApproval(ctx, operation, spaceID, digest)
+	if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+		return err
+	}
+	actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
+	if err != nil {
+		return err
+	}
+	if actor.Type == "agent" {
+		return nil
+	}
+	if actor.Type != "human" {
+		return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "reading SSO connections requires a human or Agent member")
+	}
+	proof, ok := stepup.RequirementFromContext(ctx)
+	if !ok || proof.Operation != operation || !bytes.Equal(proof.Digest, digest) {
+		return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
+	}
+	issued, err := q.GetSession(ctx, db.GetSessionParams{ID: proof.SessionID})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	validUser := issued.UserID != "" && issued.UserID == authorization.HumanActorUserID(ctx, actorMemberID)
+	if !validUser || issued.MemberID.Valid && issued.MemberID.String != actorMemberID {
+		return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
+	}
+	return s.consumeStepUp(ctx, q)
+}
+
+func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (Connection, error) {
 	var out Connection
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.authorizeConnectionReadTx(ctx, q, actorMemberID, ConnectionDetailRequest(spaceID, connectionID)); err != nil {
 			return err
-		}
-		actor, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: actorMemberID})
-		if err != nil {
-			return err
-		}
-		if actor.Type != "human" && actor.Type != "agent" {
-			return apierr.New("PRINCIPAL_KIND_NOT_ALLOWED", "SSO connection details require a human or Agent member")
-		}
-		if actor.Type == "human" {
-			proof, ok := stepup.RequirementFromContext(ctx)
-			if !ok || proof.Operation != "sso_connections.get" || !bytes.Equal(proof.Digest, digest) {
-				return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
-			}
-			issued, err := q.GetSession(ctx, db.GetSessionParams{ID: proof.SessionID})
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-			validUser := issued.UserID != "" && issued.UserID == authorization.HumanActorUserID(ctx, actorMemberID)
-			if !validUser || issued.MemberID.Valid && issued.MemberID.String != actorMemberID {
-				return apierr.New("STEP_UP_REQUIRED", "complete step-up for this operation and request")
-			}
-			if err := s.consumeStepUp(ctx, q); err != nil {
-				return err
-			}
 		}
 		row, err := q.GetSSOConnectionInSpace(ctx, db.GetSSOConnectionInSpaceParams{SpaceID: spaceID, ID: connectionID})
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -353,8 +364,8 @@ func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, con
 		if err != nil {
 			return err
 		}
-		out = connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
-		return nil
+		out, err = connectionFromPublicRow(db.ListSSOConnectionsRow(row))
+		return err
 	})
 	if err != nil {
 		return Connection{}, normalizeConnectionError(err)
@@ -1471,18 +1482,17 @@ func displayName(claims idTokenClaims, email string) string {
 	return name
 }
 
-func connectionFromRow(row db.CreateSSOConnectionRow) Connection {
-	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
-}
-
-func connectionFromListRow(row db.ListSSOConnectionsRow) Connection {
-	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
-}
-
-func connectionFromValues(id, spaceID, name, provider, issuer, clientID, redirectURI, groupsClaim string, rawMappings []byte, status string, coversSubtree bool, createdAt, updatedAt time.Time) Connection {
+func connectionFromPublicRow(row db.ListSSOConnectionsRow) (Connection, error) {
 	mappings := map[string]string{}
-	_ = json.Unmarshal(rawMappings, &mappings)
-	return Connection{ID: id, SpaceID: spaceID, Name: name, Provider: provider, Issuer: issuer, ClientID: clientID, RedirectURI: redirectURI, GroupsClaim: groupsClaim, RoleMappings: mappings, Status: status, CoversSubtree: coversSubtree, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	if err := json.Unmarshal(row.RoleMappings, &mappings); err != nil || mappings == nil {
+		return Connection{}, apierr.New("UNAVAILABLE", "SSO connection configuration is unavailable")
+	}
+	return Connection{
+		ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Provider: row.Provider,
+		Issuer: row.Issuer, ClientID: row.ClientID, RedirectURI: row.RedirectUri,
+		GroupsClaim: row.GroupsClaim, RoleMappings: mappings, Status: row.Status,
+		CoversSubtree: row.CoversSubtree, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time,
+	}, nil
 }
 
 func normalizeConnectionError(err error) error {

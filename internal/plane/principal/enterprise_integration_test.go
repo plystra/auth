@@ -179,8 +179,8 @@ func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 	ctx := context.Background()
 	st, authz, owner, spaceID, sessions, signer := newPrincipalFixture(t)
 	seedTestInlineGrant(t, st, spaceID, owner.ID, owner.ID, "auth.connections:manage")
-	enterpriseService := &enterprise.Service{Store: st, Authorization: authz, DataKey: secret.New(strings.Repeat("d", 32))}
-	approvals := &approval.Service{Store: st, Authorization: authz}
+	enterpriseService := &enterprise.Service{Store: st, Authorization: authz, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32))}
+	approvals := &approval.Service{Store: st, Authorization: authz, StepUp: sessions}
 	api := &API{Authorization: authz, Sessions: sessions, Signer: signer, Approvals: approvals, Enterprise: enterpriseService}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("SSO connection integration test", "1.0.0")))
@@ -200,10 +200,28 @@ func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 		handler.ServeHTTP(response, req)
 		return response
 	}
+	claims, err := sessions.VerifyAccess(humanTokens.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireStepUp := func() {
+		t.Helper()
+		response := requestList(humanTokens.AccessToken, "")
+		if response.Code != http.StatusForbidden || !strings.Contains(response.Body.String(), "STEP_UP_REQUIRED") {
+			t.Fatalf("list accepted a missing, spent or unrelated step-up: status=%d", response.Code)
+		}
+	}
+	requireStepUp()
+	seedStepUpProof(t, st, claims.SessionID, "sso_connections.get", enterprise.ConnectionDetailRequest(spaceID, "con_unrelated"))
+	requireStepUp()
+	seedStepUpProof(t, st, claims.SessionID, "sso_connections.list", enterprise.ConnectionListRequest("spc_other"))
+	requireStepUp()
+	seedStepUpProof(t, st, claims.SessionID, "sso_connections.list", enterprise.ConnectionListRequest(spaceID))
 	human := requestList(humanTokens.AccessToken, "")
 	if human.Code != http.StatusOK || !strings.Contains(human.Body.String(), `"data":[]`) {
 		t.Fatalf("human SSO connection list = %d %s", human.Code, human.Body.String())
 	}
+	requireStepUp()
 
 	agents := &agent.Service{Store: st}
 	created, _, err := agents.Create(ctx, agent.CreateInput{OwnerMemberID: owner.ID, Name: "sso-manager", ExpiresAt: time.Now().UTC().Add(time.Hour)})
@@ -231,12 +249,10 @@ func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 	if approvalID == "" {
 		t.Fatalf("Agent approval response omitted approval_id: %s", pending.Body.String())
 	}
-	if _, err := st.Pool.Exec(ctx, `
-		UPDATE approval_requests
-		SET status = 'approved', decided_by_user_id = 'usr_principal_actor', decided_at = now(), approved_expires_at = now() + interval '5 minutes'
-		WHERE id = $1 AND status = 'pending'
-	`, approvalID); err != nil {
-		t.Fatal(err)
+	seedStepUpProof(t, st, claims.SessionID, "approvals.approve", map[string]any{"approval_id": approvalID})
+	approved := applicationAuditRequest(t, handler, http.MethodPost, "/v1/approvals/"+approvalID+"/approve", humanTokens.AccessToken, "req_approve_sso_list", nil)
+	if approved.Code != http.StatusOK {
+		t.Fatalf("owner approval returned HTTP %d", approved.Code)
 	}
 	agentList := requestList(agentTokens.AccessToken, approvalID)
 	if agentList.Code != http.StatusOK || !strings.Contains(agentList.Body.String(), `"data":[]`) {
@@ -248,6 +264,10 @@ func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 	}
 	if status != "consumed" {
 		t.Fatalf("SSO list approval status = %q, want consumed", status)
+	}
+	spent := requestList(agentTokens.AccessToken, approvalID)
+	if spent.Code != http.StatusForbidden || !strings.Contains(spent.Body.String(), "APPROVAL_REQUIRED") {
+		t.Fatalf("list accepted a spent Agent approval: status=%d", spent.Code)
 	}
 }
 
