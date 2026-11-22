@@ -157,7 +157,7 @@ type idTokenClaims struct {
 	EmailVerified  bool                       `json:"email_verified"`
 	Name           string                     `json:"name"`
 	Nonce          string                     `json:"nonce"`
-	Groups         []string                   `json:"groups"`
+	Groups         []string                   `json:"-"`
 	VerifiedClaims map[string]json.RawMessage `json:"-"`
 	SAMLAttributes map[string][]string        `json:"-"`
 }
@@ -904,8 +904,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	}
 	claims := idTokenClaims{
 		Subject: info.NameID, Email: email, EmailVerified: true,
-		Name:   firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
-		Groups: firstSAMLValues(info.Values, "groups", "Groups", "memberOf", "MemberOf"),
+		Name: firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
 	}
 	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
 	if len(info.Assertions) != 1 {
@@ -918,6 +917,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 			}
 		}
 	}
+	claims.Groups = claims.SAMLAttributes[row.GroupsClaim]
 	return s.finishCallback(ctx, row, state, claims)
 }
 
@@ -958,15 +958,6 @@ func firstSAMLValue(values saml2.Values, names ...string) string {
 		}
 	}
 	return ""
-}
-
-func firstSAMLValues(values saml2.Values, names ...string) []string {
-	for _, name := range names {
-		if all := values.GetAll(name); len(all) > 0 {
-			return all
-		}
-	}
-	return nil
 }
 
 func validSAMLIdentity(email string) bool {
@@ -1227,15 +1218,9 @@ func parseIDToken(ctx context.Context, provider *oidc.Provider, raw, clientID, g
 	if err := token.Claims(&claims.VerifiedClaims); err != nil {
 		return idTokenClaims{}, err
 	}
-	if groupsClaim != "" && groupsClaim != "groups" {
-		var rawClaims map[string]json.RawMessage
-		if err := token.Claims(&rawClaims); err != nil {
+	if value, ok := claims.VerifiedClaims[groupsClaim]; ok {
+		if err := json.Unmarshal(value, &claims.Groups); err != nil {
 			return idTokenClaims{}, err
-		}
-		if value, ok := rawClaims[groupsClaim]; ok {
-			if err := json.Unmarshal(value, &claims.Groups); err != nil {
-				return idTokenClaims{}, err
-			}
 		}
 	}
 	return claims, nil
