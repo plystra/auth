@@ -644,6 +644,8 @@ type SsoConnection struct {
 	SamlSsoBinding         pgtype.Text        `json:"saml_sso_binding"`
 	SamlIdpCertificate     pgtype.Text        `json:"saml_idp_certificate"`
 	CoversSubtree          bool               `json:"covers_subtree"`
+	ConfiguredByMemberID   pgtype.Text        `json:"configured_by_member_id"`
+	ConfiguredByUserID     pgtype.Text        `json:"configured_by_user_id"`
 }
 
 type SsoDomain struct {

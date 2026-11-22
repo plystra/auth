@@ -1,6 +1,7 @@
 package enterprise
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -18,6 +19,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -257,7 +259,7 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 			ID: connectionID, SpaceID: spaceID, Name: in.Name, Provider: in.Provider,
 			Issuer: in.Issuer, ClientID: in.ClientID, ClientSecretCiphertext: ciphertext,
 			RedirectUri: redirectURI, GroupsClaim: in.GroupsClaim, RoleMappings: mappings,
-			CoversSubtree: in.CoversSubtree,
+			CoversSubtree: in.CoversSubtree, ConfiguredByMemberID: optionalDirectoryText(actorMemberID), ConfiguredByUserID: actorUserID(ctx, actorMemberID),
 		}
 		if samlDetails != nil {
 			params.SamlEntityID = pgtype.Text{String: samlDetails.EntityID, Valid: true}
@@ -961,8 +963,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	if email == "" || len(email) > 320 || strings.ContainsAny(email, "\r\n") {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC email claim is invalid")
 	}
-	groups := claims.Groups
-	if len(groups) > maxIdentityGroups {
+	if len(claims.Groups) > maxIdentityGroups {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC groups claim is too large")
 	}
 	hint, err := s.directorySSOHint(ctx, connection, claims)
@@ -974,7 +975,8 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	userName := displayName(claims, email)
 	var userCreated time.Time
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := lockDirectorySSOTx(ctx, q, connection, hint); err != nil {
+		plan, err := lockSSOLoginTx(ctx, q, connection, claims, hint)
+		if err != nil {
 			return err
 		}
 		lockedConnection, err := q.LockSSOConnection(ctx, db.LockSSOConnectionParams{ID: connection.ID})
@@ -983,6 +985,10 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		}
 		if lockedConnection.Status != "active" {
 			return apierr.New("forbidden", "SSO connection is disabled")
+		}
+		if lockedConnection.ConfiguredByMemberID != connection.ConfiguredByMemberID || lockedConnection.ConfiguredByUserID != connection.ConfiguredByUserID ||
+			lockedConnection.GroupsClaim != connection.GroupsClaim || !bytes.Equal(lockedConnection.RoleMappings, connection.RoleMappings) {
+			return apierr.New("conflict", "SSO mapping changed; restart sign-in")
 		}
 		active, err := q.AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: connection.SpaceID})
 		if err != nil {
@@ -1013,6 +1019,9 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			userEmail, userStatus, userCreated, userName = identity.Email, identity.Status, identity.CreatedAt.Time, identity.DisplayName
 		} else {
 			external, err := q.GetExternalIdentity(ctx, db.GetExternalIdentityParams{Issuer: connection.Issuer, Subject: claims.Subject})
+			if (err == nil || errors.Is(err, pgx.ErrNoRows)) && external.UserID != plan.userID {
+				return apierr.New("conflict", "SSO identity changed; restart sign-in")
+			}
 			if errors.Is(err, pgx.ErrNoRows) {
 				if existing, emailErr := q.GetUserByEmail(ctx, db.GetUserByEmailParams{EmailNormalized: email}); emailErr == nil {
 					_ = existing
@@ -1035,7 +1044,6 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				if _, err := q.CreateExternalIdentity(ctx, db.CreateExternalIdentityParams{ID: string(ids.New[ids.ID]("ext")), UserID: userID, Issuer: connection.Issuer, Subject: claims.Subject}); err != nil {
 					return err
 				}
-				newMembership = true
 			} else if err != nil {
 				return err
 			} else {
@@ -1053,7 +1061,20 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				userEmail, userStatus, userCreated = user.Email, user.Status, user.CreatedAt.Time
 			}
 			member, memberErr := q.GetMemberForUser(ctx, db.GetMemberForUserParams{UserID: userID, SpaceID: connection.SpaceID})
+			if (memberErr == nil || errors.Is(memberErr, pgx.ErrNoRows)) && member.ID != plan.memberID {
+				return apierr.New("conflict", "SSO membership changed; restart sign-in")
+			}
 			if errors.Is(memberErr, pgx.ErrNoRows) {
+				if !slices.ContainsFunc(plan.roles, func(role db.LockSSOMappingRolesRow) bool { return role.Name == "member" }) {
+					return apierr.New("temporarily_unavailable", "the Space has no default member role")
+				}
+				if s.Authorization == nil {
+					return apierr.New("unavailable", "authorization is unavailable")
+				}
+				if err := s.Authorization.CheckSSOLoginGrantsTx(ctx, q, connection.ConfiguredByMemberID.String, connection.ConfiguredByUserID.String,
+					connection.SpaceID, connection.ID, plan.mapped, plan.roles); err != nil {
+					return err
+				}
 				createdMember, createErr := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: connection.SpaceID, Name: displayName(claims, email), Type: "human", BindingPolicy: "single"})
 				if createErr != nil {
 					return createErr
@@ -1070,14 +1091,10 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			}
 		}
 		if newMembership {
-			roles, err := s.rolesForLogin(ctx, q, connection, groups)
-			if err != nil {
-				return err
-			}
-			for _, roleID := range roles {
+			for _, role := range plan.roles {
 				if _, err := q.CreateGrant(ctx, db.CreateGrantParams{
 					ID: string(ids.New[ids.GrantID]("grt")), SpaceID: connection.SpaceID,
-					RoleID: pgtype.Text{String: roleID, Valid: true}, GranteeMemberID: pgtype.Text{String: memberID, Valid: true},
+					RoleID: pgtype.Text{String: role.ID, Valid: true}, GranteeMemberID: pgtype.Text{String: memberID, Valid: true},
 					Scope: "space", AnchorSpaceID: pgtype.Text{String: connection.SpaceID, Valid: true}, GrantedBy: connection.ID,
 				}); err != nil {
 					return err
@@ -1119,39 +1136,6 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		return account.AuthResult{}, err
 	}
 	return account.AuthResult{User: account.User{ID: userID, Email: userEmail, EmailVerified: true, Status: userStatus, DisplayName: userName, CreatedAt: userCreated}, Tokens: &tokens}, nil
-}
-
-func (s *Service) rolesForLogin(ctx context.Context, q *db.Queries, connection db.SsoConnection, groups []string) ([]string, error) {
-	defaultRole, err := q.GetRoleByNameInSpace(ctx, db.GetRoleByNameInSpaceParams{SpaceID: connection.SpaceID, Name: "member"})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, apierr.New("temporarily_unavailable", "the Space has no default member role")
-	}
-	if err != nil {
-		return nil, err
-	}
-	var mappings map[string]string
-	if err := json.Unmarshal(connection.RoleMappings, &mappings); err != nil {
-		return nil, err
-	}
-	roles := []string{defaultRole.ID}
-	seen := map[string]struct{}{defaultRole.ID: {}}
-	for _, group := range groups {
-		roleID, ok := mappings[group]
-		if !ok {
-			continue
-		}
-		if _, ok := seen[roleID]; ok {
-			continue
-		}
-		if _, err := q.GetRoleInSpace(ctx, db.GetRoleInSpaceParams{ID: roleID, SpaceID: connection.SpaceID}); errors.Is(err, pgx.ErrNoRows) {
-			return nil, apierr.New("temporarily_unavailable", "an SSO role mapping references a missing role")
-		} else if err != nil {
-			return nil, err
-		}
-		seen[roleID] = struct{}{}
-		roles = append(roles, roleID)
-	}
-	return roles, nil
 }
 
 func (s *Service) discovery(ctx context.Context, issuer string) (discoveryDocument, *oidc.Provider, error) {

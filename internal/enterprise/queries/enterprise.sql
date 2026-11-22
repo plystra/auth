@@ -2,14 +2,15 @@
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(provider),
     sqlc.arg(issuer), sqlc.arg(client_id), sqlc.narg(client_secret_ciphertext),
     sqlc.arg(redirect_uri), sqlc.arg(groups_claim), sqlc.arg(role_mappings), 'active',
     sqlc.narg(saml_entity_id), sqlc.narg(saml_sso_url), sqlc.narg(saml_sso_binding),
-    sqlc.narg(saml_idp_certificate), sqlc.arg(covers_subtree)
+    sqlc.narg(saml_idp_certificate), sqlc.arg(covers_subtree),
+    sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id)
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
@@ -18,7 +19,8 @@ RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_
 -- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
+    configured_by_member_id, configured_by_user_id
 FROM sso_connections WHERE id = sqlc.arg(id);
 
 -- name: ListSSOConnections :many
@@ -31,7 +33,8 @@ ORDER BY created_at, id;
 -- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
+    configured_by_member_id, configured_by_user_id
 FROM sso_connections WHERE id = sqlc.arg(id) FOR UPDATE;
 
 -- name: DisableSSOConnection :exec
@@ -73,10 +76,6 @@ RETURNING id, user_id, issuer, subject, created_at, directory_user_id;
 -- name: MarkExternalUserVerified :exec
 UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()), status = 'active', updated_at = now()
 WHERE id = sqlc.arg(id);
-
--- name: GetRoleByNameInSpace :one
-SELECT id, space_id, name, description, managed, created_at
-FROM roles WHERE space_id = sqlc.arg(space_id) AND name = sqlc.arg(name);
 
 -- name: AssociateExternalDirectoryUser :one
 UPDATE external_identities SET directory_user_id = sqlc.arg(directory_user_id)

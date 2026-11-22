@@ -9,7 +9,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
-	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/ids"
 )
@@ -113,16 +112,9 @@ func (s *Service) directorySSOHint(ctx context.Context, connection db.SsoConnect
 	return &directorySSOHint{directory: directory, user: user}, nil
 }
 
+// The caller holds the Space lock, which serializes directory associations
+// including their absence.
 func lockDirectorySSOTx(ctx context.Context, q *db.Queries, connection db.SsoConnection, hint *directorySSOHint) error {
-	var users, members []string
-	if hint != nil {
-		users, members = []string{hint.user.UserID}, []string{hint.user.MemberID}
-	}
-	// Match governance and SCIM account -> member -> node -> directory locks.
-	// The Space lock also serializes connection associations, including absence.
-	if err := authorization.LockProvisioningTx(ctx, q, connection.SpaceID, users, members); err != nil {
-		return err
-	}
 	current, err := q.GetDirectoryForSSOConnection(ctx, db.GetDirectoryForSSOConnectionParams{ConnectionID: optionalDirectoryText(connection.ID)})
 	if hint == nil && errors.Is(err, pgx.ErrNoRows) {
 		return nil

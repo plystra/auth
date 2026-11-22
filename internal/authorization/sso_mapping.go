@@ -3,9 +3,11 @@ package authorization
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"maps"
 	"slices"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/authz/delta"
 	"github.com/plystra/auth/internal/authz/engine"
@@ -19,14 +21,11 @@ func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries,
 	if err := lockHumanActorAccountTx(ctx, q, actorID); err != nil {
 		return err
 	}
-	mapped := make(map[string]bool, len(mappings))
-	for _, id := range mappings {
-		mapped[id] = true
-	}
+	mapped := slices.Compact(slices.Sorted(maps.Values(mappings)))
 	var roles []db.LockSSOMappingRolesRow
 	if len(mapped) > 0 {
 		var err error
-		roles, err = q.LockSSOMappingRoles(ctx, db.LockSSOMappingRolesParams{SpaceID: spaceID, MappedRoleIds: slices.Collect(maps.Keys(mapped))})
+		roles, err = q.LockSSOMappingRoles(ctx, db.LockSSOMappingRolesParams{SpaceID: spaceID, MappedRoleIds: mapped})
 		if err != nil {
 			return err
 		}
@@ -40,14 +39,49 @@ func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries,
 	if decision.Effect != engine.Allow {
 		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 	}
+	if err := checkSSOConfiguratorTx(ctx, q, actorID, HumanActorUserID(ctx, actorID)); err != nil {
+		return err
+	}
+	return s.checkSSOMappedDeltaTx(ctx, q, actorID, spaceID, connectionID, mapped, roles, false)
+}
+
+// CheckSSOLoginGrantsTx runs only for a newly bound human, with the same roles,
+// identity chain and Space held until commit. The interactive approval authorizes
+// connection configuration. Automated grants use current assignment authority.
+func (s *Service) CheckSSOLoginGrantsTx(ctx context.Context, q *db.Queries, actorID, userID, spaceID, connectionID string, mapped []string, roles []db.LockSSOMappingRolesRow) error {
+	ctx = WithHumanActor(ctx, actorID, userID)
+	return s.checkSSOMappedDeltaTx(ctx, q, actorID, spaceID, connectionID, mapped, roles, true)
+}
+
+// LockSSOLoginGrantsTx interleaves the mapped/default role locks between
+// the participating accounts and member chains, as in interactive role edits.
+func LockSSOLoginGrantsTx(ctx context.Context, q *db.Queries, spaceID string, users, members, mapped []string) ([]db.LockSSOMappingRolesRow, error) {
+	if err := lockProvisioningUsersTx(ctx, q, users); err != nil {
+		return nil, err
+	}
+	roles, err := q.LockSSOMappingRoles(ctx, db.LockSSOMappingRolesParams{SpaceID: spaceID, MappedRoleIds: mapped})
+	if err != nil {
+		return nil, err
+	}
+	if err := lockAuthorizationMembersTx(ctx, q, members...); err != nil {
+		return nil, err
+	}
+	if err := lockAuthorizationNodesTx(ctx, q, spaceID, ""); err != nil {
+		return nil, err
+	}
+	return roles, nil
+}
+
+func (s *Service) checkSSOMappedDeltaTx(ctx context.Context, q *db.Queries, actorID, spaceID, connectionID string, mapped []string, roles []db.LockSSOMappingRolesRow, automated bool) error {
 	var before, after delta.Snapshot
+	found := 0
 	for _, role := range roles {
-		isMapped := mapped[role.ID]
+		isMapped := slices.Contains(mapped, role.ID)
 		if isMapped {
 			if err := validateOrdinaryGrantRoleTx(ctx, q, role.ID); err != nil {
 				return err
 			}
-			delete(mapped, role.ID)
+			found++
 		}
 		permissions, err := ssoHumanRolePermissionsTx(ctx, q, role.ID, spaceID, connectionID, isMapped)
 		if err != nil {
@@ -61,7 +95,7 @@ func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries,
 			after.Permissions = append(after.Permissions, permissions...)
 		}
 	}
-	if len(mapped) != 0 {
+	if found != len(mapped) {
 		return apierr.New("validation_failed", "role mapping references a role outside this Space")
 	}
 	after.Permissions = append(after.Permissions, before.Permissions...)
@@ -69,12 +103,32 @@ func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries,
 	if err != nil || len(change.Permissions) == 0 {
 		return err
 	}
+	if automated {
+		if err := checkSSOConfiguratorTx(ctx, q, actorID, HumanActorUserID(ctx, actorID)); err != nil {
+			return err
+		}
+	}
 	if err := s.authorizeGroupTx(ctx, q, actorID, "auth.grants:assign", spaceID, ""); err != nil {
 		return err
 	}
 	// The future human has no member ID yet. The receiving Space and grant
 	// anchor are already known and remain the same for every mapped role.
 	return s.coverPositiveGrantDeltaTx(ctx, q, change, actorID, "", "human", spaceID)
+}
+
+func checkSSOConfiguratorTx(ctx context.Context, q *db.Queries, memberID, userID string) error {
+	if memberID == "" {
+		return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "the SSO mapping has no verified configuring identity")
+	}
+	member, err := q.GetMemberForAuthorization(ctx, db.GetMemberForAuthorizationParams{ID: memberID})
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	validIdentity := member.Type == "human" && userID != "" || member.Type == "agent" && userID == ""
+	if member.Status != "active" || !validIdentity {
+		return apierr.New("AUTHORITY_DELTA_NOT_COVERED", "the SSO mapping configuring identity is unavailable")
+	}
+	return validateHumanActorTx(ctx, q, memberID)
 }
 
 func ssoHumanRolePermissionsTx(ctx context.Context, q *db.Queries, roleID, spaceID, connectionID string, isMapped bool) ([]delta.Permission, error) {
