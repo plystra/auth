@@ -288,7 +288,7 @@ func serve(ctx context.Context) error {
 	}
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
-	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authorizationSvc, Sessions: sessionSvc, StepUp: sessionSvc, DataKey: secret.New(dataKey), Passwords: security.DefaultPasswordHasher()}
+	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authorizationSvc, Sessions: sessionSvc, StepUp: sessionSvc, DataKey: secret.New(dataKey), Passwords: security.DefaultPasswordHasher(), Issuer: c.Issuer}
 	accounts.Invitations = invitationSvc
 	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}

@@ -1133,6 +1133,9 @@
               "type": "string"
             },
             "type": "object"
+          },
+          "saml_metadata": {
+            "type": "string"
           }
         },
         "required": [

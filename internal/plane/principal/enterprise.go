@@ -33,6 +33,7 @@ type createSSOConnectionInput struct {
 		RedirectURI  string            `json:"redirect_uri"`
 		GroupsClaim  string            `json:"groups_claim,omitempty"`
 		RoleMappings map[string]string `json:"role_mappings,omitempty"`
+		SAMLMetadata string            `json:"saml_metadata,omitempty"`
 	}
 }
 
@@ -223,16 +224,17 @@ func (a *API) createSSOConnection(ctx context.Context, in *createSSOConnectionIn
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
 	}
-	if strings.TrimSpace(in.Body.ClientSecret.Value()) == "" {
+	if strings.EqualFold(strings.TrimSpace(in.Body.Provider), "oidc") && strings.TrimSpace(in.Body.ClientSecret.Value()) == "" {
 		return nil, apierr.New("validation_failed", "client_secret is required")
 	}
 	secretDigest := sha256.Sum256([]byte(in.Body.ClientSecret.Value()))
+	metadataDigest := sha256.Sum256([]byte(in.Body.SAMLMetadata))
 	request := map[string]any{
 		"operation": "sso_connections.create", "space_id": in.ID, "name": strings.TrimSpace(in.Body.Name),
 		"provider": strings.TrimSpace(in.Body.Provider), "issuer": strings.TrimSpace(in.Body.Issuer),
 		"client_id": strings.TrimSpace(in.Body.ClientID), "redirect_uri": strings.TrimSpace(in.Body.RedirectURI),
 		"groups_claim": strings.TrimSpace(in.Body.GroupsClaim), "role_mappings": in.Body.RoleMappings,
-		"client_secret_digest": hex.EncodeToString(secretDigest[:]),
+		"client_secret_digest": hex.EncodeToString(secretDigest[:]), "saml_metadata_digest": hex.EncodeToString(metadataDigest[:]),
 	}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "sso_connections.create", request)
 	if err != nil {
@@ -245,7 +247,7 @@ func (a *API) createSSOConnection(ctx context.Context, in *createSSOConnectionIn
 	connection, err := a.Enterprise.CreateConnection(ctx, actor.ID, in.ID, enterprise.ConnectionInput{
 		Name: in.Body.Name, Provider: in.Body.Provider, Issuer: in.Body.Issuer, ClientID: in.Body.ClientID,
 		ClientSecret: in.Body.ClientSecret.Value(), RedirectURI: in.Body.RedirectURI,
-		GroupsClaim: in.Body.GroupsClaim, RoleMappings: in.Body.RoleMappings,
+		GroupsClaim: in.Body.GroupsClaim, RoleMappings: in.Body.RoleMappings, SAMLMetadata: in.Body.SAMLMetadata,
 	})
 	if err != nil {
 		return nil, err

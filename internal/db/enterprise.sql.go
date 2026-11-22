@@ -59,43 +59,55 @@ func (q *Queries) CreateExternalIdentity(ctx context.Context, arg CreateExternal
 const createSSOConnection = `-- name: CreateSSOConnection :one
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
-    redirect_uri, groups_claim, role_mappings, status
+    redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
+    saml_sso_binding, saml_idp_certificate
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
-    $8, $9, $10, 'active'
+    $8, $9, $10, 'active',
+    $11, $12, $13,
+    $14
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at
+    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
+    saml_sso_binding, saml_idp_certificate
 `
 
 type CreateSSOConnectionParams struct {
-	ID                     string `json:"id"`
-	SpaceID                string `json:"space_id"`
-	Name                   string `json:"name"`
-	Provider               string `json:"provider"`
-	Issuer                 string `json:"issuer"`
-	ClientID               string `json:"client_id"`
-	ClientSecretCiphertext []byte `json:"client_secret_ciphertext"`
-	RedirectUri            string `json:"redirect_uri"`
-	GroupsClaim            string `json:"groups_claim"`
-	RoleMappings           []byte `json:"role_mappings"`
+	ID                     string      `json:"id"`
+	SpaceID                string      `json:"space_id"`
+	Name                   string      `json:"name"`
+	Provider               string      `json:"provider"`
+	Issuer                 string      `json:"issuer"`
+	ClientID               string      `json:"client_id"`
+	ClientSecretCiphertext []byte      `json:"client_secret_ciphertext"`
+	RedirectUri            string      `json:"redirect_uri"`
+	GroupsClaim            string      `json:"groups_claim"`
+	RoleMappings           []byte      `json:"role_mappings"`
+	SamlEntityID           pgtype.Text `json:"saml_entity_id"`
+	SamlSsoUrl             pgtype.Text `json:"saml_sso_url"`
+	SamlSsoBinding         pgtype.Text `json:"saml_sso_binding"`
+	SamlIdpCertificate     pgtype.Text `json:"saml_idp_certificate"`
 }
 
 type CreateSSOConnectionRow struct {
-	ID           string             `json:"id"`
-	SpaceID      string             `json:"space_id"`
-	Name         string             `json:"name"`
-	Provider     string             `json:"provider"`
-	Issuer       string             `json:"issuer"`
-	ClientID     string             `json:"client_id"`
-	RedirectUri  string             `json:"redirect_uri"`
-	GroupsClaim  string             `json:"groups_claim"`
-	RoleMappings []byte             `json:"role_mappings"`
-	Status       string             `json:"status"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID                 string             `json:"id"`
+	SpaceID            string             `json:"space_id"`
+	Name               string             `json:"name"`
+	Provider           string             `json:"provider"`
+	Issuer             string             `json:"issuer"`
+	ClientID           string             `json:"client_id"`
+	RedirectUri        string             `json:"redirect_uri"`
+	GroupsClaim        string             `json:"groups_claim"`
+	RoleMappings       []byte             `json:"role_mappings"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	SamlEntityID       pgtype.Text        `json:"saml_entity_id"`
+	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
+	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
+	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
 }
 
 func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnectionParams) (CreateSSOConnectionRow, error) {
@@ -110,6 +122,10 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		arg.RedirectUri,
 		arg.GroupsClaim,
 		arg.RoleMappings,
+		arg.SamlEntityID,
+		arg.SamlSsoUrl,
+		arg.SamlSsoBinding,
+		arg.SamlIdpCertificate,
 	)
 	var i CreateSSOConnectionRow
 	err := row.Scan(
@@ -125,6 +141,10 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SamlEntityID,
+		&i.SamlSsoUrl,
+		&i.SamlSsoBinding,
+		&i.SamlIdpCertificate,
 	)
 	return i, err
 }
@@ -132,14 +152,15 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 const createSSOState = `-- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at
+    redirect_uri, expires_at, request_id
 )
 VALUES (
     $1, $2, $3, $4,
-    $5, $6, $7
+    $5, $6, $7,
+    $8
 )
 RETURNING id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at
+    redirect_uri, expires_at, consumed_at, created_at, request_id
 `
 
 type CreateSSOStateParams struct {
@@ -150,6 +171,7 @@ type CreateSSOStateParams struct {
 	PkceVerifierCiphertext []byte             `json:"pkce_verifier_ciphertext"`
 	RedirectUri            string             `json:"redirect_uri"`
 	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
+	RequestID              pgtype.Text        `json:"request_id"`
 }
 
 func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) (SsoState, error) {
@@ -161,6 +183,7 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		arg.PkceVerifierCiphertext,
 		arg.RedirectUri,
 		arg.ExpiresAt,
+		arg.RequestID,
 	)
 	var i SsoState
 	err := row.Scan(
@@ -173,6 +196,7 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.RequestID,
 	)
 	return i, err
 }
@@ -241,7 +265,8 @@ func (q *Queries) GetRoleByNameInSpace(ctx context.Context, arg GetRoleByNameInS
 
 const getSSOConnection = `-- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
-    redirect_uri, groups_claim, role_mappings, status, created_at, updated_at
+    redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
 FROM sso_connections WHERE id = $1
 `
 
@@ -266,13 +291,18 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SamlEntityID,
+		&i.SamlSsoUrl,
+		&i.SamlSsoBinding,
+		&i.SamlIdpCertificate,
 	)
 	return i, err
 }
 
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at
+    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
+    saml_sso_binding, saml_idp_certificate
 FROM sso_connections WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -282,18 +312,22 @@ type ListSSOConnectionsParams struct {
 }
 
 type ListSSOConnectionsRow struct {
-	ID           string             `json:"id"`
-	SpaceID      string             `json:"space_id"`
-	Name         string             `json:"name"`
-	Provider     string             `json:"provider"`
-	Issuer       string             `json:"issuer"`
-	ClientID     string             `json:"client_id"`
-	RedirectUri  string             `json:"redirect_uri"`
-	GroupsClaim  string             `json:"groups_claim"`
-	RoleMappings []byte             `json:"role_mappings"`
-	Status       string             `json:"status"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID                 string             `json:"id"`
+	SpaceID            string             `json:"space_id"`
+	Name               string             `json:"name"`
+	Provider           string             `json:"provider"`
+	Issuer             string             `json:"issuer"`
+	ClientID           string             `json:"client_id"`
+	RedirectUri        string             `json:"redirect_uri"`
+	GroupsClaim        string             `json:"groups_claim"`
+	RoleMappings       []byte             `json:"role_mappings"`
+	Status             string             `json:"status"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	SamlEntityID       pgtype.Text        `json:"saml_entity_id"`
+	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
+	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
+	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
 }
 
 func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnectionsParams) ([]ListSSOConnectionsRow, error) {
@@ -318,6 +352,10 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 			&i.Status,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SamlEntityID,
+			&i.SamlSsoUrl,
+			&i.SamlSsoBinding,
+			&i.SamlIdpCertificate,
 		); err != nil {
 			return nil, err
 		}
@@ -331,7 +369,8 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 
 const lockSSOConnection = `-- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
-    redirect_uri, groups_claim, role_mappings, status, created_at, updated_at
+    redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
 FROM sso_connections WHERE id = $1 FOR UPDATE
 `
 
@@ -356,13 +395,17 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 		&i.Status,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SamlEntityID,
+		&i.SamlSsoUrl,
+		&i.SamlSsoBinding,
+		&i.SamlIdpCertificate,
 	)
 	return i, err
 }
 
 const lockSSOStateByHash = `-- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at
+    redirect_uri, expires_at, consumed_at, created_at, request_id
 FROM sso_states WHERE state_hash = $1 FOR UPDATE
 `
 
@@ -383,6 +426,7 @@ func (q *Queries) LockSSOStateByHash(ctx context.Context, arg LockSSOStateByHash
 		&i.ExpiresAt,
 		&i.ConsumedAt,
 		&i.CreatedAt,
+		&i.RequestID,
 	)
 	return i, err
 }

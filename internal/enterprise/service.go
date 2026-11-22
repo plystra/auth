@@ -7,8 +7,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +24,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	saml2 "github.com/russellhaering/gosaml2"
+	"github.com/russellhaering/gosaml2/types"
+	dsig "github.com/russellhaering/goxmldsig"
 	"golang.org/x/oauth2"
 
 	"github.com/plystra/auth/internal/account"
@@ -57,6 +63,7 @@ type Service struct {
 	Passwords     security.PasswordHasher
 	HTTPClient    *http.Client
 	DNSResolver   TXTResolver
+	Issuer        string
 }
 
 type TXTResolver interface {
@@ -91,6 +98,7 @@ type ConnectionInput struct {
 	RedirectURI  string
 	GroupsClaim  string
 	RoleMappings map[string]string
+	SAMLMetadata string
 }
 
 type Connection struct {
@@ -109,9 +117,12 @@ type Connection struct {
 }
 
 type StartResult struct {
-	AuthorizationURL string    `json:"authorization_url"`
-	State            string    `json:"state"`
-	ExpiresAt        time.Time `json:"expires_at"`
+	AuthorizationURL    string    `json:"authorization_url"`
+	AuthorizationMethod string    `json:"authorization_method,omitempty"`
+	SAMLRequest         string    `json:"saml_request,omitempty"`
+	RelayState          string    `json:"relay_state,omitempty"`
+	State               string    `json:"state"`
+	ExpiresAt           time.Time `json:"expires_at"`
 }
 
 type CallbackInput struct {
@@ -119,6 +130,7 @@ type CallbackInput struct {
 	State        string
 	Code         string
 	RedirectURI  string
+	SAMLResponse string
 }
 
 type discoveryDocument struct {
@@ -126,6 +138,13 @@ type discoveryDocument struct {
 	AuthorizationEndpoint string `json:"authorization_endpoint"`
 	TokenEndpoint         string `json:"token_endpoint"`
 	JWKSURI               string `json:"jwks_uri"`
+}
+
+type samlConnectionDetails struct {
+	EntityID    string
+	SSOURL      string
+	Binding     string
+	Certificate string
 }
 
 type idTokenClaims struct {
@@ -144,14 +163,38 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 	in.ClientID = strings.TrimSpace(in.ClientID)
 	in.RedirectURI = strings.TrimSpace(in.RedirectURI)
 	in.GroupsClaim = strings.TrimSpace(in.GroupsClaim)
+	in.SAMLMetadata = strings.TrimSpace(in.SAMLMetadata)
 	if in.GroupsClaim == "" {
 		in.GroupsClaim = defaultGroupsClaim
 	}
-	if in.Name == "" || len(in.Name) > 128 || in.Provider != "oidc" || in.ClientID == "" || len(in.ClientID) > 512 || in.ClientSecret == "" || len(in.ClientSecret) > 4096 || len(in.GroupsClaim) > 128 {
-		return Connection{}, apierr.New("validation_failed", "OIDC connection fields are invalid")
+	if in.Name == "" || len(in.Name) > 128 || len(in.GroupsClaim) > 128 {
+		return Connection{}, apierr.New("validation_failed", "SSO connection fields are invalid")
 	}
-	if err := validateIssuer(in.Issuer); err != nil {
-		return Connection{}, err
+	var samlDetails *samlConnectionDetails
+	switch in.Provider {
+	case "oidc":
+		if in.ClientID == "" || len(in.ClientID) > 512 || in.ClientSecret == "" || len(in.ClientSecret) > 4096 {
+			return Connection{}, apierr.New("validation_failed", "OIDC connection fields are invalid")
+		}
+		if err := validateIssuer(in.Issuer); err != nil {
+			return Connection{}, err
+		}
+	case "saml":
+		if in.ClientSecret != "" || in.SAMLMetadata == "" || len(in.SAMLMetadata) > 1024*1024 {
+			return Connection{}, apierr.New("validation_failed", "SAML connection metadata is required")
+		}
+		parsed, err := parseSAMLMetadata(in.SAMLMetadata)
+		if err != nil {
+			return Connection{}, err
+		}
+		if in.Issuer != "" && in.Issuer != parsed.EntityID {
+			return Connection{}, apierr.New("validation_failed", "SAML issuer does not match metadata")
+		}
+		in.Issuer = parsed.EntityID
+		in.ClientID = parsed.EntityID
+		samlDetails = &parsed
+	default:
+		return Connection{}, apierr.New("validation_failed", "provider must be oidc or saml")
 	}
 	connectionID := string(ids.New[ids.ID]("con"))
 	if strings.Count(in.RedirectURI, "{connection_id}") > 1 || (strings.Contains(in.RedirectURI, "{") && !strings.Contains(in.RedirectURI, "{connection_id}")) || strings.Contains(in.RedirectURI, "}") && !strings.Contains(in.RedirectURI, "{connection_id}") {
@@ -162,16 +205,20 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		return Connection{}, err
 	}
 	if len(in.RoleMappings) > maxRoleMappings {
-		return Connection{}, apierr.New("validation_failed", "too many OIDC role mappings")
+		return Connection{}, apierr.New("validation_failed", "too many SSO role mappings")
 	}
 	for group, roleID := range in.RoleMappings {
 		if strings.TrimSpace(group) == "" || len(group) > 256 || strings.TrimSpace(roleID) == "" {
-			return Connection{}, apierr.New("validation_failed", "OIDC role mappings are invalid")
+			return Connection{}, apierr.New("validation_failed", "SSO role mappings are invalid")
 		}
 	}
-	ciphertext, err := s.seal([]byte(in.ClientSecret), clientSecretAAD)
-	if err != nil {
-		return Connection{}, err
+	var ciphertext []byte
+	var err error
+	if in.Provider == "oidc" {
+		ciphertext, err = s.seal([]byte(in.ClientSecret), clientSecretAAD)
+		if err != nil {
+			return Connection{}, err
+		}
 	}
 	roleMappings := in.RoleMappings
 	if roleMappings == nil {
@@ -213,11 +260,18 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 				return err
 			}
 		}
-		row, err := q.CreateSSOConnection(ctx, db.CreateSSOConnectionParams{
+		params := db.CreateSSOConnectionParams{
 			ID: connectionID, SpaceID: spaceID, Name: in.Name, Provider: in.Provider,
 			Issuer: in.Issuer, ClientID: in.ClientID, ClientSecretCiphertext: ciphertext,
 			RedirectUri: redirectURI, GroupsClaim: in.GroupsClaim, RoleMappings: mappings,
-		})
+		}
+		if samlDetails != nil {
+			params.SamlEntityID = pgtype.Text{String: samlDetails.EntityID, Valid: true}
+			params.SamlSsoUrl = pgtype.Text{String: samlDetails.SSOURL, Valid: true}
+			params.SamlSsoBinding = pgtype.Text{String: samlDetails.Binding, Valid: true}
+			params.SamlIdpCertificate = pgtype.Text{String: samlDetails.Certificate, Valid: true}
+		}
+		row, err := q.CreateSSOConnection(ctx, params)
 		if err != nil {
 			return err
 		}
@@ -553,6 +607,9 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 	if redirectURI != row.RedirectUri {
 		return StartResult{}, apierr.New("invalid_request", "redirect_uri does not match the configured connection")
 	}
+	if row.Provider == "saml" {
+		return s.startSAML(ctx, row, redirectURI)
+	}
 	doc, _, err := s.discovery(ctx, row.Issuer)
 	if err != nil {
 		return StartResult{}, err
@@ -581,6 +638,7 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 			StateHash: digest(state), NonceHash: digest(nonce),
 			PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
 			ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+			RequestID: pgtype.Text{},
 		})
 		return err
 	}); err != nil {
@@ -598,13 +656,72 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 	return StartResult{AuthorizationURL: doc.AuthorizationEndpoint + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, nil
 }
 
+func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string) (StartResult, error) {
+	provider, err := s.samlProvider(row)
+	if err != nil {
+		return StartResult{}, err
+	}
+	relayState, err := randomOpaque("saml_state_")
+	if err != nil {
+		return StartResult{}, err
+	}
+	nonce, err := randomOpaque("saml_nonce_")
+	if err != nil {
+		return StartResult{}, err
+	}
+	document, err := provider.BuildAuthRequestDocumentNoSig()
+	if err != nil {
+		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+	}
+	requestBytes, err := document.WriteToBytes()
+	if err != nil {
+		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+	}
+	var request struct {
+		ID string `xml:"ID,attr"`
+	}
+	if err := xml.Unmarshal(requestBytes, &request); err != nil || request.ID == "" {
+		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+	}
+	expiresAt := time.Now().UTC().Add(stateLifetime)
+	verifierCiphertext, err := s.seal([]byte("saml"), pkceVerifierAAD)
+	if err != nil {
+		return StartResult{}, err
+	}
+	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		_, err := q.CreateSSOState(ctx, db.CreateSSOStateParams{
+			ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
+			StateHash: digest(relayState), NonceHash: digest(nonce),
+			PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
+			ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+			RequestID: pgtype.Text{String: request.ID, Valid: true},
+		})
+		return err
+	}); err != nil {
+		return StartResult{}, err
+	}
+	result := StartResult{State: relayState, ExpiresAt: expiresAt, AuthorizationMethod: "GET"}
+	if row.SamlSsoBinding.String == saml2.BindingHttpPost {
+		result.AuthorizationMethod = "POST"
+		result.AuthorizationURL = row.SamlSsoUrl.String
+		result.SAMLRequest = base64.StdEncoding.EncodeToString(requestBytes)
+		result.RelayState = relayState
+		return result, nil
+	}
+	result.AuthorizationURL, err = provider.BuildAuthURLRedirect(relayState, document)
+	if err != nil {
+		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+	}
+	return result, nil
+}
+
 func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthResult, error) {
 	in.ConnectionID = strings.TrimSpace(in.ConnectionID)
 	in.State = strings.TrimSpace(in.State)
 	in.Code = strings.TrimSpace(in.Code)
 	in.RedirectURI = strings.TrimSpace(in.RedirectURI)
-	if in.ConnectionID == "" || in.State == "" || in.Code == "" {
-		return account.AuthResult{}, apierr.New("invalid_request", "connection_id, state and code are required")
+	if in.ConnectionID == "" {
+		return account.AuthResult{}, apierr.New("invalid_request", "connection_id is required")
 	}
 	row, err := s.Store.Queries().GetSSOConnection(ctx, db.GetSSOConnectionParams{ID: in.ConnectionID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -615,6 +732,15 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 	}
 	if row.Status != "active" {
 		return account.AuthResult{}, apierr.New("forbidden", "SSO connection is disabled")
+	}
+	if row.Provider == "saml" {
+		if in.SAMLResponse == "" {
+			return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is required")
+		}
+		return s.callbackSAML(ctx, row, in)
+	}
+	if in.State == "" || in.Code == "" {
+		return account.AuthResult{}, apierr.New("invalid_request", "state and code are required")
 	}
 	var state db.SsoState
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -675,6 +801,125 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 	return result, nil
 }
 
+func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in CallbackInput) (account.AuthResult, error) {
+	if strings.TrimSpace(in.SAMLResponse) == "" {
+		return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is required")
+	}
+	if len(in.SAMLResponse) > 8*1024*1024 {
+		return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is too large")
+	}
+	provider, err := s.samlProvider(row)
+	if err != nil {
+		return account.AuthResult{}, err
+	}
+	decoded, err := base64.StdEncoding.DecodeString(in.SAMLResponse)
+	if err != nil {
+		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
+	}
+	var unverified types.UnverifiedBaseResponse
+	if err := xml.Unmarshal(decoded, &unverified); err != nil {
+		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
+	}
+	var state db.SsoState
+	if strings.TrimSpace(in.State) != "" {
+		err = s.Store.InTx(ctx, func(q *db.Queries) error {
+			state, err = q.LockSSOStateByHash(ctx, db.LockSSOStateByHashParams{StateHash: digest(strings.TrimSpace(in.State))})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "SAML state is invalid or expired")
+			}
+			if err != nil {
+				return err
+			}
+			if state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
+				return apierr.New("invalid_grant", "SAML state is invalid or expired")
+			}
+			if state.RequestID.Valid && unverified.InResponseTo != state.RequestID.String {
+				return apierr.New("invalid_grant", "the SAML response does not match the authorization request")
+			}
+			return nil
+		})
+		if err != nil {
+			return account.AuthResult{}, err
+		}
+	} else if unverified.InResponseTo != "" {
+		return account.AuthResult{}, apierr.New("invalid_grant", "an unsolicited SAML response cannot contain InResponseTo")
+	}
+	info, err := provider.RetrieveAssertionInfo(in.SAMLResponse)
+	if err != nil || info.WarningInfo == nil || info.WarningInfo.InvalidTime || info.WarningInfo.NotInAudience || !info.ResponseSignatureValidated {
+		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML assertion is invalid")
+	}
+	email := firstSAMLValue(info.Values, "email", "Email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
+	if email == "" && strings.Contains(info.NameID, "@") {
+		email = info.NameID
+	}
+	if !validSAMLIdentity(email) || info.NameID == "" || len(info.NameID) > maxExternalSubjectLen {
+		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML identity is not valid for this connection")
+	}
+	claims := idTokenClaims{
+		Subject: info.NameID, Email: email, EmailVerified: true,
+		Name:   firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
+		Groups: firstSAMLValues(info.Values, "groups", "Groups", "memberOf", "MemberOf"),
+	}
+	return s.finishCallback(ctx, row, state, claims)
+}
+
+func (s *Service) samlProvider(row db.SsoConnection) (*saml2.SAMLServiceProvider, error) {
+	if !row.SamlEntityID.Valid || !row.SamlSsoUrl.Valid || !row.SamlSsoBinding.Valid || !row.SamlIdpCertificate.Valid {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection metadata is unavailable")
+	}
+	block, _ := pem.Decode([]byte(row.SamlIdpCertificate.String))
+	if block == nil {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is unavailable")
+	}
+	certificate, err := x509.ParseCertificate(block.Bytes)
+	if err != nil || time.Now().UTC().Before(certificate.NotBefore) || time.Now().UTC().After(certificate.NotAfter) {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
+	}
+	certStore := dsig.MemoryX509CertificateStore{Roots: []*x509.Certificate{certificate}}
+	entityID := s.samlEntityID(row.ID)
+	return &saml2.SAMLServiceProvider{
+		IdentityProviderSSOURL: row.SamlSsoUrl.String, IdentityProviderSSOBinding: row.SamlSsoBinding.String,
+		IdentityProviderIssuer: row.SamlEntityID.String, AssertionConsumerServiceURL: row.RedirectUri,
+		ServiceProviderIssuer: entityID, AudienceURI: entityID, IDPCertificateStore: &certStore,
+		AllowMissingAttributes: false, MaximumDecompressedBodySize: 5 * 1024 * 1024, MaximumXMLTokens: 50000,
+	}, nil
+}
+
+func (s *Service) samlEntityID(connectionID string) string {
+	base := strings.TrimRight(strings.TrimSpace(s.Issuer), "/")
+	if base == "" {
+		base = "https://auth.example.com"
+	}
+	return base + "/saml/" + connectionID
+}
+
+func firstSAMLValue(values saml2.Values, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(values.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstSAMLValues(values saml2.Values, names ...string) []string {
+	for _, name := range names {
+		if all := values.GetAll(name); len(all) > 0 {
+			return all
+		}
+	}
+	return nil
+}
+
+func validSAMLIdentity(email string) bool {
+	email = strings.TrimSpace(strings.ToLower(email))
+	if email == "" || len(email) > 320 || strings.ContainsAny(email, "\r\n") {
+		return false
+	}
+	at := strings.LastIndexByte(email, '@')
+	return at > 0 && at < len(email)-1 && !strings.Contains(email[at+1:], " ")
+}
+
 func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnection, state db.SsoState, claims idTokenClaims) (account.AuthResult, error) {
 	email := strings.TrimSpace(strings.ToLower(claims.Email))
 	if email == "" || len(email) > 320 || strings.ContainsAny(email, "\r\n") {
@@ -695,15 +940,17 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if lockedConnection.Status != "active" {
 			return apierr.New("forbidden", "SSO connection is disabled")
 		}
-		lockedState, err := q.LockSSOStateByHash(ctx, db.LockSSOStateByHashParams{StateHash: state.StateHash})
-		if err != nil {
-			return err
-		}
-		if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID {
-			return apierr.New("invalid_grant", "SSO state is invalid or expired")
-		}
-		if err := q.ConsumeSSOState(ctx, db.ConsumeSSOStateParams{ID: lockedState.ID}); err != nil {
-			return err
+		if state.ID != "" {
+			lockedState, err := q.LockSSOStateByHash(ctx, db.LockSSOStateByHashParams{StateHash: state.StateHash})
+			if err != nil {
+				return err
+			}
+			if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID {
+				return apierr.New("invalid_grant", "SSO state is invalid or expired")
+			}
+			if err := q.ConsumeSSOState(ctx, db.ConsumeSSOStateParams{ID: lockedState.ID}); err != nil {
+				return err
+			}
 		}
 		external, err := q.GetExternalIdentity(ctx, db.GetExternalIdentityParams{Issuer: connection.Issuer, Subject: claims.Subject})
 		newMembership := false
@@ -778,9 +1025,13 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if err != nil {
 			return err
 		}
+		credentialType := "oidc"
+		if connection.Provider == "saml" {
+			credentialType = "saml"
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "sso", ActorID: connection.ID, MemberID: memberID, UserID: userID,
-			Action: "auth.sso.login", Outcome: "success", CredentialType: "oidc",
+			Action: "auth.sso.login", Outcome: "success", CredentialType: credentialType,
 			Resource:      audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: connection.SpaceID},
 			PolicyVersion: space.PolicyVersion,
 			Metadata:      map[string]string{"provider": connection.Provider, "subject_hash": hexDigest(claims.Subject), "new_membership": fmt.Sprintf("%t", newMembership)},
@@ -792,7 +1043,11 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	if s.Sessions == nil {
 		return account.AuthResult{}, apierr.New("unavailable", "session service is unavailable")
 	}
-	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, userID, memberID, nil, "", 1, []string{"oidc"})
+	method := "oidc"
+	if connection.Provider == "saml" {
+		method = "saml"
+	}
+	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, userID, memberID, nil, "", 1, []string{method})
 	if err != nil {
 		return account.AuthResult{}, err
 	}
@@ -979,6 +1234,72 @@ func validateIssuer(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || !isSecureOIDCURL(u) {
 		return apierr.New("validation_failed", "issuer must be an HTTPS URL without user info, query, or fragment")
+	}
+	return nil
+}
+
+func parseSAMLMetadata(raw string) (samlConnectionDetails, error) {
+	var metadata types.EntityDescriptor
+	decoder := xml.NewDecoder(strings.NewReader(raw))
+	if err := decoder.Decode(&metadata); err != nil {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata is invalid")
+	}
+	if metadata.EntityID == "" || metadata.IDPSSODescriptor == nil {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata does not contain an IdP descriptor")
+	}
+	var endpoint types.SingleSignOnService
+	for _, candidate := range metadata.IDPSSODescriptor.SingleSignOnServices {
+		if candidate.Binding == saml2.BindingHttpRedirect {
+			endpoint = candidate
+			break
+		}
+		if endpoint.Location == "" && candidate.Binding == saml2.BindingHttpPost {
+			endpoint = candidate
+		}
+	}
+	if endpoint.Location == "" || (endpoint.Binding != saml2.BindingHttpRedirect && endpoint.Binding != saml2.BindingHttpPost) {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata has no supported SSO endpoint")
+	}
+	if err := validateSAMLURL(endpoint.Location); err != nil {
+		return samlConnectionDetails{}, err
+	}
+	var certificate []byte
+	for _, descriptor := range metadata.IDPSSODescriptor.KeyDescriptors {
+		if descriptor.Use != "" && descriptor.Use != "signing" {
+			continue
+		}
+		for _, encoded := range descriptor.KeyInfo.X509Data.X509Certificates {
+			if strings.TrimSpace(encoded.Data) == "" {
+				continue
+			}
+			decoded, err := base64.StdEncoding.DecodeString(encoded.Data)
+			if err != nil {
+				return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata certificate is invalid")
+			}
+			cert, err := x509.ParseCertificate(decoded)
+			if err != nil || time.Now().UTC().Before(cert.NotBefore) || time.Now().UTC().After(cert.NotAfter) {
+				return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata certificate is invalid or expired")
+			}
+			certificate = decoded
+			break
+		}
+		if len(certificate) > 0 {
+			break
+		}
+	}
+	if len(certificate) == 0 {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata has no signing certificate")
+	}
+	return samlConnectionDetails{
+		EntityID: metadata.EntityID, SSOURL: endpoint.Location, Binding: endpoint.Binding,
+		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate})),
+	}, nil
+}
+
+func validateSAMLURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return apierr.New("validation_failed", "SAML endpoint must be an HTTPS URL without user info, query, or fragment")
 	}
 	return nil
 }

@@ -588,6 +588,10 @@ type SsoConnection struct {
 	Status                 string             `json:"status"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
+	SamlEntityID           pgtype.Text        `json:"saml_entity_id"`
+	SamlSsoUrl             pgtype.Text        `json:"saml_sso_url"`
+	SamlSsoBinding         pgtype.Text        `json:"saml_sso_binding"`
+	SamlIdpCertificate     pgtype.Text        `json:"saml_idp_certificate"`
 }
 
 type SsoDomain struct {
@@ -613,6 +617,7 @@ type SsoState struct {
 	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt             pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
+	RequestID              pgtype.Text        `json:"request_id"`
 }
 
 type User struct {

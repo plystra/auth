@@ -378,8 +378,23 @@ func (h HTTP) ssoCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err == nil && (mediaType == "application/x-www-form-urlencoded" || mediaType == "multipart/form-data") {
+		if err := r.ParseForm(); err != nil {
+			writeErr(w, apierr.New("invalid_request", "SAML callback body is invalid"))
+			return
+		}
+		result, err := h.Enterprise.Callback(r.Context(), enterprise.CallbackInput{
+			ConnectionID: r.PathValue("connection_id"), State: r.FormValue("RelayState"), SAMLResponse: r.FormValue("SAMLResponse"),
+		})
+		if err != nil {
+			writeProtocolErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result})
+		return
+	}
 	if err != nil || mediaType != "application/json" {
-		writeErr(w, apierr.New("invalid_request", "JSON request body is required"))
+		writeErr(w, apierr.New("invalid_request", "JSON or SAML form body is required"))
 		return
 	}
 	var body struct {
