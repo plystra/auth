@@ -59,17 +59,46 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
+	server := httptest.NewServer(f.mux)
+	t.Cleanup(server.Close)
+	callback := func(t *testing.T, contentType, body string, want int) {
+		t.Helper()
+		response, err := server.Client().Post(server.URL+"/v1/sso/"+connection.ID+"/callback", contentType, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		if response.StatusCode != want {
+			t.Fatalf("SAML callback status = %d, want %d", response.StatusCode, want)
+		}
+		if want == http.StatusOK {
+			var result struct{ Data account.AuthResult }
+			if err := json.NewDecoder(response.Body).Decode(&result); err != nil || result.Data.User.ID != f.userID || result.Data.User.Email != "directory-user@example.test" {
+				t.Fatalf("SAML did not reuse the directory identity: %v", err)
+			}
+		} else {
+			var result struct{ Error struct{ Code string } }
+			if err := json.NewDecoder(response.Body).Decode(&result); err != nil || result.Error.Code != "invalid_grant" {
+				t.Errorf("SAML error code = %q, want invalid_grant: %v", result.Error.Code, err)
+			}
+		}
+	}
 	for _, tc := range []struct {
-		name   string
-		values []string
-		tamper bool
-		want   int
+		name        string
+		values      []string
+		tamper      bool
+		want        int
+		json        bool
+		redirectURI string
 	}{
-		{"valid", []string{"Stable-Object-1"}, false, http.StatusOK},
-		{"multiple_values", []string{"Stable-Object-1", "Other"}, false, http.StatusBadRequest},
-		{"missing", nil, false, http.StatusBadRequest},
-		{"case_mismatch", []string{"stable-object-1"}, false, http.StatusBadRequest},
-		{"tampered", []string{"Stable-Object-1"}, true, http.StatusBadRequest},
+		{name: "valid", values: []string{"Stable-Object-1"}, want: http.StatusOK},
+		{name: "multiple_values", values: []string{"Stable-Object-1", "Other"}, want: http.StatusBadRequest},
+		{name: "missing", want: http.StatusBadRequest},
+		{name: "case_mismatch", values: []string{"stable-object-1"}, want: http.StatusBadRequest},
+		{name: "tampered", values: []string{"Stable-Object-1"}, tamper: true, want: http.StatusBadRequest},
+		{name: "json_valid", values: []string{"Stable-Object-1"}, json: true, redirectURI: connection.RedirectURI, want: http.StatusOK},
+		{name: "json_invalid_signature", values: []string{"Stable-Object-1"}, tamper: true, json: true, redirectURI: connection.RedirectURI, want: http.StatusBadRequest},
+		{name: "json_mismatched_redirect", values: []string{"Stable-Object-1"}, json: true, redirectURI: "https://other.example.test/callback", want: http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			start, err := f.svc.Start(ctx, connection.ID, "")
@@ -117,19 +146,20 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			body := url.Values{"RelayState": {start.State}, "SAMLResponse": {base64.StdEncoding.EncodeToString(encoded)}}
-			request := httptest.NewRequest("POST", "/v1/sso/"+connection.ID+"/callback", strings.NewReader(body.Encode()))
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			response := httptest.NewRecorder()
-			f.mux.ServeHTTP(response, request)
-			if response.Code != tc.want {
-				t.Fatalf("SAML callback = %d, want %d: %s", response.Code, tc.want, response.Body.String())
-			}
-			if tc.want == http.StatusOK {
-				var result struct{ Data account.AuthResult }
-				if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil || result.Data.User.ID != f.userID || result.Data.User.Email != "directory-user@example.test" {
-					t.Fatalf("SAML did not reuse the directory identity: %v", err)
+			samlResponse := base64.StdEncoding.EncodeToString(encoded)
+			contentType := "application/x-www-form-urlencoded"
+			body := url.Values{"RelayState": {start.State}, "SAMLResponse": {samlResponse}}.Encode()
+			if tc.json {
+				contentType = "application/json"
+				data, err := json.Marshal(map[string]string{"state": start.State, "code": samlResponse, "redirect_uri": tc.redirectURI})
+				if err != nil {
+					t.Fatal(err)
 				}
+				body = string(data)
+			}
+			callback(t, contentType, body, tc.want)
+			if tc.want == http.StatusOK {
+				callback(t, contentType, body, http.StatusBadRequest)
 			}
 		})
 	}

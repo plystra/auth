@@ -761,8 +761,6 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthResult, error) {
 	in.ConnectionID = strings.TrimSpace(in.ConnectionID)
 	in.State = strings.TrimSpace(in.State)
-	in.Code = strings.TrimSpace(in.Code)
-	in.RedirectURI = strings.TrimSpace(in.RedirectURI)
 	if in.ConnectionID == "" {
 		return account.AuthResult{}, apierr.New("invalid_request", "connection_id is required")
 	}
@@ -777,11 +775,17 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 		return account.AuthResult{}, apierr.New("forbidden", "SSO connection is disabled")
 	}
 	if row.Provider == "saml" {
+		if in.RedirectURI != "" && in.RedirectURI != row.RedirectUri {
+			return account.AuthResult{}, apierr.New("invalid_grant", "redirect_uri does not match the SSO connection")
+		}
 		if in.SAMLResponse == "" {
-			return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is required")
+			// The shared JSON callback carries the encoded SAML response in code.
+			in.SAMLResponse = in.Code
 		}
 		return s.callbackSAML(ctx, row, in)
 	}
+	in.Code = strings.TrimSpace(in.Code)
+	in.RedirectURI = strings.TrimSpace(in.RedirectURI)
 	if in.State == "" || in.Code == "" {
 		return account.AuthResult{}, apierr.New("invalid_request", "state and code are required")
 	}
