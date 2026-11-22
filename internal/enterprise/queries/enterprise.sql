@@ -2,36 +2,36 @@
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate
+    saml_sso_binding, saml_idp_certificate, covers_subtree
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(provider),
     sqlc.arg(issuer), sqlc.arg(client_id), sqlc.narg(client_secret_ciphertext),
     sqlc.arg(redirect_uri), sqlc.arg(groups_claim), sqlc.arg(role_mappings), 'active',
     sqlc.narg(saml_entity_id), sqlc.narg(saml_sso_url), sqlc.narg(saml_sso_binding),
-    sqlc.narg(saml_idp_certificate)
+    sqlc.narg(saml_idp_certificate), sqlc.arg(covers_subtree)
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate;
+    saml_sso_binding, saml_idp_certificate, covers_subtree;
 
 -- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE id = sqlc.arg(id);
 
 -- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate
+    saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
 -- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE id = sqlc.arg(id) FOR UPDATE;
 
 -- name: DisableSSOConnection :exec

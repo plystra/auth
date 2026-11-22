@@ -108,12 +108,12 @@ func TestForcedSSODomainRoutesSignInToConfiguredConnection(t *testing.T) {
 	requestCtx := authorization.WithHumanActor(ctx, owner.ID, "usr_principal_actor")
 	connection, err := service.CreateConnection(requestCtx, owner.ID, spaceID, enterprise.ConnectionInput{
 		Name: "Routing OIDC", Provider: "oidc", Issuer: "https://idp.example.com/routing", ClientID: "client", ClientSecret: "secret",
-		RedirectURI: "https://auth.example.com/v1/sso/{connection_id}/callback",
+		RedirectURI: "https://auth.example.com/v1/sso/{connection_id}/callback", CoversSubtree: true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	domain, err := service.CreateDomain(requestCtx, owner.ID, spaceID, enterprise.DomainInput{Domain: "acme.example", ConnectionID: connection.ID, ForceSSO: true})
+	domain, err := service.CreateDomain(requestCtx, owner.ID, spaceID, enterprise.DomainInput{Domain: "acme.example", ConnectionID: connection.ID, ForceSSO: true, CoversSubtree: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,11 +121,15 @@ func TestForcedSSODomainRoutesSignInToConfiguredConnection(t *testing.T) {
 	if err := service.VerifyDomain(requestCtx, owner.ID, spaceID, domain.ID); err != nil {
 		t.Fatal(err)
 	}
+	childID := "spc_forced_sso_child"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Forced SSO Child', 'forced-sso-child', $2)`, childID, spaceID); err != nil {
+		t.Fatal(err)
+	}
 	api := &API{Enterprise: service}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("SSO routing integration test", "1.0.0")))
 	handler := route.Middleware(route.Principal, mux)
-	req := httptest.NewRequest(http.MethodPost, "/v1/auth/sign-in", strings.NewReader(`{"email":"user@acme.example"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/sign-in", strings.NewReader(`{"email":"user@acme.example","space_id":"`+childID+`"}`))
 	req.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, req)

@@ -60,18 +60,18 @@ const createSSOConnection = `-- name: CreateSSOConnection :one
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate
+    saml_sso_binding, saml_idp_certificate, covers_subtree
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
     $8, $9, $10, 'active',
     $11, $12, $13,
-    $14
+    $14, $15
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate
+    saml_sso_binding, saml_idp_certificate, covers_subtree
 `
 
 type CreateSSOConnectionParams struct {
@@ -89,6 +89,7 @@ type CreateSSOConnectionParams struct {
 	SamlSsoUrl             pgtype.Text `json:"saml_sso_url"`
 	SamlSsoBinding         pgtype.Text `json:"saml_sso_binding"`
 	SamlIdpCertificate     pgtype.Text `json:"saml_idp_certificate"`
+	CoversSubtree          bool        `json:"covers_subtree"`
 }
 
 type CreateSSOConnectionRow struct {
@@ -108,6 +109,7 @@ type CreateSSOConnectionRow struct {
 	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
 	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
 	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
+	CoversSubtree      bool               `json:"covers_subtree"`
 }
 
 func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnectionParams) (CreateSSOConnectionRow, error) {
@@ -126,6 +128,7 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		arg.SamlSsoUrl,
 		arg.SamlSsoBinding,
 		arg.SamlIdpCertificate,
+		arg.CoversSubtree,
 	)
 	var i CreateSSOConnectionRow
 	err := row.Scan(
@@ -145,6 +148,7 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		&i.SamlSsoUrl,
 		&i.SamlSsoBinding,
 		&i.SamlIdpCertificate,
+		&i.CoversSubtree,
 	)
 	return i, err
 }
@@ -266,7 +270,7 @@ func (q *Queries) GetRoleByNameInSpace(ctx context.Context, arg GetRoleByNameInS
 const getSSOConnection = `-- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE id = $1
 `
 
@@ -295,6 +299,7 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 		&i.SamlSsoUrl,
 		&i.SamlSsoBinding,
 		&i.SamlIdpCertificate,
+		&i.CoversSubtree,
 	)
 	return i, err
 }
@@ -302,7 +307,7 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate
+    saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -328,6 +333,7 @@ type ListSSOConnectionsRow struct {
 	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
 	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
 	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
+	CoversSubtree      bool               `json:"covers_subtree"`
 }
 
 func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnectionsParams) ([]ListSSOConnectionsRow, error) {
@@ -356,6 +362,7 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 			&i.SamlSsoUrl,
 			&i.SamlSsoBinding,
 			&i.SamlIdpCertificate,
+			&i.CoversSubtree,
 		); err != nil {
 			return nil, err
 		}
@@ -370,7 +377,7 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 const lockSSOConnection = `-- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
-    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate
+    saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree
 FROM sso_connections WHERE id = $1 FOR UPDATE
 `
 
@@ -399,6 +406,7 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 		&i.SamlSsoUrl,
 		&i.SamlSsoBinding,
 		&i.SamlIdpCertificate,
+		&i.CoversSubtree,
 	)
 	return i, err
 }

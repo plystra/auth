@@ -1817,3 +1817,10 @@ ALTER TABLE sso_connections
     ADD COLUMN IF NOT EXISTS saml_idp_certificate text;
 ALTER TABLE sso_states
     ADD COLUMN IF NOT EXISTS request_id text;
+
+
+ALTER TABLE sso_connections
+    ADD COLUMN IF NOT EXISTS covers_subtree boolean NOT NULL DEFAULT false;
+
+ALTER TABLE sso_domains
+    ADD COLUMN IF NOT EXISTS covers_subtree boolean NOT NULL DEFAULT false;

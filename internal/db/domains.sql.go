@@ -11,15 +11,40 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const areSpaceAncestorsActive = `-- name: AreSpaceAncestorsActive :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id, spaces.status
+    FROM spaces
+    WHERE spaces.id = $1
+    UNION ALL
+    SELECT parent.id, parent.parent_id, parent.status
+    FROM spaces parent
+    JOIN ancestors ON parent.id = ancestors.parent_id
+)
+SELECT COALESCE(bool_and(status = 'active'), false)::boolean AS active
+FROM ancestors
+`
+
+type AreSpaceAncestorsActiveParams struct {
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) AreSpaceAncestorsActive(ctx context.Context, arg AreSpaceAncestorsActiveParams) (bool, error) {
+	row := q.db.QueryRow(ctx, areSpaceAncestorsActive, arg.SpaceID)
+	var active bool
+	err := row.Scan(&active)
+	return active, err
+}
+
 const createSSODomain = `-- name: CreateSSODomain :one
 INSERT INTO sso_domains (
-    id, space_id, domain, verification_token_hash, connection_id, force_sso, status
+    id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status
 )
 VALUES (
     $1, $2, $3, $4,
-    $5, $6, 'pending'
+    $5, $6, $7, 'pending'
 )
-RETURNING id, space_id, domain, verification_token_hash, connection_id, force_sso, status,
+RETURNING id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status,
     verified_at, created_at, updated_at
 `
 
@@ -30,9 +55,24 @@ type CreateSSODomainParams struct {
 	VerificationTokenHash []byte      `json:"verification_token_hash"`
 	ConnectionID          pgtype.Text `json:"connection_id"`
 	ForceSso              bool        `json:"force_sso"`
+	CoversSubtree         bool        `json:"covers_subtree"`
 }
 
-func (q *Queries) CreateSSODomain(ctx context.Context, arg CreateSSODomainParams) (SsoDomain, error) {
+type CreateSSODomainRow struct {
+	ID                    string             `json:"id"`
+	SpaceID               string             `json:"space_id"`
+	Domain                string             `json:"domain"`
+	VerificationTokenHash []byte             `json:"verification_token_hash"`
+	ConnectionID          pgtype.Text        `json:"connection_id"`
+	ForceSso              bool               `json:"force_sso"`
+	CoversSubtree         bool               `json:"covers_subtree"`
+	Status                string             `json:"status"`
+	VerifiedAt            pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) CreateSSODomain(ctx context.Context, arg CreateSSODomainParams) (CreateSSODomainRow, error) {
 	row := q.db.QueryRow(ctx, createSSODomain,
 		arg.ID,
 		arg.SpaceID,
@@ -40,8 +80,9 @@ func (q *Queries) CreateSSODomain(ctx context.Context, arg CreateSSODomainParams
 		arg.VerificationTokenHash,
 		arg.ConnectionID,
 		arg.ForceSso,
+		arg.CoversSubtree,
 	)
-	var i SsoDomain
+	var i CreateSSODomainRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -49,6 +90,7 @@ func (q *Queries) CreateSSODomain(ctx context.Context, arg CreateSSODomainParams
 		&i.VerificationTokenHash,
 		&i.ConnectionID,
 		&i.ForceSso,
+		&i.CoversSubtree,
 		&i.Status,
 		&i.VerifiedAt,
 		&i.CreatedAt,
@@ -72,8 +114,8 @@ func (q *Queries) DisableSSODomain(ctx context.Context, arg DisableSSODomainPara
 }
 
 const getForcedSSOForEmailDomain = `-- name: GetForcedSSOForEmailDomain :one
-SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.status,
-    c.id AS sso_connection_id, c.status AS sso_connection_status
+SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
+    c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
 FROM sso_domains d
 LEFT JOIN sso_connections c ON c.id = d.connection_id
 WHERE d.domain = $1 AND d.status = 'verified' AND d.force_sso = true
@@ -84,14 +126,16 @@ type GetForcedSSOForEmailDomainParams struct {
 }
 
 type GetForcedSSOForEmailDomainRow struct {
-	ID                  string      `json:"id"`
-	SpaceID             string      `json:"space_id"`
-	Domain              string      `json:"domain"`
-	ConnectionID        pgtype.Text `json:"connection_id"`
-	ForceSso            bool        `json:"force_sso"`
-	Status              string      `json:"status"`
-	SsoConnectionID     pgtype.Text `json:"sso_connection_id"`
-	SsoConnectionStatus pgtype.Text `json:"sso_connection_status"`
+	ID                         string      `json:"id"`
+	SpaceID                    string      `json:"space_id"`
+	Domain                     string      `json:"domain"`
+	ConnectionID               pgtype.Text `json:"connection_id"`
+	ForceSso                   bool        `json:"force_sso"`
+	CoversSubtree              bool        `json:"covers_subtree"`
+	Status                     string      `json:"status"`
+	SsoConnectionID            pgtype.Text `json:"sso_connection_id"`
+	SsoConnectionStatus        pgtype.Text `json:"sso_connection_status"`
+	SsoConnectionCoversSubtree pgtype.Bool `json:"sso_connection_covers_subtree"`
 }
 
 func (q *Queries) GetForcedSSOForEmailDomain(ctx context.Context, arg GetForcedSSOForEmailDomainParams) (GetForcedSSOForEmailDomainRow, error) {
@@ -103,15 +147,76 @@ func (q *Queries) GetForcedSSOForEmailDomain(ctx context.Context, arg GetForcedS
 		&i.Domain,
 		&i.ConnectionID,
 		&i.ForceSso,
+		&i.CoversSubtree,
 		&i.Status,
 		&i.SsoConnectionID,
 		&i.SsoConnectionStatus,
+		&i.SsoConnectionCoversSubtree,
+	)
+	return i, err
+}
+
+const getForcedSSOForEmailDomainInSpace = `-- name: GetForcedSSOForEmailDomainInSpace :one
+WITH RECURSIVE ancestors AS (
+    SELECT spaces.id, spaces.parent_id, 0 AS depth
+    FROM spaces
+    WHERE spaces.id = $2
+    UNION ALL
+    SELECT parent.id, parent.parent_id, ancestors.depth + 1
+    FROM spaces parent
+    JOIN ancestors ON parent.id = ancestors.parent_id
+)
+SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
+    c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
+FROM sso_domains d
+JOIN sso_connections c ON c.id = d.connection_id
+JOIN ancestors ON ancestors.id = d.space_id
+WHERE d.domain = $1
+  AND d.status = 'verified'
+  AND d.force_sso = true
+  AND (ancestors.depth = 0 OR (d.covers_subtree AND c.covers_subtree))
+ORDER BY ancestors.depth ASC, d.id ASC
+LIMIT 1
+`
+
+type GetForcedSSOForEmailDomainInSpaceParams struct {
+	Domain  string `json:"domain"`
+	SpaceID string `json:"space_id"`
+}
+
+type GetForcedSSOForEmailDomainInSpaceRow struct {
+	ID                         string      `json:"id"`
+	SpaceID                    string      `json:"space_id"`
+	Domain                     string      `json:"domain"`
+	ConnectionID               pgtype.Text `json:"connection_id"`
+	ForceSso                   bool        `json:"force_sso"`
+	CoversSubtree              bool        `json:"covers_subtree"`
+	Status                     string      `json:"status"`
+	SsoConnectionID            string      `json:"sso_connection_id"`
+	SsoConnectionStatus        string      `json:"sso_connection_status"`
+	SsoConnectionCoversSubtree bool        `json:"sso_connection_covers_subtree"`
+}
+
+func (q *Queries) GetForcedSSOForEmailDomainInSpace(ctx context.Context, arg GetForcedSSOForEmailDomainInSpaceParams) (GetForcedSSOForEmailDomainInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, getForcedSSOForEmailDomainInSpace, arg.Domain, arg.SpaceID)
+	var i GetForcedSSOForEmailDomainInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Domain,
+		&i.ConnectionID,
+		&i.ForceSso,
+		&i.CoversSubtree,
+		&i.Status,
+		&i.SsoConnectionID,
+		&i.SsoConnectionStatus,
+		&i.SsoConnectionCoversSubtree,
 	)
 	return i, err
 }
 
 const getSSODomain = `-- name: GetSSODomain :one
-SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, status,
+SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status,
     verified_at, created_at, updated_at
 FROM sso_domains WHERE id = $1
 `
@@ -120,9 +225,23 @@ type GetSSODomainParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) GetSSODomain(ctx context.Context, arg GetSSODomainParams) (SsoDomain, error) {
+type GetSSODomainRow struct {
+	ID                    string             `json:"id"`
+	SpaceID               string             `json:"space_id"`
+	Domain                string             `json:"domain"`
+	VerificationTokenHash []byte             `json:"verification_token_hash"`
+	ConnectionID          pgtype.Text        `json:"connection_id"`
+	ForceSso              bool               `json:"force_sso"`
+	CoversSubtree         bool               `json:"covers_subtree"`
+	Status                string             `json:"status"`
+	VerifiedAt            pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) GetSSODomain(ctx context.Context, arg GetSSODomainParams) (GetSSODomainRow, error) {
 	row := q.db.QueryRow(ctx, getSSODomain, arg.ID)
-	var i SsoDomain
+	var i GetSSODomainRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -130,6 +249,7 @@ func (q *Queries) GetSSODomain(ctx context.Context, arg GetSSODomainParams) (Sso
 		&i.VerificationTokenHash,
 		&i.ConnectionID,
 		&i.ForceSso,
+		&i.CoversSubtree,
 		&i.Status,
 		&i.VerifiedAt,
 		&i.CreatedAt,
@@ -139,7 +259,7 @@ func (q *Queries) GetSSODomain(ctx context.Context, arg GetSSODomainParams) (Sso
 }
 
 const listSSODomains = `-- name: ListSSODomains :many
-SELECT id, space_id, domain, connection_id, force_sso, status, verified_at, created_at, updated_at
+SELECT id, space_id, domain, connection_id, force_sso, covers_subtree, status, verified_at, created_at, updated_at
 FROM sso_domains WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -149,15 +269,16 @@ type ListSSODomainsParams struct {
 }
 
 type ListSSODomainsRow struct {
-	ID           string             `json:"id"`
-	SpaceID      string             `json:"space_id"`
-	Domain       string             `json:"domain"`
-	ConnectionID pgtype.Text        `json:"connection_id"`
-	ForceSso     bool               `json:"force_sso"`
-	Status       string             `json:"status"`
-	VerifiedAt   pgtype.Timestamptz `json:"verified_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Domain        string             `json:"domain"`
+	ConnectionID  pgtype.Text        `json:"connection_id"`
+	ForceSso      bool               `json:"force_sso"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	Status        string             `json:"status"`
+	VerifiedAt    pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) ListSSODomains(ctx context.Context, arg ListSSODomainsParams) ([]ListSSODomainsRow, error) {
@@ -175,6 +296,7 @@ func (q *Queries) ListSSODomains(ctx context.Context, arg ListSSODomainsParams) 
 			&i.Domain,
 			&i.ConnectionID,
 			&i.ForceSso,
+			&i.CoversSubtree,
 			&i.Status,
 			&i.VerifiedAt,
 			&i.CreatedAt,
@@ -191,7 +313,7 @@ func (q *Queries) ListSSODomains(ctx context.Context, arg ListSSODomainsParams) 
 }
 
 const lockSSODomain = `-- name: LockSSODomain :one
-SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, status,
+SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status,
     verified_at, created_at, updated_at
 FROM sso_domains WHERE id = $1 FOR UPDATE
 `
@@ -200,9 +322,23 @@ type LockSSODomainParams struct {
 	ID string `json:"id"`
 }
 
-func (q *Queries) LockSSODomain(ctx context.Context, arg LockSSODomainParams) (SsoDomain, error) {
+type LockSSODomainRow struct {
+	ID                    string             `json:"id"`
+	SpaceID               string             `json:"space_id"`
+	Domain                string             `json:"domain"`
+	VerificationTokenHash []byte             `json:"verification_token_hash"`
+	ConnectionID          pgtype.Text        `json:"connection_id"`
+	ForceSso              bool               `json:"force_sso"`
+	CoversSubtree         bool               `json:"covers_subtree"`
+	Status                string             `json:"status"`
+	VerifiedAt            pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) LockSSODomain(ctx context.Context, arg LockSSODomainParams) (LockSSODomainRow, error) {
 	row := q.db.QueryRow(ctx, lockSSODomain, arg.ID)
-	var i SsoDomain
+	var i LockSSODomainRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,
@@ -210,6 +346,7 @@ func (q *Queries) LockSSODomain(ctx context.Context, arg LockSSODomainParams) (S
 		&i.VerificationTokenHash,
 		&i.ConnectionID,
 		&i.ForceSso,
+		&i.CoversSubtree,
 		&i.Status,
 		&i.VerifiedAt,
 		&i.CreatedAt,

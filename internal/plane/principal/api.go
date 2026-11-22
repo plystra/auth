@@ -166,8 +166,9 @@ type LoginInput struct {
 }
 type SignInStartInput struct {
 	Body struct {
-		Email  string `json:"email"`
-		Method string `json:"method,omitempty" enum:"password,passkey"`
+		Email   string `json:"email"`
+		Method  string `json:"method,omitempty" enum:"password,passkey"`
+		SpaceID string `json:"space_id,omitempty"`
 	}
 	XForwardedFor string `header:"X-Forwarded-For"`
 	UserAgent     string `header:"User-Agent"`
@@ -295,7 +296,7 @@ func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (
 }
 func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutput, error) {
 	if a.Enterprise != nil && in.Body.Method != "passkey" {
-		connectionID, err := a.Enterprise.ForcedConnectionForEmail(ctx, in.Body.Email)
+		connectionID, err := a.Enterprise.ForcedConnectionForEmail(ctx, in.Body.Email, in.Body.SpaceID)
 		if err != nil {
 			return nil, err
 		}

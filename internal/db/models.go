@@ -592,6 +592,7 @@ type SsoConnection struct {
 	SamlSsoUrl             pgtype.Text        `json:"saml_sso_url"`
 	SamlSsoBinding         pgtype.Text        `json:"saml_sso_binding"`
 	SamlIdpCertificate     pgtype.Text        `json:"saml_idp_certificate"`
+	CoversSubtree          bool               `json:"covers_subtree"`
 }
 
 type SsoDomain struct {
@@ -605,6 +606,7 @@ type SsoDomain struct {
 	VerifiedAt            pgtype.Timestamptz `json:"verified_at"`
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+	CoversSubtree         bool               `json:"covers_subtree"`
 }
 
 type SsoState struct {

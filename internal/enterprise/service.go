@@ -71,9 +71,10 @@ type TXTResolver interface {
 }
 
 type DomainInput struct {
-	Domain       string
-	ConnectionID string
-	ForceSSO     bool
+	Domain        string
+	ConnectionID  string
+	ForceSSO      bool
+	CoversSubtree bool
 }
 
 type Domain struct {
@@ -82,6 +83,7 @@ type Domain struct {
 	Domain            string    `json:"domain"`
 	ConnectionID      string    `json:"connection_id,omitempty"`
 	ForceSSO          bool      `json:"force_sso"`
+	CoversSubtree     bool      `json:"covers_subtree"`
 	Status            string    `json:"status"`
 	VerificationToken string    `json:"verification_token,omitempty"`
 	VerifiedAt        time.Time `json:"verified_at,omitempty"`
@@ -90,30 +92,32 @@ type Domain struct {
 }
 
 type ConnectionInput struct {
-	Name         string
-	Provider     string
-	Issuer       string
-	ClientID     string
-	ClientSecret string
-	RedirectURI  string
-	GroupsClaim  string
-	RoleMappings map[string]string
-	SAMLMetadata string
+	Name          string
+	Provider      string
+	Issuer        string
+	ClientID      string
+	ClientSecret  string
+	RedirectURI   string
+	GroupsClaim   string
+	RoleMappings  map[string]string
+	SAMLMetadata  string
+	CoversSubtree bool
 }
 
 type Connection struct {
-	ID           string            `json:"id"`
-	SpaceID      string            `json:"space_id"`
-	Name         string            `json:"name"`
-	Provider     string            `json:"provider"`
-	Issuer       string            `json:"issuer"`
-	ClientID     string            `json:"client_id"`
-	RedirectURI  string            `json:"redirect_uri"`
-	GroupsClaim  string            `json:"groups_claim"`
-	RoleMappings map[string]string `json:"role_mappings"`
-	Status       string            `json:"status"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
+	ID            string            `json:"id"`
+	SpaceID       string            `json:"space_id"`
+	Name          string            `json:"name"`
+	Provider      string            `json:"provider"`
+	Issuer        string            `json:"issuer"`
+	ClientID      string            `json:"client_id"`
+	RedirectURI   string            `json:"redirect_uri"`
+	GroupsClaim   string            `json:"groups_claim"`
+	RoleMappings  map[string]string `json:"role_mappings"`
+	Status        string            `json:"status"`
+	CoversSubtree bool              `json:"covers_subtree"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
 type StartResult struct {
@@ -264,6 +268,7 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 			ID: connectionID, SpaceID: spaceID, Name: in.Name, Provider: in.Provider,
 			Issuer: in.Issuer, ClientID: in.ClientID, ClientSecretCiphertext: ciphertext,
 			RedirectUri: redirectURI, GroupsClaim: in.GroupsClaim, RoleMappings: mappings,
+			CoversSubtree: in.CoversSubtree,
 		}
 		if samlDetails != nil {
 			params.SamlEntityID = pgtype.Text{String: samlDetails.EntityID, Valid: true}
@@ -280,7 +285,7 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
 			Action: "sso.connection.create", Outcome: "success", Permission: "auth.connections:manage",
 			Resource: audit.Resource{Type: "sso_connection", ID: out.ID, SpaceID: spaceID},
-			Metadata: map[string]string{"provider": out.Provider, "issuer": out.Issuer},
+			Metadata: map[string]string{"provider": out.Provider, "issuer": out.Issuer, "covers_subtree": fmt.Sprintf("%t", out.CoversSubtree)},
 		})
 	})
 	if err != nil {
@@ -368,6 +373,9 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 	if in.ForceSSO && strings.TrimSpace(in.ConnectionID) == "" {
 		return Domain{}, apierr.New("validation_failed", "force_sso requires an OIDC connection")
 	}
+	if in.CoversSubtree && strings.TrimSpace(in.ConnectionID) == "" {
+		return Domain{}, apierr.New("validation_failed", "covers_subtree requires an SSO connection")
+	}
 	token, err := randomOpaque("domv_")
 	if err != nil {
 		return Domain{}, err
@@ -395,6 +403,9 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 			if in.ForceSSO && connection.Status != "active" {
 				return apierr.New("validation_failed", "force_sso requires an active OIDC connection")
 			}
+			if in.CoversSubtree && !connection.CoversSubtree {
+				return apierr.New("validation_failed", "covers_subtree requires a connection that covers the subtree")
+			}
 			connectionID = pgtype.Text{String: connection.ID, Valid: true}
 		}
 		if err := s.consumeStepUp(ctx, q); err != nil {
@@ -403,6 +414,7 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 		row, err := q.CreateSSODomain(ctx, db.CreateSSODomainParams{
 			ID: string(ids.New[ids.DomainID]("dom")), SpaceID: spaceID, Domain: domain,
 			VerificationTokenHash: digest(token), ConnectionID: connectionID, ForceSso: in.ForceSSO,
+			CoversSubtree: in.CoversSubtree,
 		})
 		if err != nil {
 			return err
@@ -413,7 +425,7 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
 			Action: "sso.domain.create", Outcome: "success", Permission: "auth.connections:manage",
 			Resource: audit.Resource{Type: "sso_domain", ID: out.ID, SpaceID: spaceID},
-			Metadata: map[string]string{"domain": domain, "force_sso": fmt.Sprintf("%t", in.ForceSSO)},
+			Metadata: map[string]string{"domain": domain, "force_sso": fmt.Sprintf("%t", in.ForceSSO), "covers_subtree": fmt.Sprintf("%t", in.CoversSubtree)},
 		})
 	})
 	if err != nil {
@@ -544,10 +556,32 @@ func (s *Service) DisableDomain(ctx context.Context, actorMemberID, spaceID, dom
 	}))
 }
 
-func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string) (string, error) {
+func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string, targetSpaceID ...string) (string, error) {
 	_, domain, err := splitEmailDomain(email)
 	if err != nil {
 		return "", nil
+	}
+	if len(targetSpaceID) > 0 && strings.TrimSpace(targetSpaceID[0]) != "" {
+		active, err := s.Store.Queries().AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: strings.TrimSpace(targetSpaceID[0])})
+		if err != nil {
+			return "", err
+		}
+		if !active {
+			return "", apierr.New("temporarily_unavailable", "the target Space or one of its ancestors is unavailable")
+		}
+		row, err := s.Store.Queries().GetForcedSSOForEmailDomainInSpace(ctx, db.GetForcedSSOForEmailDomainInSpaceParams{
+			Domain: domain, SpaceID: strings.TrimSpace(targetSpaceID[0]),
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if row.SsoConnectionStatus != "active" || row.SsoConnectionID == "" {
+			return "", apierr.New("temporarily_unavailable", "the configured SSO connection is unavailable")
+		}
+		return row.SsoConnectionID, nil
 	}
 	row, err := s.Store.Queries().GetForcedSSOForEmailDomain(ctx, db.GetForcedSSOForEmailDomainParams{Domain: domain})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -555,6 +589,13 @@ func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string) (s
 	}
 	if err != nil {
 		return "", err
+	}
+	space, err := s.Store.Queries().GetSpace(ctx, db.GetSpaceParams{ID: row.SpaceID})
+	if err != nil {
+		return "", err
+	}
+	if space.Status != "active" {
+		return "", apierr.New("temporarily_unavailable", "the configured Space is unavailable")
 	}
 	if !row.SsoConnectionID.Valid || !row.SsoConnectionStatus.Valid || row.SsoConnectionStatus.String != "active" {
 		return "", apierr.New("temporarily_unavailable", "the configured SSO connection is unavailable")
@@ -1378,17 +1419,17 @@ func uniqueRoleIDs(mappings map[string]string) []string {
 }
 
 func connectionFromRow(row db.CreateSSOConnectionRow) Connection {
-	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CreatedAt.Time, row.UpdatedAt.Time)
+	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
 }
 
 func connectionFromListRow(row db.ListSSOConnectionsRow) Connection {
-	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CreatedAt.Time, row.UpdatedAt.Time)
+	return connectionFromValues(row.ID, row.SpaceID, row.Name, row.Provider, row.Issuer, row.ClientID, row.RedirectUri, row.GroupsClaim, row.RoleMappings, row.Status, row.CoversSubtree, row.CreatedAt.Time, row.UpdatedAt.Time)
 }
 
-func connectionFromValues(id, spaceID, name, provider, issuer, clientID, redirectURI, groupsClaim string, rawMappings []byte, status string, createdAt, updatedAt time.Time) Connection {
+func connectionFromValues(id, spaceID, name, provider, issuer, clientID, redirectURI, groupsClaim string, rawMappings []byte, status string, coversSubtree bool, createdAt, updatedAt time.Time) Connection {
 	mappings := map[string]string{}
 	_ = json.Unmarshal(rawMappings, &mappings)
-	return Connection{ID: id, SpaceID: spaceID, Name: name, Provider: provider, Issuer: issuer, ClientID: clientID, RedirectURI: redirectURI, GroupsClaim: groupsClaim, RoleMappings: mappings, Status: status, CreatedAt: createdAt, UpdatedAt: updatedAt}
+	return Connection{ID: id, SpaceID: spaceID, Name: name, Provider: provider, Issuer: issuer, ClientID: clientID, RedirectURI: redirectURI, GroupsClaim: groupsClaim, RoleMappings: mappings, Status: status, CoversSubtree: coversSubtree, CreatedAt: createdAt, UpdatedAt: updatedAt}
 }
 
 func normalizeConnectionError(err error) error {
@@ -1405,8 +1446,8 @@ func normalizeConnectionError(err error) error {
 	return err
 }
 
-func domainFromRow(row db.SsoDomain) Domain {
-	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+func domainFromRow(row db.CreateSSODomainRow) Domain {
+	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, CoversSubtree: row.CoversSubtree, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 	if row.ConnectionID.Valid {
 		out.ConnectionID = row.ConnectionID.String
 	}
@@ -1417,7 +1458,7 @@ func domainFromRow(row db.SsoDomain) Domain {
 }
 
 func domainFromListRow(row db.ListSSODomainsRow) Domain {
-	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, CoversSubtree: row.CoversSubtree, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 	if row.ConnectionID.Valid {
 		out.ConnectionID = row.ConnectionID.String
 	}

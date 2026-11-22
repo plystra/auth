@@ -245,3 +245,64 @@ func TestSSODomainVerificationAndForcedRouting(t *testing.T) {
 		t.Fatalf("disabled domain still forced SSO through %q", connectionID)
 	}
 }
+
+func TestSSODomainInheritanceRoutesChildSpaceOnlyWhenBothScopesCover(t *testing.T) {
+	ctx := context.Background()
+	database, err := enterpriseDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO users (id, email, email_normalized, password_hash, status) VALUES ('usr_domain_inherit', 'owner@inherit.example', 'owner@inherit.example', 'test-password-hash', 'active')`); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &authorization.Service{Store: st}
+	parent, owner, err := authorizer.CreateSpace(ctx, "usr_domain_inherit", "Inherited Domain", "inherited-domain")
+	if err != nil {
+		t.Fatal(err)
+	}
+	childID := "spc_domain_inherit_child"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Inherited Child', 'inherited-domain-child', $2)`, childID, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	service := &Service{Store: st, Authorization: authorizer, DataKey: secret.New(strings.Repeat("d", 32)), DNSResolver: staticTXTResolver{}}
+	requestCtx := authorization.WithHumanActor(ctx, owner.ID, "usr_domain_inherit")
+	connection, err := service.CreateConnection(requestCtx, owner.ID, parent.ID, ConnectionInput{
+		Name: "Inherited OIDC", Provider: "oidc", Issuer: "https://idp.example.com/inherited", ClientID: "client", ClientSecret: "secret",
+		RedirectURI: "https://auth.example.com/v1/sso/{connection_id}/callback", CoversSubtree: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := service.CreateDomain(requestCtx, owner.ID, parent.ID, DomainInput{Domain: "inherit.example", ConnectionID: connection.ID, ForceSSO: true, CoversSubtree: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.DNSResolver = staticTXTResolver{values: []string{domain.VerificationToken}}
+	if err := service.VerifyDomain(requestCtx, owner.ID, parent.ID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.ForcedConnectionForEmail(ctx, "person@inherit.example", childID); err != nil || got != connection.ID {
+		t.Fatalf("inherited SSO route = %q, err=%v, want %q", got, err, connection.ID)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sso_connections SET covers_subtree = false WHERE id = $1`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.ForcedConnectionForEmail(ctx, "person@inherit.example", childID); err != nil || got != "" {
+		t.Fatalf("route with non-covering connection = %q, err=%v, want no route", got, err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE sso_connections SET covers_subtree = true WHERE id = $1`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE spaces SET status = 'suspended' WHERE id = $1`, parent.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ForcedConnectionForEmail(ctx, "person@inherit.example", childID); err == nil {
+		t.Fatal("suspended ancestor allowed inherited SSO routing")
+	}
+}

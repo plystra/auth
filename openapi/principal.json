@@ -821,6 +821,9 @@
           "client_id": {
             "type": "string"
           },
+          "covers_subtree": {
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -871,6 +874,7 @@
           "groups_claim",
           "role_mappings",
           "status",
+          "covers_subtree",
           "created_at",
           "updated_at"
         ],
@@ -975,6 +979,9 @@
         "properties": {
           "connection_id": {
             "type": "string"
+          },
+          "covers_subtree": {
+            "type": "boolean"
           },
           "domain": {
             "type": "string"
@@ -1112,6 +1119,9 @@
           },
           "client_secret": {
             "type": "string"
+          },
+          "covers_subtree": {
+            "type": "boolean"
           },
           "groups_claim": {
             "type": "string"
@@ -1390,6 +1400,9 @@
           "connection_id": {
             "type": "string"
           },
+          "covers_subtree": {
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "type": "string"
@@ -1426,6 +1439,7 @@
           "space_id",
           "domain",
           "force_sso",
+          "covers_subtree",
           "status",
           "created_at",
           "updated_at"
@@ -2834,6 +2848,9 @@
               "password",
               "passkey"
             ],
+            "type": "string"
+          },
+          "space_id": {
             "type": "string"
           }
         },
