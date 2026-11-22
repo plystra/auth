@@ -202,4 +202,4 @@ WHERE du.directory_id = sqlc.arg(directory_id) AND du.id = sqlc.arg(id)
   AND du.active AND du.deleted_at IS NULL AND u.status = 'active' AND u.disabled_at IS NULL
   AND m.type = 'human' AND m.status = 'active'
   AND um.status = 'active' AND um.revoked_at IS NULL
-  AND (um.expires_at IS NULL OR um.expires_at > now());
+  AND (um.expires_at IS NULL OR um.expires_at > clock_timestamp());

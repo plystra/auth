@@ -486,7 +486,7 @@ WHERE du.directory_id = $2 AND du.id = $3
   AND du.active AND du.deleted_at IS NULL AND u.status = 'active' AND u.disabled_at IS NULL
   AND m.type = 'human' AND m.status = 'active'
   AND um.status = 'active' AND um.revoked_at IS NULL
-  AND (um.expires_at IS NULL OR um.expires_at > now())
+  AND (um.expires_at IS NULL OR um.expires_at > clock_timestamp())
 `
 
 type GetDirectoryLoginIdentityParams struct {

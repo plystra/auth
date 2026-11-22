@@ -263,7 +263,7 @@ func TestDirectorySSOConfigurationEnforcesTenantAndUniqueActiveConnection(t *tes
 }
 
 func TestDirectorySSORechecksBindingAndAssociationAfterLockWait(t *testing.T) {
-	for _, change := range []string{"binding", "association", "directory"} {
+	for _, change := range []string{"binding", "association", "directory", "expired_binding"} {
 		t.Run(change, func(t *testing.T) {
 			f := newDirectorySSOFixture(t, "sub")
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -282,6 +282,8 @@ func TestDirectorySSORechecksBindingAndAssociationAfterLockWait(t *testing.T) {
 						return ctx.Err()
 					}
 					switch change {
+					case "expired_binding":
+						return nil
 					case "binding":
 						return q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: f.userID, MemberID: f.memberID})
 					case "association":
@@ -316,6 +318,17 @@ func TestDirectorySSORechecksBindingAndAssociationAfterLockWait(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal(ctx.Err())
 				case <-time.After(10 * time.Millisecond):
+				}
+			}
+			if change == "expired_binding" {
+				var expired bool
+				err := f.st.Pool.QueryRow(ctx, `UPDATE user_members SET expires_at = (
+					SELECT min(xact_start) FROM pg_stat_activity
+					WHERE datname=current_database() AND wait_event_type='Lock' AND query LIKE '%users%FOR NO KEY UPDATE%'
+				) + interval '1 microsecond' WHERE user_id=$1 AND member_id=$2 RETURNING expires_at < clock_timestamp()`,
+					f.userID, f.memberID).Scan(&expired)
+				if err != nil || !expired {
+					t.Fatalf("did not place expiry between transaction start and lock release: %v", err)
 				}
 			}
 			close(release)
