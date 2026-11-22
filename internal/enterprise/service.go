@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -44,6 +45,7 @@ const (
 	maxRoleMappings       = 100
 	maxIdentityGroups     = 200
 	maxExternalSubjectLen = 512
+	domainTXTLabel        = "_plystra-auth"
 )
 
 type Service struct {
@@ -54,6 +56,30 @@ type Service struct {
 	DataKey       secret.String
 	Passwords     security.PasswordHasher
 	HTTPClient    *http.Client
+	DNSResolver   TXTResolver
+}
+
+type TXTResolver interface {
+	LookupTXT(context.Context, string) ([]string, error)
+}
+
+type DomainInput struct {
+	Domain       string
+	ConnectionID string
+	ForceSSO     bool
+}
+
+type Domain struct {
+	ID                string    `json:"id"`
+	SpaceID           string    `json:"space_id"`
+	Domain            string    `json:"domain"`
+	ConnectionID      string    `json:"connection_id,omitempty"`
+	ForceSSO          bool      `json:"force_sso"`
+	Status            string    `json:"status"`
+	VerificationToken string    `json:"verification_token,omitempty"`
+	VerifiedAt        time.Time `json:"verified_at,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type ConnectionInput struct {
@@ -278,6 +304,234 @@ func (s *Service) DisableConnection(ctx context.Context, actorMemberID, spaceID,
 			Resource: audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: spaceID},
 		})
 	}))
+}
+
+func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID string, in DomainInput) (Domain, error) {
+	domain, err := normalizeDomain(in.Domain)
+	if err != nil {
+		return Domain{}, err
+	}
+	if in.ForceSSO && strings.TrimSpace(in.ConnectionID) == "" {
+		return Domain{}, apierr.New("validation_failed", "force_sso requires an OIDC connection")
+	}
+	token, err := randomOpaque("domv_")
+	if err != nil {
+		return Domain{}, err
+	}
+	var out Domain
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+			return err
+		}
+		if _, err := q.GetSpace(ctx, db.GetSpaceParams{ID: spaceID}); err != nil {
+			return err
+		}
+		var connectionID pgtype.Text
+		if strings.TrimSpace(in.ConnectionID) != "" {
+			connection, err := q.LockSSOConnection(ctx, db.LockSSOConnectionParams{ID: strings.TrimSpace(in.ConnectionID)})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("not_found", "SSO connection was not found")
+			}
+			if err != nil {
+				return err
+			}
+			if connection.SpaceID != spaceID {
+				return apierr.New("not_found", "SSO connection was not found")
+			}
+			if in.ForceSSO && connection.Status != "active" {
+				return apierr.New("validation_failed", "force_sso requires an active OIDC connection")
+			}
+			connectionID = pgtype.Text{String: connection.ID, Valid: true}
+		}
+		if err := s.consumeStepUp(ctx, q); err != nil {
+			return err
+		}
+		row, err := q.CreateSSODomain(ctx, db.CreateSSODomainParams{
+			ID: string(ids.New[ids.DomainID]("dom")), SpaceID: spaceID, Domain: domain,
+			VerificationTokenHash: digest(token), ConnectionID: connectionID, ForceSso: in.ForceSSO,
+		})
+		if err != nil {
+			return err
+		}
+		out = domainFromRow(row)
+		out.VerificationToken = token
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "sso.domain.create", Outcome: "success", Permission: "auth.connections:manage",
+			Resource: audit.Resource{Type: "sso_domain", ID: out.ID, SpaceID: spaceID},
+			Metadata: map[string]string{"domain": domain, "force_sso": fmt.Sprintf("%t", in.ForceSSO)},
+		})
+	})
+	if err != nil {
+		return Domain{}, normalizeConnectionError(err)
+	}
+	return out, nil
+}
+
+func (s *Service) ListDomains(ctx context.Context, actorMemberID, spaceID string) ([]Domain, error) {
+	var rows []db.ListSSODomainsRow
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+			return err
+		}
+		var err error
+		rows, err = q.ListSSODomains(ctx, db.ListSSODomainsParams{SpaceID: spaceID})
+		return err
+	})
+	if err != nil {
+		return nil, normalizeConnectionError(err)
+	}
+	out := make([]Domain, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, domainFromListRow(row))
+	}
+	return out, nil
+}
+
+func (s *Service) VerifyDomain(ctx context.Context, actorMemberID, spaceID, domainID string) error {
+	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		return s.checkConnectionManagement(ctx, q, actorMemberID, spaceID)
+	}); err != nil {
+		return normalizeConnectionError(err)
+	}
+	row, err := s.Store.Queries().GetSSODomain(ctx, db.GetSSODomainParams{ID: strings.TrimSpace(domainID)})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("not_found", "domain was not found")
+	}
+	if err != nil {
+		return err
+	}
+	if row.SpaceID != spaceID {
+		return apierr.New("not_found", "domain was not found")
+	}
+	if row.Status == "verified" {
+		return nil
+	}
+	if row.Status != "pending" {
+		return apierr.New("forbidden", "domain verification is disabled")
+	}
+	resolver := s.DNSResolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	txt, err := resolver.LookupTXT(ctx, domainTXTLabel+"."+row.Domain)
+	if err != nil {
+		return apierr.New("verification_failed", "the DNS TXT record could not be resolved")
+	}
+	matched := false
+	for _, value := range txt {
+		if subtle.ConstantTimeCompare(digest(strings.TrimSpace(value)), row.VerificationTokenHash) == 1 {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return apierr.New("verification_failed", "the DNS TXT record does not match")
+	}
+	return normalizeConnectionError(s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+			return err
+		}
+		locked, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: row.ID})
+		if errors.Is(err, pgx.ErrNoRows) || locked.SpaceID != spaceID {
+			return apierr.New("not_found", "domain was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if locked.Status == "verified" {
+			return nil
+		}
+		if locked.Status != "pending" || subtle.ConstantTimeCompare(locked.VerificationTokenHash, row.VerificationTokenHash) != 1 {
+			return apierr.New("verification_failed", "domain verification changed while it was being checked")
+		}
+		if err := s.consumeStepUp(ctx, q); err != nil {
+			return err
+		}
+		if err := q.VerifySSODomain(ctx, db.VerifySSODomainParams{ID: row.ID}); err != nil {
+			return err
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "sso.domain.verify", Outcome: "success", Permission: "auth.connections:manage",
+			Resource: audit.Resource{Type: "sso_domain", ID: row.ID, SpaceID: spaceID},
+			Metadata: map[string]string{"domain": row.Domain},
+		})
+	}))
+}
+
+func (s *Service) DisableDomain(ctx context.Context, actorMemberID, spaceID, domainID string) error {
+	return normalizeConnectionError(s.Store.InTx(ctx, func(q *db.Queries) error {
+		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
+			return err
+		}
+		row, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: strings.TrimSpace(domainID)})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("not_found", "domain was not found")
+		}
+		if err != nil {
+			return err
+		}
+		if row.SpaceID != spaceID {
+			return apierr.New("not_found", "domain was not found")
+		}
+		if err := s.consumeStepUp(ctx, q); err != nil {
+			return err
+		}
+		if err := q.DisableSSODomain(ctx, db.DisableSSODomainParams{ID: row.ID}); err != nil {
+			return err
+		}
+		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID,
+			Action: "sso.domain.disable", Outcome: "success", Permission: "auth.connections:manage",
+			Resource: audit.Resource{Type: "sso_domain", ID: row.ID, SpaceID: spaceID},
+			Metadata: map[string]string{"domain": row.Domain},
+		})
+	}))
+}
+
+func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string) (string, error) {
+	_, domain, err := splitEmailDomain(email)
+	if err != nil {
+		return "", nil
+	}
+	row, err := s.Store.Queries().GetForcedSSOForEmailDomain(ctx, db.GetForcedSSOForEmailDomainParams{Domain: domain})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !row.SsoConnectionID.Valid || !row.SsoConnectionStatus.Valid || row.SsoConnectionStatus.String != "active" {
+		return "", apierr.New("temporarily_unavailable", "the configured SSO connection is unavailable")
+	}
+	return row.SsoConnectionID.String, nil
+}
+
+func (s *Service) checkConnectionManagement(ctx context.Context, q *db.Queries, actorMemberID, spaceID string) error {
+	if s.Authorization == nil {
+		return apierr.New("unavailable", "authorization is unavailable")
+	}
+	decision, err := s.Authorization.CheckMutationTx(ctx, q, authorization.CheckRequest{
+		MemberID: actorMemberID, Permission: "auth.connections:manage", ResourceSpace: spaceID,
+	})
+	if err != nil {
+		return err
+	}
+	if decision.Effect != engine.Allow {
+		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
+	}
+	return nil
+}
+
+func (s *Service) consumeStepUp(ctx context.Context, q *db.Queries) error {
+	if _, required := stepup.RequirementFromContext(ctx); !required {
+		return nil
+	}
+	if s.StepUp == nil {
+		return apierr.New("unavailable", "step-up authentication is unavailable")
+	}
+	return s.StepUp.ConsumeStepUpTx(ctx, q)
 }
 
 func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI string) (StartResult, error) {
@@ -806,4 +1060,61 @@ func normalizeConnectionError(err error) error {
 		return apierr.New("conflict", "an SSO connection or identity already exists")
 	}
 	return err
+}
+
+func domainFromRow(row db.SsoDomain) Domain {
+	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	if row.ConnectionID.Valid {
+		out.ConnectionID = row.ConnectionID.String
+	}
+	if row.VerifiedAt.Valid {
+		out.VerifiedAt = row.VerifiedAt.Time
+	}
+	return out
+}
+
+func domainFromListRow(row db.ListSSODomainsRow) Domain {
+	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	if row.ConnectionID.Valid {
+		out.ConnectionID = row.ConnectionID.String
+	}
+	if row.VerifiedAt.Valid {
+		out.VerifiedAt = row.VerifiedAt.Time
+	}
+	return out
+}
+
+func normalizeDomain(raw string) (string, error) {
+	domain := strings.TrimSpace(strings.ToLower(strings.TrimSuffix(raw, ".")))
+	if domain == "" || len(domain) > 253 || strings.ContainsAny(domain, "@/\\\r\n\t ") {
+		return "", apierr.New("validation_failed", "domain is invalid")
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 2 {
+		return "", apierr.New("validation_failed", "domain must contain a public suffix")
+	}
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", apierr.New("validation_failed", "domain is invalid")
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return "", apierr.New("validation_failed", "domain must use ASCII DNS labels")
+			}
+		}
+	}
+	return domain, nil
+}
+
+func splitEmailDomain(raw string) (string, string, error) {
+	email := strings.TrimSpace(strings.ToLower(raw))
+	at := strings.LastIndexByte(email, '@')
+	if at <= 0 || at == len(email)-1 {
+		return "", "", apierr.New("invalid_request", "a valid email is required")
+	}
+	domain, err := normalizeDomain(email[at+1:])
+	if err != nil {
+		return "", "", err
+	}
+	return email[:at], domain, nil
 }

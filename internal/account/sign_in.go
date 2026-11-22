@@ -25,10 +25,11 @@ const (
 )
 
 type SignInChallenge struct {
-	AttemptID      string                        `json:"attempt_id"`
-	NextStep       string                        `json:"next_step"`
-	ExpiresAt      time.Time                     `json:"expires_at"`
-	PasskeyOptions *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
+	AttemptID       string                        `json:"attempt_id"`
+	NextStep        string                        `json:"next_step"`
+	SSOConnectionID string                        `json:"sso_connection_id,omitempty"`
+	ExpiresAt       time.Time                     `json:"expires_at"`
+	PasskeyOptions  *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
 }
 
 func (s *Service) BeginPasskeySignIn(ctx context.Context, in LoginInput) (SignInChallenge, error) {

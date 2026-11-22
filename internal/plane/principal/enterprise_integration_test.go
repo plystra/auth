@@ -12,11 +12,18 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/approval"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 )
+
+type principalTXTResolver struct{ values []string }
+
+func (r principalTXTResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return r.values, nil
+}
 
 func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 	ctx := context.Background()
@@ -91,5 +98,38 @@ func TestSSOConnectionListUsesOneHumanAgentAuthorizationPath(t *testing.T) {
 	}
 	if status != "consumed" {
 		t.Fatalf("SSO list approval status = %q, want consumed", status)
+	}
+}
+
+func TestForcedSSODomainRoutesSignInToConfiguredConnection(t *testing.T) {
+	ctx := context.Background()
+	st, authz, owner, spaceID, _, _ := newPrincipalFixture(t)
+	service := &enterprise.Service{Store: st, Authorization: authz, DataKey: secret.New(strings.Repeat("d", 32))}
+	requestCtx := authorization.WithHumanActor(ctx, owner.ID, "usr_principal_actor")
+	connection, err := service.CreateConnection(requestCtx, owner.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Routing OIDC", Provider: "oidc", Issuer: "https://idp.example.com/routing", ClientID: "client", ClientSecret: "secret",
+		RedirectURI: "https://auth.example.com/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := service.CreateDomain(requestCtx, owner.ID, spaceID, enterprise.DomainInput{Domain: "acme.example", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.DNSResolver = principalTXTResolver{values: []string{domain.VerificationToken}}
+	if err := service.VerifyDomain(requestCtx, owner.ID, spaceID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Enterprise: service}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("SSO routing integration test", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	req := httptest.NewRequest(http.MethodPost, "/v1/auth/sign-in", strings.NewReader(`{"email":"user@acme.example"}`))
+	req.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"next_step":"sso"`) || !strings.Contains(response.Body.String(), connection.ID) {
+		t.Fatalf("forced SSO sign-in routing = %d %s", response.Code, response.Body.String())
 	}
 }

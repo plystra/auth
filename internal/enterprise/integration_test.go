@@ -166,3 +166,82 @@ func TestOIDCStartStoresOneTimeStateAndBuildsPKCERequest(t *testing.T) {
 		t.Fatal("plaintext state was stored")
 	}
 }
+
+type staticTXTResolver struct {
+	values []string
+	err    error
+}
+
+func (r staticTXTResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return r.values, r.err
+}
+
+func TestSSODomainVerificationAndForcedRouting(t *testing.T) {
+	ctx := context.Background()
+	database, err := enterpriseDB.Clone(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = database.Close(context.Background()) })
+	st, err := store.Open(ctx, database.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO users (id, email, email_normalized, password_hash, status) VALUES ('usr_domain_owner', 'domain-owner@example.test', 'domain-owner@example.test', 'test-password-hash', 'active')`); err != nil {
+		t.Fatal(err)
+	}
+	authorizer := &authorization.Service{Store: st}
+	space, owner, err := authorizer.CreateSpace(ctx, "usr_domain_owner", "Domain Space", "domain-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCtx := authorization.WithHumanActor(ctx, owner.ID, "usr_domain_owner")
+	service := &Service{Store: st, Authorization: authorizer, DataKey: secret.New(strings.Repeat("d", 32))}
+	connection, err := service.CreateConnection(requestCtx, owner.ID, space.ID, ConnectionInput{
+		Name: "Domain OIDC", Provider: "oidc", Issuer: "https://idp.example.com/tenant", ClientID: "client", ClientSecret: "secret",
+		RedirectURI: "https://auth.example.com/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.DNSResolver = staticTXTResolver{}
+	domain, err := service.CreateDomain(requestCtx, owner.ID, space.ID, DomainInput{Domain: "Example.COM", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if domain.VerificationToken == "" || domain.Domain != "example.com" {
+		t.Fatalf("created domain = %+v", domain)
+	}
+	var stored []byte
+	if err := st.Pool.QueryRow(ctx, `SELECT verification_token_hash FROM sso_domains WHERE id = $1`, domain.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored), domain.VerificationToken) {
+		t.Fatal("DNS verification token was stored in plaintext")
+	}
+	service.DNSResolver = staticTXTResolver{values: []string{domain.VerificationToken}}
+	if err := service.VerifyDomain(requestCtx, owner.ID, space.ID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	connectionID, err := service.ForcedConnectionForEmail(ctx, "person@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connectionID != connection.ID {
+		t.Fatalf("forced SSO connection = %q, want %q", connectionID, connection.ID)
+	}
+	if err := service.VerifyDomain(requestCtx, owner.ID, space.ID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.DisableDomain(requestCtx, owner.ID, space.ID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	connectionID, err = service.ForcedConnectionForEmail(ctx, "person@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connectionID != "" {
+		t.Fatalf("disabled domain still forced SSO through %q", connectionID)
+	}
+}

@@ -294,6 +294,17 @@ func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (
 	return out, nil
 }
 func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutput, error) {
+	if a.Enterprise != nil && in.Body.Method != "passkey" {
+		connectionID, err := a.Enterprise.ForcedConnectionForEmail(ctx, in.Body.Email)
+		if err != nil {
+			return nil, err
+		}
+		if connectionID != "" {
+			out := &SignInStartOutput{}
+			out.Body.Data = account.SignInChallenge{NextStep: "sso", SSOConnectionID: connectionID}
+			return out, nil
+		}
+	}
 	ip := requestinfo.Get(ctx).IP
 	if len(ip) == 0 && in.XForwardedFor != "" {
 		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))

@@ -590,6 +590,19 @@ type SsoConnection struct {
 	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
 }
 
+type SsoDomain struct {
+	ID                    string             `json:"id"`
+	SpaceID               string             `json:"space_id"`
+	Domain                string             `json:"domain"`
+	VerificationTokenHash []byte             `json:"verification_token_hash"`
+	ConnectionID          pgtype.Text        `json:"connection_id"`
+	ForceSso              bool               `json:"force_sso"`
+	Status                string             `json:"status"`
+	VerifiedAt            pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt             pgtype.Timestamptz `json:"updated_at"`
+}
+
 type SsoState struct {
 	ID                     string             `json:"id"`
 	ConnectionID           string             `json:"connection_id"`

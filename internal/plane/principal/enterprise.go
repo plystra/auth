@@ -55,10 +55,131 @@ type ssoConnectionsOutput struct {
 	}
 }
 
+type domainsInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+}
+
+type createDomainInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+	Body          struct {
+		Domain       string `json:"domain"`
+		ConnectionID string `json:"connection_id,omitempty"`
+		ForceSSO     bool   `json:"force_sso"`
+	}
+}
+
+type domainPathInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+	DomainID      string `path:"domain_id"`
+}
+
+type domainOutput struct {
+	Body struct {
+		Data enterprise.Domain `json:"data"`
+	}
+}
+
+type domainsOutput struct {
+	Body struct {
+		Data []enterprise.Domain `json:"data"`
+	}
+}
+
 func (a *API) registerEnterpriseRoutes(api huma.API) {
+	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listDomains)
+	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
+	route.Register(api, route.NewSpec("domains.verify", "POST", "/v1/spaces/{id}/domains/{domain_id}/verify", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.verifyDomain)
+	route.Register(api, route.NewSpec("domains.delete", "DELETE", "/v1/spaces/{id}/domains/{domain_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDomain)
 	route.Register(api, route.NewSpec("sso_connections.list", "GET", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}), a.listSSOConnections)
 	route.Register(api, route.NewSpec("sso_connections.create", "POST", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createSSOConnection)
 	route.Register(api, route.NewSpec("sso_connections.delete", "DELETE", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteSSOConnection)
+}
+
+func (a *API) listDomains(ctx context.Context, in *domainsInput) (*domainsOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	request := map[string]any{"operation": "domains.list", "space_id": in.ID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "domains.list", request)
+	if err != nil {
+		return nil, err
+	}
+	domains, err := a.Enterprise.ListDomains(ctx, actor.ID, in.ID)
+	if err != nil {
+		return nil, err
+	}
+	out := &domainsOutput{}
+	out.Body.Data = domains
+	return out, nil
+}
+
+func (a *API) createDomain(ctx context.Context, in *createDomainInput) (*domainOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	request := map[string]any{
+		"operation": "domains.create", "space_id": in.ID, "domain": strings.TrimSpace(in.Body.Domain),
+		"connection_id": strings.TrimSpace(in.Body.ConnectionID), "force_sso": in.Body.ForceSSO,
+	}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "domains.create", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "domains.create", request)
+	if err != nil {
+		return nil, err
+	}
+	domain, err := a.Enterprise.CreateDomain(ctx, actor.ID, in.ID, enterprise.DomainInput{Domain: in.Body.Domain, ConnectionID: in.Body.ConnectionID, ForceSSO: in.Body.ForceSSO})
+	if err != nil {
+		return nil, err
+	}
+	out := &domainOutput{}
+	out.Body.Data = domain
+	return out, nil
+}
+
+func (a *API) verifyDomain(ctx context.Context, in *domainPathInput) (*authorizationDataOutput[acceptedData], error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	request := map[string]any{"operation": "domains.verify", "space_id": in.ID, "domain_id": in.DomainID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "domains.verify", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "domains.verify", request)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Enterprise.VerifyDomain(ctx, actor.ID, in.ID, in.DomainID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
+}
+
+func (a *API) deleteDomain(ctx context.Context, in *domainPathInput) (*authorizationDataOutput[acceptedData], error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	request := map[string]any{"operation": "domains.delete", "space_id": in.ID, "domain_id": in.DomainID}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "domains.delete", request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "domains.delete", request)
+	if err != nil {
+		return nil, err
+	}
+	if err := a.Enterprise.DisableDomain(ctx, actor.ID, in.ID, in.DomainID); err != nil {
+		return nil, err
+	}
+	return acceptedResponse(), nil
 }
 
 func (a *API) deleteSSOConnection(ctx context.Context, in *ssoConnectionPathInput) (*authorizationDataOutput[acceptedData], error) {

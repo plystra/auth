@@ -32,6 +32,7 @@ type InvitationID string
 type ApprovalID string
 type SignInAttemptID string
 type PasskeyChallengeID string
+type DomainID string
 
 type prefixer interface{ ~string }
 
@@ -63,3 +64,4 @@ func (id InvitationID) Valid() bool       { return valid(string(id), "ivt") }
 func (id ApprovalID) Valid() bool         { return valid(string(id), "apr") }
 func (id SignInAttemptID) Valid() bool    { return valid(string(id), "sia") }
 func (id PasskeyChallengeID) Valid() bool { return valid(string(id), "pch") }
+func (id DomainID) Valid() bool           { return valid(string(id), "dom") }
