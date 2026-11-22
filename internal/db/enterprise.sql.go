@@ -92,8 +92,7 @@ VALUES (
     $16, $17
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree
+    role_mappings, status, covers_subtree, created_at, updated_at
 `
 
 type CreateSSOConnectionParams struct {
@@ -117,23 +116,19 @@ type CreateSSOConnectionParams struct {
 }
 
 type CreateSSOConnectionRow struct {
-	ID                 string             `json:"id"`
-	SpaceID            string             `json:"space_id"`
-	Name               string             `json:"name"`
-	Provider           string             `json:"provider"`
-	Issuer             string             `json:"issuer"`
-	ClientID           string             `json:"client_id"`
-	RedirectUri        string             `json:"redirect_uri"`
-	GroupsClaim        string             `json:"groups_claim"`
-	RoleMappings       []byte             `json:"role_mappings"`
-	Status             string             `json:"status"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
-	SamlEntityID       pgtype.Text        `json:"saml_entity_id"`
-	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
-	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
-	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
-	CoversSubtree      bool               `json:"covers_subtree"`
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnectionParams) (CreateSSOConnectionRow, error) {
@@ -168,13 +163,9 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		&i.GroupsClaim,
 		&i.RoleMappings,
 		&i.Status,
+		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
-		&i.SamlEntityID,
-		&i.SamlSsoUrl,
-		&i.SamlSsoBinding,
-		&i.SamlIdpCertificate,
-		&i.CoversSubtree,
 	)
 	return i, err
 }
@@ -388,8 +379,7 @@ func (q *Queries) GetSSOMembershipForUser(ctx context.Context, arg GetSSOMembers
 
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, created_at, updated_at, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree
+    role_mappings, status, covers_subtree, created_at, updated_at
 FROM sso_connections WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -399,23 +389,19 @@ type ListSSOConnectionsParams struct {
 }
 
 type ListSSOConnectionsRow struct {
-	ID                 string             `json:"id"`
-	SpaceID            string             `json:"space_id"`
-	Name               string             `json:"name"`
-	Provider           string             `json:"provider"`
-	Issuer             string             `json:"issuer"`
-	ClientID           string             `json:"client_id"`
-	RedirectUri        string             `json:"redirect_uri"`
-	GroupsClaim        string             `json:"groups_claim"`
-	RoleMappings       []byte             `json:"role_mappings"`
-	Status             string             `json:"status"`
-	CreatedAt          pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
-	SamlEntityID       pgtype.Text        `json:"saml_entity_id"`
-	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
-	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
-	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
-	CoversSubtree      bool               `json:"covers_subtree"`
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnectionsParams) ([]ListSSOConnectionsRow, error) {
@@ -438,13 +424,9 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 			&i.GroupsClaim,
 			&i.RoleMappings,
 			&i.Status,
+			&i.CoversSubtree,
 			&i.CreatedAt,
 			&i.UpdatedAt,
-			&i.SamlEntityID,
-			&i.SamlSsoUrl,
-			&i.SamlSsoBinding,
-			&i.SamlIdpCertificate,
-			&i.CoversSubtree,
 		); err != nil {
 			return nil, err
 		}
