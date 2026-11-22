@@ -144,6 +144,41 @@ func TestPublicApplicationReviewRequiresCapabilityAndRequestBoundStepUp(t *testi
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE action IN ('ops.application.approve', 'ops.application.reject') AND outcome = 'success'`).Scan(&auditCount); err != nil || auditCount != 2 {
 		t.Fatalf("review audit count = %d error = %v", auditCount, err)
 	}
+	t.Run("HumanOIDCLoginOnlyPublicReview", func(t *testing.T) {
+		const id = "app_login_only"
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO applications
+			(id, space_id, name, client_id, visibility, review_status, human_oidc_enabled, pending_manifest_permissions)
+			VALUES ($1, 'spc_public_review', 'Login Only', $1, 'public', 'pending', true, '[]')`, id); err != nil {
+			t.Fatal(err)
+		}
+		const empty = `{"manifest_permissions":[]}`
+		const review = "/ops/v1/applications/" + id
+		proof := map[string]any{"application_id": id, "manifest_permissions": []string{}}
+		if got := request(http.MethodPost, review+"/approve", reviewerToken, empty); got.Code != http.StatusForbidden {
+			t.Fatalf("login-only approval without bound proof = %d", got.Code)
+		}
+		seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.approve", proof)
+		got := request(http.MethodPost, review+"/approve", reviewerToken, empty)
+		var approved struct {
+			Data operator.PublicApplicationReview
+		}
+		if got.Code != http.StatusOK || json.Unmarshal(got.Body.Bytes(), &approved) != nil || !approved.Data.HumanOIDCEnabled ||
+			approved.Data.ReviewStatus != "approved" || approved.Data.ManifestPermissions == nil || len(approved.Data.ManifestPermissions) != 0 {
+			t.Fatalf("login-only public approval = %d", got.Code)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE applications SET pending_manifest_permissions='["auth.authz:check"]' WHERE id=$1`, id); err != nil {
+			t.Fatal(err)
+		}
+		seedPublicReviewStepUp(t, st, reviewerSession, "ops.applications.reject", map[string]any{"application_id": id})
+		if got := request(http.MethodPost, review+"/reject", reviewerToken, ""); got.Code != http.StatusOK {
+			t.Fatalf("reject pending business permission = %d", got.Code)
+		}
+		var preserved bool
+		if err := st.Pool.QueryRow(ctx, `SELECT review_status='approved' AND manifest_permissions='[]' AND
+			pending_manifest_permissions IS NULL AND human_oidc_enabled FROM applications WHERE id=$1`, id).Scan(&preserved); err != nil || !preserved {
+			t.Fatal("rejected expansion invalidated earlier login approval", err)
+		}
+	})
 	admin, err := pgx.Connect(ctx, database.URL)
 	if err != nil {
 		t.Fatal(err)

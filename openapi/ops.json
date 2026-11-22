@@ -393,7 +393,6 @@
               "type": "string"
             },
             "maxItems": 100,
-            "minItems": 1,
             "type": [
               "array",
               "null"
@@ -426,6 +425,9 @@
           "created_at": {
             "format": "date-time",
             "type": "string"
+          },
+          "human_oidc_enabled": {
+            "type": "boolean"
           },
           "id": {
             "type": "string"
@@ -477,6 +479,7 @@
           "client_id",
           "redirect_uris",
           "manifest_permissions",
+          "human_oidc_enabled",
           "review_status",
           "status",
           "created_at"

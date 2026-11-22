@@ -161,12 +161,12 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 
 const createApplication = `-- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-                          manifest_permissions, visibility, review_status, pending_manifest_permissions)
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled)
 VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb),
         COALESCE($5, '[]'::jsonb), $6, $7,
-        $8, $9, $10, $11)
+        $8, $9, $10, $11, $12)
 RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-          manifest_permissions, visibility, review_status, pending_manifest_permissions, status, created_at
+          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 `
 
 type CreateApplicationParams struct {
@@ -181,6 +181,7 @@ type CreateApplicationParams struct {
 	Visibility                 string      `json:"visibility"`
 	ReviewStatus               string      `json:"review_status"`
 	PendingManifestPermissions []byte      `json:"pending_manifest_permissions"`
+	HumanOidcEnabled           bool        `json:"human_oidc_enabled"`
 }
 
 type CreateApplicationRow struct {
@@ -195,6 +196,7 @@ type CreateApplicationRow struct {
 	Visibility                 string             `json:"visibility"`
 	ReviewStatus               string             `json:"review_status"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -212,6 +214,7 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		arg.Visibility,
 		arg.ReviewStatus,
 		arg.PendingManifestPermissions,
+		arg.HumanOidcEnabled,
 	)
 	var i CreateApplicationRow
 	err := row.Scan(
@@ -226,6 +229,7 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		&i.Visibility,
 		&i.ReviewStatus,
 		&i.PendingManifestPermissions,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -521,7 +525,7 @@ func (q *Queries) GetActiveInstallationForKeyRestriction(ctx context.Context, ar
 
 const getApplicationByClientID = `-- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, status, created_at
+       visibility, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE client_id = $1
 LIMIT 1
@@ -541,6 +545,7 @@ type GetApplicationByClientIDRow struct {
 	ClientSecretHash []byte             `json:"client_secret_hash"`
 	Visibility       string             `json:"visibility"`
 	ReviewStatus     string             `json:"review_status"`
+	HumanOidcEnabled bool               `json:"human_oidc_enabled"`
 	Status           string             `json:"status"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
@@ -558,6 +563,7 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.ClientSecretHash,
 		&i.Visibility,
 		&i.ReviewStatus,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -683,7 +689,7 @@ func (q *Queries) GetInstallationTarget(ctx context.Context, arg GetInstallation
 
 const getOAuthClientByID = `-- name: GetOAuthClientByID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, status, created_at
+       visibility, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE id = $1
 FOR UPDATE
@@ -703,6 +709,7 @@ type GetOAuthClientByIDRow struct {
 	ClientSecretHash []byte             `json:"client_secret_hash"`
 	Visibility       string             `json:"visibility"`
 	ReviewStatus     string             `json:"review_status"`
+	HumanOidcEnabled bool               `json:"human_oidc_enabled"`
 	Status           string             `json:"status"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 }
@@ -720,6 +727,7 @@ func (q *Queries) GetOAuthClientByID(ctx context.Context, arg GetOAuthClientByID
 		&i.ClientSecretHash,
 		&i.Visibility,
 		&i.ReviewStatus,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -1124,7 +1132,7 @@ func (q *Queries) ListOAuthConsentPermissions(ctx context.Context, arg ListOAuth
 
 const listPublicApplicationReviews = `-- name: ListPublicApplicationReviews :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE visibility = 'public'
 ORDER BY created_at, id
@@ -1139,6 +1147,7 @@ type ListPublicApplicationReviewsRow struct {
 	ManifestPermissions        []byte             `json:"manifest_permissions"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	ReviewStatus               string             `json:"review_status"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1161,6 +1170,7 @@ func (q *Queries) ListPublicApplicationReviews(ctx context.Context) ([]ListPubli
 			&i.ManifestPermissions,
 			&i.PendingManifestPermissions,
 			&i.ReviewStatus,
+			&i.HumanOidcEnabled,
 			&i.Status,
 			&i.CreatedAt,
 		); err != nil {
@@ -1176,7 +1186,7 @@ func (q *Queries) ListPublicApplicationReviews(ctx context.Context) ([]ListPubli
 
 const listPublishedApplications = `-- name: ListPublishedApplications :many
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 FROM applications
 WHERE space_id = $1
 ORDER BY created_at, id
@@ -1196,6 +1206,7 @@ type ListPublishedApplicationsRow struct {
 	Visibility                 string             `json:"visibility"`
 	ReviewStatus               string             `json:"review_status"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1219,6 +1230,7 @@ func (q *Queries) ListPublishedApplications(ctx context.Context, arg ListPublish
 			&i.Visibility,
 			&i.ReviewStatus,
 			&i.PendingManifestPermissions,
+			&i.HumanOidcEnabled,
 			&i.Status,
 			&i.CreatedAt,
 		); err != nil {
@@ -1282,7 +1294,7 @@ func (q *Queries) LockActiveApplicationInstallationForSpace(ctx context.Context,
 
 const lockApplicationForUpdate = `-- name: LockApplicationForUpdate :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 FROM applications WHERE id = $1
 FOR UPDATE
 `
@@ -1301,6 +1313,7 @@ type LockApplicationForUpdateRow struct {
 	Visibility                 string             `json:"visibility"`
 	ReviewStatus               string             `json:"review_status"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1318,6 +1331,7 @@ func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicat
 		&i.Visibility,
 		&i.ReviewStatus,
 		&i.PendingManifestPermissions,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -1505,7 +1519,7 @@ func (q *Queries) LockOAuthAuthorizationRequest(ctx context.Context, arg LockOAu
 
 const lockPublicApplicationReview = `-- name: LockPublicApplicationReview :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions,
-       pending_manifest_permissions, review_status, status, created_at
+       pending_manifest_permissions, review_status, human_oidc_enabled, status, created_at
 FROM applications
 WHERE id = $1 AND visibility = 'public'
 FOR UPDATE
@@ -1524,6 +1538,7 @@ type LockPublicApplicationReviewRow struct {
 	ManifestPermissions        []byte             `json:"manifest_permissions"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	ReviewStatus               string             `json:"review_status"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1540,6 +1555,7 @@ func (q *Queries) LockPublicApplicationReview(ctx context.Context, arg LockPubli
 		&i.ManifestPermissions,
 		&i.PendingManifestPermissions,
 		&i.ReviewStatus,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -1564,7 +1580,7 @@ func (q *Queries) PreserveAPIKeySecretForGrace(ctx context.Context, arg Preserve
 const rejectPublicApplicationReview = `-- name: RejectPublicApplicationReview :execrows
 UPDATE applications
 SET pending_manifest_permissions = NULL,
-    review_status = CASE WHEN jsonb_array_length(manifest_permissions) > 0 THEN 'approved' ELSE 'rejected' END
+    review_status = CASE WHEN review_status = 'approved' THEN 'approved' ELSE 'rejected' END
 WHERE id = $1 AND visibility = 'public'
   AND pending_manifest_permissions IS NOT NULL
 `
@@ -1877,10 +1893,11 @@ SET name = $1, redirect_uris = $2,
     manifest_permissions = $3,
     allowed_scopes = $3,
     pending_manifest_permissions = $4,
-    review_status = $5
-WHERE id = $6
+    review_status = $5,
+    human_oidc_enabled = $6
+WHERE id = $7
 RETURNING id, space_id, name, client_id, redirect_uris, manifest_permissions,
-          pending_manifest_permissions, visibility, review_status, status, created_at
+          pending_manifest_permissions, visibility, review_status, human_oidc_enabled, status, created_at
 `
 
 type UpdateApplicationParams struct {
@@ -1889,6 +1906,7 @@ type UpdateApplicationParams struct {
 	ManifestPermissions        []byte `json:"manifest_permissions"`
 	PendingManifestPermissions []byte `json:"pending_manifest_permissions"`
 	ReviewStatus               string `json:"review_status"`
+	HumanOidcEnabled           bool   `json:"human_oidc_enabled"`
 	ApplicationID              string `json:"application_id"`
 }
 
@@ -1902,6 +1920,7 @@ type UpdateApplicationRow struct {
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	Visibility                 string             `json:"visibility"`
 	ReviewStatus               string             `json:"review_status"`
+	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1913,6 +1932,7 @@ func (q *Queries) UpdateApplication(ctx context.Context, arg UpdateApplicationPa
 		arg.ManifestPermissions,
 		arg.PendingManifestPermissions,
 		arg.ReviewStatus,
+		arg.HumanOidcEnabled,
 		arg.ApplicationID,
 	)
 	var i UpdateApplicationRow
@@ -1926,6 +1946,7 @@ func (q *Queries) UpdateApplication(ctx context.Context, arg UpdateApplicationPa
 		&i.PendingManifestPermissions,
 		&i.Visibility,
 		&i.ReviewStatus,
+		&i.HumanOidcEnabled,
 		&i.Status,
 		&i.CreatedAt,
 	)

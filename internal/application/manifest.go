@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -15,19 +16,21 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/authz/engine"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/stepup"
 )
 
 type UpdateInput struct {
 	Name                *string
 	RedirectURIs        *[]string
 	ManifestPermissions *[]string
+	HumanOIDCEnabled    *bool
 }
 
 func (s *Service) Update(ctx context.Context, actorMemberID, applicationID string, in UpdateInput) (PublishedApplication, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
 		return PublishedApplication{}, apierr.New("UNAVAILABLE", "application updates are unavailable")
 	}
-	if in.Name == nil && in.RedirectURIs == nil && in.ManifestPermissions == nil {
+	if in.Name == nil && in.RedirectURIs == nil && in.ManifestPermissions == nil && in.HumanOIDCEnabled == nil {
 		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application update has no fields")
 	}
 	if in.Name != nil {
@@ -50,8 +53,8 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		}
 	}
 	if in.ManifestPermissions != nil {
-		if len(*in.ManifestPermissions) == 0 || len(*in.ManifestPermissions) > 100 {
-			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest must contain 1 to 100 permissions")
+		if len(*in.ManifestPermissions) > 100 {
+			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest exceeds 100 permissions")
 		}
 		permissions := slices.Clone(*in.ManifestPermissions)
 		slices.Sort(permissions)
@@ -94,6 +97,18 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		}
 		name, redirects, manifest := row.Name, oldRedirects, oldManifest
 		pending, reviewStatus := oldPending, row.ReviewStatus
+		humanOIDC := row.HumanOidcEnabled
+		if in.HumanOIDCEnabled != nil {
+			if _, required := stepup.RequirementFromContext(ctx); required {
+				if s.StepUp == nil {
+					return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
+				}
+				if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
+					return err
+				}
+			}
+			humanOIDC = *in.HumanOIDCEnabled
+		}
 		if in.Name != nil {
 			name = *in.Name
 		}
@@ -101,6 +116,9 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 			redirects = slices.Clone(*in.RedirectURIs)
 		}
 		if in.ManifestPermissions != nil {
+			if len(*in.ManifestPermissions) == 0 && !humanOIDC && !row.HumanOidcEnabled {
+				return apierr.New("VALIDATION_FAILED", "an empty manifest requires human OIDC sign-in")
+			}
 			for _, key := range *in.ManifestPermissions {
 				permission, err := q.GetPermissionByKey(ctx, db.GetPermissionByKeyParams{Key: key})
 				if errors.Is(err, pgx.ErrNoRows) {
@@ -115,19 +133,19 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 			}
 			if row.Visibility == "private" {
 				manifest = slices.Clone(*in.ManifestPermissions)
-			} else if !slices.Equal(*in.ManifestPermissions, oldManifest) || len(oldPending) > 0 || reviewStatus == "rejected" {
+			} else if !slices.Equal(*in.ManifestPermissions, oldManifest) || oldPending != nil || reviewStatus == "rejected" {
 				// Pending review never replaces an already approved runtime manifest.
 				pending = slices.Clone(*in.ManifestPermissions)
-				if len(oldManifest) == 0 {
+				if reviewStatus != "approved" {
 					reviewStatus = "pending"
 				}
 			}
 		}
 		if name == row.Name && slices.Equal(redirects, oldRedirects) && slices.Equal(manifest, oldManifest) &&
-			slices.Equal(pending, oldPending) && reviewStatus == row.ReviewStatus {
+			slices.Equal(pending, oldPending) && (pending == nil) == (oldPending == nil) && reviewStatus == row.ReviewStatus && humanOIDC == row.HumanOidcEnabled {
 			out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: name, ClientID: row.ClientID,
 				RedirectURIs: redirects, ManifestPermissions: manifest, Visibility: row.Visibility,
-				PendingManifestPermissions: pending, ReviewStatus: reviewStatus, Status: row.Status, CreatedAt: row.CreatedAt.Time}
+				PendingManifestPermissions: pending, ReviewStatus: reviewStatus, Status: row.Status, CreatedAt: row.CreatedAt.Time, HumanOIDCEnabled: humanOIDC}
 			return nil
 		}
 		manifestJSON, err := json.Marshal(manifest)
@@ -152,7 +170,7 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		}
 		updated, err := q.UpdateApplication(ctx, db.UpdateApplicationParams{
 			ApplicationID: applicationID, Name: name, RedirectUris: redirectJSON, ManifestPermissions: manifestJSON,
-			PendingManifestPermissions: pendingJSON, ReviewStatus: reviewStatus,
+			PendingManifestPermissions: pendingJSON, ReviewStatus: reviewStatus, HumanOidcEnabled: humanOIDC,
 		})
 		if err != nil {
 			return err
@@ -160,13 +178,14 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, ApplicationID: applicationID,
 			Action: "application.update", Outcome: "success", Permission: "auth.applications:manage",
+			Metadata: map[string]string{"human_oidc_enabled": strconv.FormatBool(humanOIDC)},
 			Resource: audit.Resource{Type: "application", ID: applicationID, SpaceID: updated.SpaceID},
 		}); err != nil {
 			return err
 		}
 		out = PublishedApplication{ID: updated.ID, SpaceID: updated.SpaceID, Name: updated.Name, ClientID: updated.ClientID,
 			RedirectURIs: redirects, ManifestPermissions: manifest, Visibility: updated.Visibility,
-			PendingManifestPermissions: pending, ReviewStatus: updated.ReviewStatus, Status: updated.Status, CreatedAt: updated.CreatedAt.Time}
+			PendingManifestPermissions: pending, ReviewStatus: updated.ReviewStatus, Status: updated.Status, CreatedAt: updated.CreatedAt.Time, HumanOIDCEnabled: updated.HumanOidcEnabled}
 		return nil
 	})
 	return out, err

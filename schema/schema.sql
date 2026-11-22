@@ -1913,3 +1913,8 @@ CREATE UNIQUE INDEX directories_active_sso_connection_unique
 ALTER TABLE external_identities ADD COLUMN directory_user_id text REFERENCES directory_users(id);
 CREATE INDEX external_identities_directory_user_idx ON external_identities(directory_user_id)
     WHERE directory_user_id IS NOT NULL;
+
+
+-- Publishers opt their clients into human OIDC sign-in independently of
+-- business permissions. Existing clients retain their original behavior.
+ALTER TABLE applications ADD COLUMN human_oidc_enabled boolean NOT NULL DEFAULT false;
