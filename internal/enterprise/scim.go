@@ -17,6 +17,8 @@ import (
 	"github.com/plystra/auth/internal/security"
 )
 
+const MaxSCIMPageSize = 100
+
 type SCIMUserInput struct {
 	ExternalID     string
 	UserName       string
@@ -133,7 +135,7 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 	if err != nil {
 		return nil, 0, err
 	}
-	if startIndex < 1 || count < 1 || count > 100 {
+	if startIndex < 1 || count < 0 || count > MaxSCIMPageSize {
 		return nil, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
 	}
 	users := []SCIMUser{}

@@ -919,24 +919,22 @@ func decodeSCIMJSON(w http.ResponseWriter, r *http.Request, value any) error {
 }
 
 func scimPagination(r *http.Request) (int32, int32, error) {
-	start, count := int64(1), int64(100)
+	query := r.URL.Query()
+	start, count := int64(1), int64(enterprise.MaxSCIMPageSize)
 	var err error
-	if raw := strings.TrimSpace(r.URL.Query().Get("startIndex")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("startIndex")); raw != "" {
 		start, err = strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return 0, 0, apierr.New("invalid_request", "startIndex is invalid")
 		}
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("count")); raw != "" {
+	if raw := strings.TrimSpace(query.Get("count")); raw != "" {
 		count, err = strconv.ParseInt(raw, 10, 32)
 		if err != nil {
 			return 0, 0, apierr.New("invalid_request", "count is invalid")
 		}
 	}
-	if start < 1 || count < 1 || count > 100 {
-		return 0, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
-	}
-	return int32(start), int32(count), nil
+	return int32(max(start, 1)), int32(min(max(count, 0), enterprise.MaxSCIMPageSize)), nil
 }
 
 func parseSCIMUserFilter(raw string) (string, error) {

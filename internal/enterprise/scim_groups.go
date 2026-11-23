@@ -75,7 +75,7 @@ func (s *Service) ListSCIMGroups(ctx context.Context, directoryID string, token 
 	if err != nil {
 		return nil, 0, err
 	}
-	if startIndex < 1 || count < 1 || count > 100 {
+	if startIndex < 1 || count < 0 || count > MaxSCIMPageSize {
 		return nil, 0, apierr.New("invalid_request", "SCIM pagination is invalid")
 	}
 	groups := []SCIMGroup{}

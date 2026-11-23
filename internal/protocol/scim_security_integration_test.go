@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -119,6 +120,43 @@ func (f scimFixture) user(t *testing.T, externalID string, active bool) scimTest
 func scimPatch(operations ...map[string]any) string {
 	body, _ := json.Marshal(map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:PatchOp"}, "Operations": operations})
 	return string(body)
+}
+
+func TestSCIMListPaginationNormalizesPageAndReturnsTotals(t *testing.T) {
+	f := newSCIMFixture(t)
+	f.user(t, "alice", true)
+	f.user(t, "bob", true)
+	f.request(t, http.MethodPost, "Groups", `{"externalId":"team","displayName":"Team"}`, "", http.StatusCreated)
+	for _, tc := range []struct {
+		name, path  string
+		total, rows int
+	}{
+		{name: "users count only", path: "Users?count=0", total: 2},
+		{name: "filtered count only", path: "Users?count=0&filter=" + url.QueryEscape(`userName eq "bob@scim.test"`), total: 1},
+		{name: "groups count only", path: "Groups?count=0", total: 1},
+		{name: "negative count", path: "Groups?count=-1", total: 1},
+		{name: "negative start", path: "Users?startIndex=-1&count=1", total: 2, rows: 1},
+		{name: "zero start", path: "Groups?startIndex=0&count=1", total: 1, rows: 1},
+		{name: "large requested page", path: "Users?count=101", total: 2, rows: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := f.request(t, http.MethodGet, tc.path, "", "", http.StatusOK)
+			var list struct {
+				TotalResults int               `json:"totalResults"`
+				StartIndex   int               `json:"startIndex"`
+				ItemsPerPage int               `json:"itemsPerPage"`
+				Resources    []json.RawMessage `json:"Resources"`
+			}
+			if err := json.Unmarshal(res.Body.Bytes(), &list); err != nil {
+				t.Fatal(err)
+			}
+			if list.TotalResults != tc.total || list.StartIndex != 1 || list.ItemsPerPage != tc.rows || list.Resources == nil || len(list.Resources) != tc.rows {
+				t.Fatalf("page total=%d start=%d items=%d resources=%d", list.TotalResults, list.StartIndex, list.ItemsPerPage, len(list.Resources))
+			}
+		})
+	}
+	f.request(t, http.MethodGet, "Users?count=invalid", "", "", http.StatusBadRequest)
+	f.request(t, http.MethodGet, "Groups?startIndex=invalid", "", "", http.StatusBadRequest)
 }
 
 func TestSCIMUserTombstoneAndInitialInactiveState(t *testing.T) {
