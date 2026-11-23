@@ -157,7 +157,7 @@ func checkSAMLExpiryDuringLogin(t *testing.T, overlap, signWithReplacement bool)
 	}
 	var mux http.ServeMux
 	(HTTP{Enterprise: f.svc}).Register(&mux)
-	req := samlLoginRequest(t, ctx, &mux, connection, signing, overlap && !signWithReplacement)
+	req := samlLoginRequest(t, ctx, &mux, connection, f.svc.Issuer, signing, overlap && !signWithReplacement)
 	before := f.counts(t)
 	gate, err := f.st.BeginIdempotency(ctx)
 	if err != nil {
@@ -206,7 +206,7 @@ func checkSAMLExpiryDuringLogin(t *testing.T, overlap, signWithReplacement bool)
 		requireSAMLLogin(t, w)
 		// Once it is the sole active signer the successor can omit KeyInfo.
 		after := httptest.NewRecorder()
-		mux.ServeHTTP(after, samlLoginRequest(t, ctx, &mux, connection, signing, true))
+		mux.ServeHTTP(after, samlLoginRequest(t, ctx, &mux, connection, f.svc.Issuer, signing, true))
 		requireSAMLLogin(t, after)
 		return
 	}
@@ -270,7 +270,7 @@ func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
 		{"encryption only without KeyInfo", encryptionSigner, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := samlLoginRequest(t, ctx, &mux, connection, tc.signing, tc.omitKeyInfo)
+			req := samlLoginRequest(t, ctx, &mux, connection, f.svc.Issuer, tc.signing, tc.omitKeyInfo)
 			before := f.counts(t)
 			w := httptest.NewRecorder()
 			mux.ServeHTTP(w, req)
@@ -296,7 +296,7 @@ func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := samlLoginRequest(t, ctx, &mux, large, successor, true)
+		request := samlLoginRequest(t, ctx, &mux, large, f.svc.Issuer, successor, true)
 		before := f.counts(t)
 		response := httptest.NewRecorder()
 		mux.ServeHTTP(response, request)
@@ -304,12 +304,12 @@ func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
 			t.Fatalf("omitted KeyInfo exceeded the verification budget: status=%d", response.Code)
 		}
 		response = httptest.NewRecorder()
-		mux.ServeHTTP(response, samlLoginRequest(t, ctx, &mux, large, successor, false))
+		mux.ServeHTTP(response, samlLoginRequest(t, ctx, &mux, large, f.svc.Issuer, successor, false))
 		requireSAMLLogin(t, response)
 	})
 }
 
-func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, connection enterprise.Connection, signer *dsig.SigningContext, omitKeyInfo bool) *http.Request {
+func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, connection enterprise.Connection, issuer string, signer *dsig.SigningContext, omitKeyInfo bool) *http.Request {
 	t.Helper()
 	path := "/v1/sso/" + connection.ID
 	start := httptest.NewRecorder()
@@ -335,7 +335,7 @@ func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, con
 	if err := xml.NewDecoder(reader).Decode(&authRequest); err != nil || authRequest.ID == "" {
 		t.Fatalf("invalid AuthnRequest in the redirect: %v", err)
 	}
-	payload := signedSAMLTestResponse(t, signer, connection, authRequest.ID, "rollover-user", nil, false)
+	payload := signedSAMLTestResponseForAudience(t, signer, connection.RedirectURI, issuer+"/saml/"+connection.ID, authRequest.ID, "rollover-user", nil, false)
 	if omitKeyInfo {
 		payload = samlTestWithoutKeyInfo(t, payload)
 	}

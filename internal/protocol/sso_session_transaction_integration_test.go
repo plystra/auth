@@ -90,7 +90,7 @@ func ssoSessionRequest(t *testing.T, f *jitMappingFixture, mux *http.ServeMux, m
 		if err != nil {
 			t.Fatal(err)
 		}
-		request := samlLoginRequest(t, t.Context(), mux, connection, signer, false)
+		request := samlLoginRequest(t, t.Context(), mux, connection, f.svc.Issuer, signer, false)
 		defer func() { _ = request.Body.Close() }()
 		path, contentType = request.URL.RequestURI(), request.Header.Get("Content-Type")
 		payload, err = io.ReadAll(request.Body)

@@ -46,7 +46,19 @@ type ssoConnectionPathInput struct {
 	ConnectionID  string `path:"conn_id"`
 }
 
+type updateSAMLMetadataInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+	ConnectionID  string `path:"conn_id"`
+	IfMatch       string `header:"If-Match"`
+	Body          struct {
+		SAMLMetadata string `json:"saml_metadata" minLength:"1" maxLength:"1048576"`
+	}
+}
+
 type ssoConnectionOutput struct {
+	ETag string `header:"ETag"`
 	Body struct {
 		Data enterprise.Connection `json:"data"`
 	}
@@ -146,6 +158,7 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("sso_connections.list", "GET", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listSSOConnections)
 	route.Register(api, route.NewSpec("sso_connections.get", "GET", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.getSSOConnection)
 	route.Register(api, route.NewSpec("sso_connections.create", "POST", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createSSOConnection)
+	route.Register(api, route.NewSpec(enterprise.SAMLMetadataUpdateOperation, "PATCH", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(2<<20)), a.updateSAMLMetadata)
 	route.Register(api, route.NewSpec("sso_connections.delete", "DELETE", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteSSOConnection)
 }
 
@@ -362,6 +375,31 @@ func (a *API) deleteDomain(ctx context.Context, in *domainPathInput) (*authoriza
 	return acceptedResponse(), nil
 }
 
+func (a *API) updateSAMLMetadata(ctx context.Context, in *updateSAMLMetadataInput) (*ssoConnectionOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	ifMatch := strings.TrimSpace(in.IfMatch)
+	if ifMatch == "" {
+		return nil, apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
+	}
+	const operation = enterprise.SAMLMetadataUpdateOperation
+	request := enterprise.SAMLMetadataUpdateRequest(in.ID, in.ConnectionID, ifMatch, in.Body.SAMLMetadata)
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
+	if err != nil {
+		return nil, err
+	}
+	connection, err := a.Enterprise.ReplaceSAMLSigningCertificates(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, in.Body.SAMLMetadata)
+	if err != nil {
+		return nil, err
+	}
+	return connectionResponse(connection), nil
+}
+
 func (a *API) deleteSSOConnection(ctx context.Context, in *ssoConnectionPathInput) (*authorizationDataOutput[acceptedData], error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
@@ -398,9 +436,7 @@ func (a *API) getSSOConnection(ctx context.Context, in *ssoConnectionPathInput) 
 	if err != nil {
 		return nil, err
 	}
-	out := &ssoConnectionOutput{}
-	out.Body.Data = connection
-	return out, nil
+	return connectionResponse(connection), nil
 }
 
 func (a *API) listSSOConnections(ctx context.Context, in *enterpriseSettingsListInput) (*ssoConnectionsOutput, error) {
@@ -453,7 +489,11 @@ func (a *API) createSSOConnection(ctx context.Context, in *createSSOConnectionIn
 	if err != nil {
 		return nil, err
 	}
-	out := &ssoConnectionOutput{}
+	return connectionResponse(connection), nil
+}
+
+func connectionResponse(connection enterprise.Connection) *ssoConnectionOutput {
+	out := &ssoConnectionOutput{ETag: connection.ETag()}
 	out.Body.Data = connection
-	return out, nil
+	return out
 }

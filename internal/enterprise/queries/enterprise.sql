@@ -44,6 +44,21 @@ FROM sso_connections WHERE id = sqlc.arg(id) FOR UPDATE;
 UPDATE sso_connections SET status = 'disabled', updated_at = now()
 WHERE id = sqlc.arg(id) AND status <> 'disabled';
 
+-- name: LockSSOConnectionInSpace :one
+SELECT id, space_id, provider, status, updated_at, saml_entity_id, saml_sso_url,
+    saml_sso_binding, saml_idp_certificate
+FROM sso_connections
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+FOR UPDATE;
+
+-- name: ReplaceSAMLSigningCertificates :one
+UPDATE sso_connections
+SET saml_idp_certificate = sqlc.arg(saml_idp_certificate),
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at;
+
 -- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,

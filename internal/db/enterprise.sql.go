@@ -535,6 +535,48 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 	return i, err
 }
 
+const lockSSOConnectionInSpace = `-- name: LockSSOConnectionInSpace :one
+SELECT id, space_id, provider, status, updated_at, saml_entity_id, saml_sso_url,
+    saml_sso_binding, saml_idp_certificate
+FROM sso_connections
+WHERE id = $1 AND space_id = $2
+FOR UPDATE
+`
+
+type LockSSOConnectionInSpaceParams struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
+}
+
+type LockSSOConnectionInSpaceRow struct {
+	ID                 string             `json:"id"`
+	SpaceID            string             `json:"space_id"`
+	Provider           string             `json:"provider"`
+	Status             string             `json:"status"`
+	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	SamlEntityID       pgtype.Text        `json:"saml_entity_id"`
+	SamlSsoUrl         pgtype.Text        `json:"saml_sso_url"`
+	SamlSsoBinding     pgtype.Text        `json:"saml_sso_binding"`
+	SamlIdpCertificate pgtype.Text        `json:"saml_idp_certificate"`
+}
+
+func (q *Queries) LockSSOConnectionInSpace(ctx context.Context, arg LockSSOConnectionInSpaceParams) (LockSSOConnectionInSpaceRow, error) {
+	row := q.db.QueryRow(ctx, lockSSOConnectionInSpace, arg.ID, arg.SpaceID)
+	var i LockSSOConnectionInSpaceRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Provider,
+		&i.Status,
+		&i.UpdatedAt,
+		&i.SamlEntityID,
+		&i.SamlSsoUrl,
+		&i.SamlSsoBinding,
+		&i.SamlIdpCertificate,
+	)
+	return i, err
+}
+
 const lockSSOStateByHash = `-- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
     redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
@@ -576,6 +618,58 @@ type MarkExternalUserVerifiedParams struct {
 func (q *Queries) MarkExternalUserVerified(ctx context.Context, arg MarkExternalUserVerifiedParams) error {
 	_, err := q.db.Exec(ctx, markExternalUserVerified, arg.ID)
 	return err
+}
+
+const replaceSAMLSigningCertificates = `-- name: ReplaceSAMLSigningCertificates :one
+UPDATE sso_connections
+SET saml_idp_certificate = $1,
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = $2 AND space_id = $3
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at
+`
+
+type ReplaceSAMLSigningCertificatesParams struct {
+	SamlIdpCertificate pgtype.Text `json:"saml_idp_certificate"`
+	ID                 string      `json:"id"`
+	SpaceID            string      `json:"space_id"`
+}
+
+type ReplaceSAMLSigningCertificatesRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ReplaceSAMLSigningCertificates(ctx context.Context, arg ReplaceSAMLSigningCertificatesParams) (ReplaceSAMLSigningCertificatesRow, error) {
+	row := q.db.QueryRow(ctx, replaceSAMLSigningCertificates, arg.SamlIdpCertificate, arg.ID, arg.SpaceID)
+	var i ReplaceSAMLSigningCertificatesRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Provider,
+		&i.Issuer,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.GroupsClaim,
+		&i.RoleMappings,
+		&i.Status,
+		&i.CoversSubtree,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const reserveOIDCBrowserSSO = `-- name: ReserveOIDCBrowserSSO :execrows
