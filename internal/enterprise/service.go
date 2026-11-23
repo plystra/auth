@@ -28,7 +28,6 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	saml2 "github.com/russellhaering/gosaml2"
 	"github.com/russellhaering/gosaml2/types"
-	dsig "github.com/russellhaering/goxmldsig"
 	"golang.org/x/oauth2"
 
 	"github.com/plystra/auth/internal/account"
@@ -148,6 +147,7 @@ type samlConnectionDetails struct {
 }
 
 type idTokenClaims struct {
+	samlProof      *samlLoginProof
 	Subject        string                     `json:"sub"`
 	Email          string                     `json:"email"`
 	EmailVerified  bool                       `json:"email_verified"`
@@ -909,7 +909,13 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	if err != nil {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
 	}
-	var unverified types.UnverifiedBaseResponse
+	var unverified struct {
+		types.UnverifiedBaseResponse
+		Signature  *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
+		Assertions []struct {
+			Signature *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
+		} `xml:"urn:oasis:names:tc:SAML:2.0:assertion Assertion"`
+	}
 	if err := xml.Unmarshal(decoded, &unverified); err != nil {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
 	}
@@ -937,9 +943,13 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	} else if unverified.InResponseTo != "" {
 		return account.AuthResult{}, apierr.New("invalid_grant", "an unsolicited SAML response cannot contain InResponseTo")
 	}
-	info, err := provider.RetrieveAssertionInfo(in.SAMLResponse)
-	if err != nil || info.WarningInfo == nil || info.WarningInfo.InvalidTime || info.WarningInfo.NotInAudience || !info.ResponseSignatureValidated {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML assertion is invalid")
+	keyHintMissing := unverified.Signature.missing()
+	for _, assertion := range unverified.Assertions {
+		keyHintMissing = keyHintMissing || assertion.Signature.missing()
+	}
+	info, err := provider.verify(ctx, in.SAMLResponse, keyHintMissing)
+	if err != nil {
+		return account.AuthResult{}, err
 	}
 	email := firstSAMLValue(info.Values, "email", "Email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
 	if email == "" && strings.Contains(info.NameID, "@") {
@@ -949,7 +959,8 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML identity is not valid for this connection")
 	}
 	claims := idTokenClaims{
-		Subject: info.NameID, Email: email, EmailVerified: true,
+		samlProof: &samlLoginProof{provider: provider, response: in.SAMLResponse, keyHintMissing: keyHintMissing},
+		Subject:   info.NameID, Email: email, EmailVerified: true,
 		Name: firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
 	}
 	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
@@ -967,35 +978,23 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	return s.finishCallback(ctx, row, state, claims)
 }
 
-func (s *Service) samlProvider(row db.SsoConnection) (*saml2.SAMLServiceProvider, error) {
+func (s *Service) samlProvider(row db.SsoConnection) (*samlLoginProvider, error) {
 	if !row.SamlEntityID.Valid || !row.SamlSsoUrl.Valid || !row.SamlSsoBinding.Valid || !row.SamlIdpCertificate.Valid {
 		return nil, apierr.New("temporarily_unavailable", "SAML connection metadata is unavailable")
 	}
-	certificate, err := currentSAMLSigningCertificate(row.SamlIdpCertificate.String)
+	certificates, err := currentSAMLSigningCertificates(row.SamlIdpCertificate.String, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	certStore := dsig.MemoryX509CertificateStore{Roots: []*x509.Certificate{certificate}}
 	entityID := s.samlEntityID(row.ID)
-	return &saml2.SAMLServiceProvider{
+	provider := &samlLoginProvider{SAMLServiceProvider: &saml2.SAMLServiceProvider{
 		IdentityProviderSSOURL: row.SamlSsoUrl.String, IdentityProviderSSOBinding: row.SamlSsoBinding.String,
 		IdentityProviderIssuer: row.SamlEntityID.String, AssertionConsumerServiceURL: row.RedirectUri,
-		ServiceProviderIssuer: entityID, AudienceURI: entityID, IDPCertificateStore: &certStore,
+		ServiceProviderIssuer: entityID, AudienceURI: entityID,
 		AllowMissingAttributes: false, MaximumDecompressedBodySize: 5 * 1024 * 1024, MaximumXMLTokens: 50000,
-	}, nil
-}
-
-func currentSAMLSigningCertificate(value string) (*x509.Certificate, error) {
-	block, _ := pem.Decode([]byte(value))
-	if block == nil {
-		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is unavailable")
-	}
-	certificate, err := x509.ParseCertificate(block.Bytes)
-	now := time.Now()
-	if err != nil || now.Before(certificate.NotBefore) || now.After(certificate.NotAfter) {
-		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
-	}
-	return certificate, nil
+	}}
+	provider.setTrust(certificates)
+	return provider, nil
 }
 
 func (s *Service) samlEntityID(connectionID string) string {
@@ -1194,8 +1193,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			if lockedConnection.SamlIdpCertificate != connection.SamlIdpCertificate {
 				return apierr.New("conflict", "SSO signing certificate changed; restart sign-in")
 			}
-			_, err := currentSAMLSigningCertificate(lockedConnection.SamlIdpCertificate.String)
-			return err
+			return claims.samlProof.recheck(ctx)
 		}
 		return nil
 	})
@@ -1423,7 +1421,11 @@ func parseSAMLMetadata(raw string) (samlConnectionDetails, error) {
 	if err := validateSAMLURL(endpoint.Location); err != nil {
 		return samlConnectionDetails{}, err
 	}
-	var certificate []byte
+	var certificates strings.Builder
+	seen := make(map[string]bool)
+	base64Whitespace := strings.NewReplacer(" ", "", "\t", "")
+	now := time.Now()
+	active := false
 	for _, descriptor := range metadata.IDPSSODescriptor.KeyDescriptors {
 		if descriptor.Use != "" && descriptor.Use != "signing" {
 			continue
@@ -1432,27 +1434,33 @@ func parseSAMLMetadata(raw string) (samlConnectionDetails, error) {
 			if strings.TrimSpace(encoded.Data) == "" {
 				continue
 			}
-			decoded, err := base64.StdEncoding.DecodeString(encoded.Data)
+			decoded, err := base64.StdEncoding.DecodeString(base64Whitespace.Replace(encoded.Data))
 			if err != nil {
 				return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata certificate is invalid")
 			}
 			cert, err := x509.ParseCertificate(decoded)
-			if err != nil || time.Now().UTC().Before(cert.NotBefore) || time.Now().UTC().After(cert.NotAfter) {
+			if err != nil {
 				return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata certificate is invalid or expired")
 			}
-			certificate = decoded
-			break
-		}
-		if len(certificate) > 0 {
+			active = active || certificateValidAt(cert, now)
+			if !seen[string(decoded)] {
+				seen[string(decoded)] = true
+				certificates.Write(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: decoded}))
+			}
+			// Additional X509Certificate elements can describe the signing key's chain.
+			// Only a separate signing KeyDescriptor introduces another signing key.
 			break
 		}
 	}
-	if len(certificate) == 0 {
+	if certificates.Len() == 0 {
 		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata has no signing certificate")
+	}
+	if !active {
+		return samlConnectionDetails{}, apierr.New("validation_failed", "SAML metadata certificate is invalid or expired")
 	}
 	return samlConnectionDetails{
 		EntityID: metadata.EntityID, SSOURL: endpoint.Location, Binding: endpoint.Binding,
-		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate})),
+		Certificate: certificates.String(),
 	}, nil
 }
 
