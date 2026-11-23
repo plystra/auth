@@ -27,6 +27,15 @@ WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id) AND status
 SELECT user_id, member_id, status, expires_at, revoked_at
 FROM user_members WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id);
 
+-- name: HasActiveUserMemberBinding :one
+SELECT EXISTS (
+    SELECT 1 FROM user_members b JOIN users u ON u.id = b.user_id
+    WHERE b.user_id = sqlc.arg(user_id) AND b.member_id = sqlc.arg(member_id)
+        AND u.status = 'active' AND u.disabled_at IS NULL
+        AND b.status = 'active' AND b.revoked_at IS NULL
+        AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp())
+)::boolean;
+
 -- name: LockUserMemberBinding :one
 SELECT user_id, member_id, status, expires_at, revoked_at
 FROM user_members WHERE user_id = sqlc.arg(user_id) AND member_id = sqlc.arg(member_id)

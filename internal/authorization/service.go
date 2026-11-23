@@ -833,14 +833,7 @@ func (s *Service) UserBoundToMember(ctx context.Context, userID, memberID string
 }
 
 func (s *Service) UserBoundToMemberTx(ctx context.Context, q *db.Queries, userID, memberID string) (bool, error) {
-	row, err := q.GetUserMemberBinding(ctx, db.GetUserMemberBindingParams{UserID: userID, MemberID: memberID})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return row.Status == "active" && !row.RevokedAt.Valid && (!row.ExpiresAt.Valid || row.ExpiresAt.Time.After(time.Now().UTC())), nil
+	return q.HasActiveUserMemberBinding(ctx, db.HasActiveUserMemberBindingParams{UserID: userID, MemberID: memberID})
 }
 
 func (s *Service) PolicyVersion(ctx context.Context, spaceID string) (int64, error) {

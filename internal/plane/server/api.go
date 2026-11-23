@@ -371,7 +371,9 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	}
 	var decision engine.Decision
 	var policyVersion int64
-	if consumeApproval {
+	if body.Subject.Token == "" && resolved.UserID != "" {
+		decision, policyVersion, err = a.Authorization.CheckAssertedHuman(ctx, check, resolved.UserID)
+	} else if consumeApproval {
 		ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: key.ApplicationID, KeyID: key.ID, UserID: resolved.UserID, CredentialType: "application_api_key"})
 		decision, policyVersion, err = a.Authorization.CheckBusiness(ctx, check, body.Resource.Type, body.Resource.ID)
 	} else if requiredScope == "auth.authz:explain" {
@@ -494,6 +496,9 @@ func (a *API) resolveSubjectWithQueries(ctx context.Context, q *db.Queries, key 
 		return resolvedSubject{}, err
 	}
 	if subject.UserID != "" {
+		if member.Kind != "human" {
+			return resolvedSubject{}, apierr.New("SUBJECT_NOT_FOUND", "the asserted user is not bound to this member")
+		}
 		bound, err := a.Authorization.UserBoundToMemberTx(ctx, q, subject.UserID, member.ID)
 		if err != nil {
 			return resolvedSubject{}, err

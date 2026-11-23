@@ -1775,6 +1775,28 @@ func (q *Queries) GrantRolePermission(ctx context.Context, arg GrantRolePermissi
 	return err
 }
 
+const hasActiveUserMemberBinding = `-- name: HasActiveUserMemberBinding :one
+SELECT EXISTS (
+    SELECT 1 FROM user_members b JOIN users u ON u.id = b.user_id
+    WHERE b.user_id = $1 AND b.member_id = $2
+        AND u.status = 'active' AND u.disabled_at IS NULL
+        AND b.status = 'active' AND b.revoked_at IS NULL
+        AND (b.expires_at IS NULL OR b.expires_at > clock_timestamp())
+)::boolean
+`
+
+type HasActiveUserMemberBindingParams struct {
+	UserID   string `json:"user_id"`
+	MemberID string `json:"member_id"`
+}
+
+func (q *Queries) HasActiveUserMemberBinding(ctx context.Context, arg HasActiveUserMemberBindingParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasActiveUserMemberBinding, arg.UserID, arg.MemberID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const insertIdempotencyKey = `-- name: InsertIdempotencyKey :one
 INSERT INTO idempotency_keys (
     id, scope_hash, method, path, idempotency_key, request_hash, expires_at
