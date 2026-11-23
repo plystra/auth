@@ -110,22 +110,23 @@ func (f *jitMappingFixture) grantCount(t *testing.T, member string) int {
 
 // Include the single-use state and all persisted JIT effects. The signed IdP
 // exchange happens before this transaction and creates no local principal.
-func (f *jitMappingFixture) counts(t *testing.T) [8]int {
+func (f *jitMappingFixture) counts(t *testing.T) [9]int {
 	t.Helper()
-	var v [8]int
+	var v [9]int
 	err := f.st.Pool.QueryRow(context.Background(), `SELECT
 		(SELECT count(*) FROM users), (SELECT count(*) FROM members),
 		(SELECT count(*) FROM user_members), (SELECT count(*) FROM external_identities),
 		(SELECT count(*) FROM authorization_grants), (SELECT count(*) FROM sessions),
 		(SELECT count(*) FROM audit_logs WHERE action='auth.sso.login' AND outcome='success'),
-		(SELECT count(*) FROM sso_states WHERE consumed_at IS NOT NULL)`).Scan(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7])
+		(SELECT count(*) FROM sso_states WHERE consumed_at IS NOT NULL),
+		(SELECT count(*) FROM refresh_tokens)`).Scan(&v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &v[8])
 	if err != nil {
 		t.Fatal(err)
 	}
 	return v
 }
 
-func (f *jitMappingFixture) assertDenied(t *testing.T, err error, want string, before [8]int) {
+func (f *jitMappingFixture) assertDenied(t *testing.T, err error, want string, before [9]int) {
 	t.Helper()
 	var public *apierr.Error
 	if !errors.As(err, &public) || public.Code != want {

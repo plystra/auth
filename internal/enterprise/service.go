@@ -1019,6 +1019,14 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	var userEmail, userStatus string
 	userName := displayName(claims, email)
 	var userCreated time.Time
+	if s.Sessions == nil || s.Sessions.Settings == nil {
+		return account.AuthResult{}, apierr.New("temporarily_unavailable", "session service is unavailable")
+	}
+	sessionSettings, err := s.Sessions.Settings(ctx)
+	if err != nil {
+		return account.AuthResult{}, err
+	}
+	var tokens session.Tokens
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
 		plan, err := lockSSOLoginTx(ctx, q, connection, claims, hint)
 		if err != nil {
@@ -1151,9 +1159,9 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if err != nil {
 			return err
 		}
-		credentialType := "oidc"
-		if connection.Provider == "saml" {
-			credentialType = "saml"
+		tokens, err = s.Sessions.CreateForMemberWithMethodsTx(ctx, q, sessionSettings, userID, memberID, nil, "", 1, []string{connection.Provider})
+		if err != nil {
+			return err
 		}
 		metadata := map[string]string{"provider": connection.Provider, "subject_hash": hexDigest(claims.Subject), "new_membership": fmt.Sprintf("%t", newMembership)}
 		if hint != nil {
@@ -1161,7 +1169,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		}
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "sso", ActorID: connection.ID, MemberID: memberID, UserID: userID,
-			Action: "auth.sso.login", Outcome: "success", CredentialType: credentialType,
+			Action: "auth.sso.login", Outcome: "success", CredentialType: connection.Provider,
 			Resource:      audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: connection.SpaceID},
 			PolicyVersion: space.PolicyVersion,
 			Metadata:      metadata,
@@ -1179,17 +1187,6 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	})
 	if err != nil {
 		return account.AuthResult{}, normalizeConnectionError(err)
-	}
-	if s.Sessions == nil {
-		return account.AuthResult{}, apierr.New("unavailable", "session service is unavailable")
-	}
-	method := "oidc"
-	if connection.Provider == "saml" {
-		method = "saml"
-	}
-	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, userID, memberID, nil, "", 1, []string{method})
-	if err != nil {
-		return account.AuthResult{}, err
 	}
 	return account.AuthResult{User: account.User{ID: userID, Email: userEmail, EmailVerified: true, Status: userStatus, DisplayName: userName, CreatedAt: userCreated}, Tokens: &tokens}, nil
 }

@@ -83,68 +83,92 @@ func (s *Service) CreateForMember(ctx context.Context, userID, memberID string, 
 }
 
 func (s *Service) CreateForMemberWithMethods(ctx context.Context, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (Tokens, error) {
-	if assurance < 1 || assurance > 3 || len(methods) == 0 {
-		return Tokens{}, errors.New("invalid session authentication methods or assurance")
-	}
-	methods = append([]string(nil), methods...)
 	st, err := s.Settings(ctx)
 	if err != nil {
 		return Tokens{}, err
 	}
+	var tokens Tokens
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		tokens, err = s.CreateForMemberWithMethodsTx(ctx, q, st, userID, memberID, ip, userAgent, assurance, methods)
+		return err
+	})
+	if err != nil {
+		return Tokens{}, err
+	}
+	return tokens, nil
+}
+
+// CreateForMemberWithMethodsTx signs and persists the session in the caller's transaction.
+// Read the settings before opening the transaction and return the tokens only after commit.
+func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (Tokens, error) {
+	if assurance < 1 || assurance > 3 || len(methods) == 0 {
+		return Tokens{}, errors.New("invalid session authentication methods or assurance")
+	}
 	if st.AccessTTL <= 0 || st.RefreshTTL <= 0 {
 		return Tokens{}, errors.New("invalid session settings")
 	}
-	accessID, e := randomToken("jti_")
-	if e != nil {
-		return Tokens{}, e
+	if s.Signer == nil || len(s.HMACKeys) == 0 {
+		return Tokens{}, errors.New("session credentials are unavailable")
 	}
-	refresh, e := randomToken("ply_rt_")
-	if e != nil {
-		return Tokens{}, e
+	methods = append([]string(nil), methods...)
+	accessID, err := randomToken("jti_")
+	if err != nil {
+		return Tokens{}, err
+	}
+	refresh, err := randomToken("ply_rt_")
+	if err != nil {
+		return Tokens{}, err
 	}
 	sid := ids.New[ids.SessionID]("ses")
 	family := ids.New[ids.RefreshFamilyID]("rtf")
 	rid := ids.New[ids.RefreshTokenID]("rft")
 	now := time.Now().UTC()
 	exp := now.Add(st.RefreshTTL)
-	var sessionID string
+	active, err := activeUser(ctx, q, userID)
+	if err != nil {
+		return Tokens{}, err
+	}
+	if !active {
+		return Tokens{}, apierr.New("invalid_grant", "the account is not active")
+	}
+	var persistedMember pgtype.Text
 	spaceID := ""
-	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		active, checkErr := activeUser(ctx, q, userID)
-		if checkErr != nil {
-			return checkErr
+	if memberID != "" {
+		var permitted bool
+		spaceID, permitted, err = boundMemberSpace(ctx, q, userID, memberID, now)
+		if err != nil {
+			return Tokens{}, err
 		}
-		if !active {
-			return apierr.New("invalid_grant", "the account is not active")
+		if !permitted {
+			return Tokens{}, apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
 		}
-		var persistedMember pgtype.Text
-		if memberID != "" {
-			var permitted bool
-			spaceID, permitted, checkErr = boundMemberSpace(ctx, q, userID, memberID, now)
-			if checkErr != nil {
-				return checkErr
-			}
-			if !permitted {
-				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
-			}
-			persistedMember = pgtype.Text{String: memberID, Valid: true}
-		}
-		row, e := q.CreateSession(ctx, db.CreateSessionParams{ID: string(sid), UserID: userID, MemberID: persistedMember, TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent), AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods})
-		if e != nil {
-			return e
-		}
-		sessionID = row.ID
-		_, e = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{ID: string(rid), SessionID: row.ID, FamilyID: string(family), TokenHash: s.hashToken(refresh), ExpiresAt: pgTime(exp)})
-		return e
+		persistedMember = pgtype.Text{String: memberID, Valid: true}
+	}
+	refreshHash := s.hashToken(refresh)
+	row, err := q.CreateSession(ctx, db.CreateSessionParams{
+		ID: string(sid), UserID: userID, MemberID: persistedMember,
+		TokenHash: refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
+		AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods,
 	})
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: accessID, SessionID: sessionID, Assurance: assurance, AMR: methods, Type: "user"})
+	_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
+		ID: string(rid), SessionID: row.ID, FamilyID: string(family), TokenHash: refreshHash, ExpiresAt: pgTime(exp),
+	})
 	if err != nil {
 		return Tokens{}, err
 	}
-	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: refresh, SessionID: sessionID}, nil
+	jwt, err := s.Signer.Sign(security.Claims{
+		Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID,
+		Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(),
+		JWTID: accessID, SessionID: row.ID, Assurance: assurance, AMR: methods, Type: "user",
+	})
+	if err != nil {
+		return Tokens{}, err
+	}
+	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: refresh, SessionID: row.ID}, nil
 }
 func (s *Service) Refresh(ctx context.Context, raw string) (Tokens, error) {
 	return s.RefreshForMember(ctx, raw, "")
