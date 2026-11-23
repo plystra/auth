@@ -60,7 +60,24 @@ func certificateValidAt(cert *x509.Certificate, now time.Time) bool {
 }
 
 func currentSAMLSigningCertificates(value string, now time.Time) ([]*x509.Certificate, error) {
+	certs, err := parseSAMLSigningCertificates(value)
+	if err != nil {
+		return nil, err
+	}
 	var active []*x509.Certificate
+	for _, cert := range certs {
+		if certificateValidAt(cert, now) {
+			active = append(active, cert)
+		}
+	}
+	if len(active) == 0 {
+		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
+	}
+	return active, nil
+}
+
+func parseSAMLSigningCertificates(value string) ([]*x509.Certificate, error) {
+	var certs []*x509.Certificate
 	rest := bytes.TrimSpace([]byte(value))
 	for len(rest) > 0 {
 		block, trailing := pem.Decode(rest)
@@ -71,15 +88,10 @@ func currentSAMLSigningCertificates(value string, now time.Time) ([]*x509.Certif
 		if err != nil {
 			return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is unavailable")
 		}
-		if certificateValidAt(cert, now) {
-			active = append(active, cert)
-		}
+		certs = append(certs, cert)
 		rest = bytes.TrimSpace(trailing)
 	}
-	if len(active) == 0 {
-		return nil, apierr.New("temporarily_unavailable", "SAML connection certificate is expired")
-	}
-	return active, nil
+	return certs, nil
 }
 
 // Each start or callback constructs its own provider and trust set.

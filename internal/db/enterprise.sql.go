@@ -434,6 +434,44 @@ func (q *Queries) HasPendingOIDCBrowserSSO(ctx context.Context, arg HasPendingOI
 	return column_1, err
 }
 
+const listSAMLSigningTrust = `-- name: ListSAMLSigningTrust :many
+SELECT id, space_id, saml_idp_certificate
+FROM sso_connections
+WHERE provider = 'saml' AND status = 'active' AND id > $1
+ORDER BY id
+LIMIT 32
+`
+
+type ListSAMLSigningTrustParams struct {
+	AfterID string `json:"after_id"`
+}
+
+type ListSAMLSigningTrustRow struct {
+	ID                 string      `json:"id"`
+	SpaceID            string      `json:"space_id"`
+	SamlIdpCertificate pgtype.Text `json:"saml_idp_certificate"`
+}
+
+func (q *Queries) ListSAMLSigningTrust(ctx context.Context, arg ListSAMLSigningTrustParams) ([]ListSAMLSigningTrustRow, error) {
+	rows, err := q.db.Query(ctx, listSAMLSigningTrust, arg.AfterID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSAMLSigningTrustRow{}
+	for rows.Next() {
+		var i ListSAMLSigningTrustRow
+		if err := rows.Scan(&i.ID, &i.SpaceID, &i.SamlIdpCertificate); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, covers_subtree, created_at, updated_at

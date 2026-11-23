@@ -75,6 +75,26 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 Migration `0068` revokes existing enterprise SSO sessions whose original binding was unrecorded.
 Deploy updated Auth binaries with the migration and plan for those users to sign in again.
 
+### Monitor SAML certificate coverage
+
+Schedule the read-only check on a trusted deployment host. Provide the database
+connection through `PLYSTRA_AUTH_DATABASE_URL` in the monitor's secret environment.
+
+```sh
+plystra-auth sso check-saml-certificates --within 720h
+```
+
+An exit status of `2` means the JSON report identifies at least one connection that
+requires attention. Alert on the Space, connection, and reported status. An exit
+status of `1` means the check failed. Route it to the deployment operator and alert
+if the scheduled check stops reporting. A healthy run exits `0`.
+
+For `coverage_ending`, import the replacement metadata before `coverage_until`.
+Confirm a fresh sign-in with the new IdP signer before removing the old certificate.
+`no_current_signer` and `invalid_trust` require immediate investigation. The report
+calculates continuous coverage from the certificates configured in Auth. Confirm
+which certificate the IdP actually uses during the rotation.
+
 ### Provision signing keys
 
 Run `plystra-auth migrate` before serving. In deployments that configure an encrypted

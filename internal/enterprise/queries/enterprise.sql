@@ -33,6 +33,13 @@ SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_cla
 FROM sso_connections WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
+-- name: ListSAMLSigningTrust :many
+SELECT id, space_id, saml_idp_certificate
+FROM sso_connections
+WHERE provider = 'saml' AND status = 'active' AND id > sqlc.arg(after_id)
+ORDER BY id
+LIMIT 32;
+
 -- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,

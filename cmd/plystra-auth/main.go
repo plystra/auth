@@ -53,8 +53,11 @@ import (
 
 func main() {
 	root := &cobra.Command{Use: "plystra-auth", Short: "Plystra Auth identity and authorization service"}
-	root.AddCommand(serveCommand(), migrateCommand(), initCommand(), doctorCommand(), verifyCommand(), operatorCommand(), permissionsCommand(), policyCommand())
+	root.AddCommand(serveCommand(), migrateCommand(), initCommand(), doctorCommand(), verifyCommand(), operatorCommand(), permissionsCommand(), policyCommand(), ssoCommand())
 	if err := root.Execute(); err != nil {
+		if errors.Is(err, errSAMLTrustAttention) {
+			os.Exit(2)
+		}
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
