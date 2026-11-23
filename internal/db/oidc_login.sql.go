@@ -11,6 +11,46 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bindOIDCAuthorizationToBrowser = `-- name: BindOIDCAuthorizationToBrowser :one
+UPDATE oidc_login_requests SET browser_bound = true, request_hash = $1
+WHERE request_hash = $2 AND NOT browser_bound
+    AND status = 'pending' AND expires_at > clock_timestamp()
+    AND application_id = $3
+    AND application_generation = $4
+RETURNING id, redirect_uri, scope, expires_at
+`
+
+type BindOIDCAuthorizationToBrowserParams struct {
+	CookieHash            []byte `json:"cookie_hash"`
+	AuthorizationHash     []byte `json:"authorization_hash"`
+	ApplicationID         string `json:"application_id"`
+	ApplicationGeneration int64  `json:"application_generation"`
+}
+
+type BindOIDCAuthorizationToBrowserRow struct {
+	ID          string             `json:"id"`
+	RedirectUri string             `json:"redirect_uri"`
+	Scope       string             `json:"scope"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) BindOIDCAuthorizationToBrowser(ctx context.Context, arg BindOIDCAuthorizationToBrowserParams) (BindOIDCAuthorizationToBrowserRow, error) {
+	row := q.db.QueryRow(ctx, bindOIDCAuthorizationToBrowser,
+		arg.CookieHash,
+		arg.AuthorizationHash,
+		arg.ApplicationID,
+		arg.ApplicationGeneration,
+	)
+	var i BindOIDCAuthorizationToBrowserRow
+	err := row.Scan(
+		&i.ID,
+		&i.RedirectUri,
+		&i.Scope,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const bindOIDCBrowserSession = `-- name: BindOIDCBrowserSession :execrows
 UPDATE oidc_login_requests r SET browser_session_id = $1::text
 FROM applications a

@@ -108,6 +108,56 @@ func newOIDCLoginCredential(prefix string) (secret.String, []byte) {
 	return raw, digest[:]
 }
 
+// BindOIDCAuthorizationToBrowser exchanges the unbound handle for a browser
+// credential without recreating the authorization or extending its deadline.
+func (s *Service) BindOIDCAuthorizationToBrowser(ctx context.Context, handle secret.String) (OIDCLoginRequest, error) {
+	invalid := apierr.New("invalid_request", "sign-in request is invalid or expired")
+	if !strings.HasPrefix(handle.Value(), OIDCLoginRequestPrefix) || len(handle.Value()) != len(OIDCLoginRequestPrefix)+43 {
+		return OIDCLoginRequest{}, invalid
+	}
+	authorizationHash := sha256.Sum256([]byte(handle.Value()))
+	cookie, cookieHash := newOIDCLoginCredential(OIDCLoginRequestPrefix)
+	var result OIDCLoginRequest
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		appID, err := q.FindOIDCLoginRequestClient(ctx, db.FindOIDCLoginRequestClientParams{RequestHash: authorizationHash[:]})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return invalid
+		}
+		if err != nil {
+			return err
+		}
+		client, err := s.OAuthClientByIDTx(ctx, q, appID)
+		if err != nil {
+			return err
+		}
+		if !client.HumanOIDCEnabled {
+			return invalid
+		}
+		request, err := q.BindOIDCAuthorizationToBrowser(ctx, db.BindOIDCAuthorizationToBrowserParams{
+			AuthorizationHash: authorizationHash[:], CookieHash: cookieHash,
+			ApplicationID: client.ID, ApplicationGeneration: client.HumanOIDCGeneration,
+		})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return invalid
+		}
+		if err != nil {
+			return err
+		}
+		if !slices.Contains(client.RedirectURIs, request.RedirectUri) {
+			return invalid
+		}
+		result = OIDCLoginRequest{
+			ID: request.ID, RequestID: cookie, ExpiresAt: request.ExpiresAt.Time, ClientID: client.ClientID,
+			ClientName: client.Name, Scopes: strings.Split(request.Scope, " "), RedirectURI: request.RedirectUri,
+		}
+		return nil
+	})
+	if err != nil {
+		return OIDCLoginRequest{}, err
+	}
+	return result, nil
+}
+
 func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service, handle, bearer secret.String, decision string) (string, error) {
 	return s.decideOIDCLogin(ctx, sessions, handle, bearer, "", decision)
 }

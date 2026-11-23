@@ -22,15 +22,18 @@ import (
 const browserFixturePassword = "synthetic-browser-sign-in-password"
 
 type interactionResponse struct {
-	ID                  string `json:"id"`
-	NextStep            string `json:"next_step"`
-	Email               string `json:"signed_in_email"`
-	RedirectTo          string `json:"redirect_to"`
-	SSOConnectionID     string `json:"sso_connection_id"`
-	AuthorizationURL    string `json:"authorization_url"`
-	AuthorizationMethod string `json:"authorization_method"`
-	SAMLRequest         string `json:"saml_request"`
-	RelayState          string `json:"relay_state"`
+	ClientName          string    `json:"client_name"`
+	Scopes              []string  `json:"scopes"`
+	ExpiresAt           time.Time `json:"expires_at"`
+	ID                  string    `json:"id"`
+	NextStep            string    `json:"next_step"`
+	Email               string    `json:"signed_in_email"`
+	RedirectTo          string    `json:"redirect_to"`
+	SSOConnectionID     string    `json:"sso_connection_id"`
+	AuthorizationURL    string    `json:"authorization_url"`
+	AuthorizationMethod string    `json:"authorization_method"`
+	SAMLRequest         string    `json:"saml_request"`
+	RelayState          string    `json:"relay_state"`
 }
 
 type oidcBrowser struct {
@@ -174,7 +177,7 @@ func TestOIDCBrowserInteractionCompletesAtIndependentHTTPSCallback(t *testing.T)
 		t.Fatal(err)
 	}
 	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
-	path, _ := browser.begin(t, verifier, state, nonce)
+	path := browser.beginFromAuthorization(t, verifier, state, nonce)
 	browser.signIn(t, path, true)
 	var originalAuthTime time.Time
 	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT s.auth_time FROM sessions s
@@ -224,6 +227,61 @@ func TestOIDCBrowserInteractionCompletesAtIndependentHTTPSCallback(t *testing.T)
 	if err != nil || user.Subject != idToken.Subject || user.Email != "rp@example.test" || !user.EmailVerified {
 		t.Fatal("UserInfo did not return the approved identity and email")
 	}
+}
+
+func (b oidcBrowser) beginFromAuthorization(t *testing.T, verifier, state, nonce string) string {
+	t.Helper()
+	cfg := b.rp.config
+	cfg.Scopes = []string{"openid", "email"}
+	resp, err := b.client.Get(cfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	var authorization struct {
+		RequestID string    `json:"request_id"`
+		ExpiresAt time.Time `json:"expires_at"`
+	}
+	if resp.StatusCode != http.StatusOK || len(resp.Cookies()) != 0 || json.NewDecoder(resp.Body).Decode(&authorization) != nil ||
+		authorization.RequestID == "" {
+		t.Fatal("the standard authorization endpoint did not create an unbound request")
+	}
+	body := map[string]string{"request_id": authorization.RequestID}
+	endpoint := route.OIDCInteractionsPath + "/from-authorization"
+	b.request(t, http.MethodPost, endpoint, body, "https://other.example.test", "", http.StatusForbidden)
+	b.request(t, http.MethodPost, endpoint, body, b.rp.host.URL, "no-cookie-replay", http.StatusBadRequest)
+	current, cookies := b.request(t, http.MethodPost, endpoint, body, b.rp.host.URL, "", http.StatusCreated)
+	if !strings.HasPrefix(current.ID, "lrq_") || current.NextStep != "identify" || len(cookies) != 1 ||
+		!current.ExpiresAt.Equal(authorization.ExpiresAt) ||
+		strings.Join(current.Scopes, " ") != "openid email" || current.ClientName == "" {
+		t.Fatal("the browser must continue the original request with its original deadline and scopes")
+	}
+	cookie := cookies[0]
+	if cookie.Name != "__Host-plystra-oidc" || cookie.Value == authorization.RequestID || !cookie.HttpOnly ||
+		!cookie.Secure || cookie.SameSite != http.SameSiteLaxMode || cookie.Path != "/" || cookie.Domain != "" {
+		t.Fatal("the request was not exchanged for a fresh host-bound cookie")
+	}
+	other := newOIDCBrowser(t, b.rp)
+	other.request(t, http.MethodPost, endpoint, body, b.rp.host.URL, "", http.StatusBadRequest)
+	path := route.OIDCInteractionsPath + "/" + current.ID
+	other.request(t, http.MethodGet, path, nil, "", "", http.StatusBadRequest)
+
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, cfg.Endpoint.AuthURL,
+		strings.NewReader(`{"decision":"approve","request_id":"`+authorization.RequestID+`"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Authorization", "Bearer "+b.rp.session.AccessToken)
+	consent, err := b.client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = consent.Body.Close() }()
+	if consent.StatusCode != http.StatusBadRequest {
+		t.Fatal("the original request handle still authorized bearer consent")
+	}
+	return path
 }
 
 func TestOIDCBrowserInteractionIsolatedFromBearerAndCrossOriginRequests(t *testing.T) {

@@ -2480,6 +2480,20 @@
         ],
         "type": "object"
       },
+      "OidcBrowserHandoffInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 47,
+            "minLength": 47,
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "type": "object"
+      },
       "OidcBrowserIdentifyInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -4297,6 +4311,60 @@
           }
         },
         "summary": "oidc.interactions.start"
+      }
+    },
+    "/v1/auth/oidc-interactions/from-authorization": {
+      "post": {
+        "operationId": "oidc.interactions.from_authorization",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserHandoffInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcBrowserCookieOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.from_authorization"
       }
     },
     "/v1/auth/oidc-interactions/{id}": {

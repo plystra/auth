@@ -44,6 +44,13 @@ type OIDCBrowserInput struct {
 	Cookie string `cookie:"__Host-plystra-oidc"`
 }
 
+type oidcBrowserHandoffInput struct {
+	Origin string `header:"Origin"`
+	Body   struct {
+		RequestID secret.String `json:"request_id" minLength:"47" maxLength:"47"`
+	}
+}
+
 type oidcBrowserIdentifyInput struct {
 	OIDCBrowserInput
 	Body struct {
@@ -107,6 +114,7 @@ func (a *API) registerOIDCBrowserRoutes(api huma.API) {
 	const path = route.OIDCInteractionsPath
 	subjects := []route.Subject{route.Public}
 	route.Register(api, route.NewSpec("oidc.interactions.start", http.MethodPost, path, route.Principal, "", subjects, route.WithStatus(http.StatusCreated)), a.startOIDCBrowserInteraction)
+	route.Register(api, route.NewSpec("oidc.interactions.from_authorization", http.MethodPost, path+"/from-authorization", route.Principal, "", subjects, route.WithStatus(http.StatusCreated)), a.exchangeOIDCBrowserAuthorization)
 	route.Register(api, route.NewSpec("oidc.interactions.read", http.MethodGet, path+"/{id}", route.Principal, "", subjects), a.readOIDCBrowserInteraction)
 	route.Register(api, route.NewSpec("oidc.interactions.identify", http.MethodPost, path+"/{id}/identify", route.Principal, "", subjects), a.identifyOIDCBrowserUser)
 	route.Register(api, route.NewSpec("oidc.interactions.authenticate", http.MethodPost, path+"/{id}/authenticate", route.Principal, "", subjects), a.authenticateOIDCBrowserUser)
@@ -141,6 +149,21 @@ func (a *API) startOIDCBrowserInteraction(ctx context.Context, in *oidcBrowserSt
 	if err != nil {
 		return nil, err
 	}
+	return oidcBrowserStartOutput(interaction), nil
+}
+
+func (a *API) exchangeOIDCBrowserAuthorization(ctx context.Context, in *oidcBrowserHandoffInput) (*oidcBrowserCookieOutput[oidcBrowserState], error) {
+	if err := a.checkOIDCBrowserOrigin(in.Origin, true); err != nil {
+		return nil, err
+	}
+	interaction, err := a.Applications.BindOIDCAuthorizationToBrowser(ctx, in.Body.RequestID)
+	if err != nil {
+		return nil, err
+	}
+	return oidcBrowserStartOutput(interaction), nil
+}
+
+func oidcBrowserStartOutput(interaction application.OIDCLoginRequest) *oidcBrowserCookieOutput[oidcBrowserState] {
 	out := &oidcBrowserCookieOutput[oidcBrowserState]{
 		Cookie: oidcCookie(interaction.RequestID.Value(), interaction.ExpiresAt, 0),
 	}
@@ -148,7 +171,7 @@ func (a *API) startOIDCBrowserInteraction(ctx context.Context, in *oidcBrowserSt
 		ID: interaction.ID, ClientName: interaction.ClientName, Scopes: interaction.Scopes,
 		ExpiresAt: interaction.ExpiresAt, NextStep: "identify",
 	}
-	return out, nil
+	return out
 }
 
 func (a *API) readOIDCBrowserInteraction(ctx context.Context, in *OIDCBrowserInput) (*authorizationDataOutput[oidcBrowserState], error) {

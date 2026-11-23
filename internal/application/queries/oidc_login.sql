@@ -13,6 +13,14 @@ SELECT application_id FROM oidc_login_requests
 WHERE request_hash = sqlc.arg(request_hash) AND browser_bound = sqlc.arg(browser_bound)
   AND status = 'pending' AND expires_at > clock_timestamp();
 
+-- name: BindOIDCAuthorizationToBrowser :one
+UPDATE oidc_login_requests SET browser_bound = true, request_hash = sqlc.arg(cookie_hash)
+WHERE request_hash = sqlc.arg(authorization_hash) AND NOT browser_bound
+    AND status = 'pending' AND expires_at > clock_timestamp()
+    AND application_id = sqlc.arg(application_id)
+    AND application_generation = sqlc.arg(application_generation)
+RETURNING id, redirect_uri, scope, expires_at;
+
 -- name: FinishOIDCLoginRequest :one
 UPDATE oidc_login_requests SET status = sqlc.arg(status), consumed_at = clock_timestamp()
 WHERE request_hash = sqlc.arg(request_hash) AND application_id = sqlc.arg(application_id)
