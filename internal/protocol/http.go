@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
@@ -946,23 +947,20 @@ func parseSCIMUserFilter(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	const prefix = `userName eq "`
-	if !strings.HasPrefix(raw, prefix) || !strings.HasSuffix(raw, `"`) || len(raw) <= len(prefix)+1 {
+	const prefix = "userName eq "
+	literal, ok := strings.CutPrefix(raw, prefix)
+	if !ok || !strings.HasPrefix(literal, `"`) {
 		return "", apierr.New("invalid_filter", "only userName eq \"…\" is supported")
 	}
-	value := strings.TrimSuffix(strings.TrimPrefix(raw, prefix), `"`)
-	if strings.Contains(value, `"`) || !validSCIMFilterEmail(value) {
+	var value string
+	if !utf8.ValidString(literal) || json.Unmarshal([]byte(literal), &value) != nil {
 		return "", apierr.New("invalid_filter", "the userName filter is invalid")
 	}
-	return strings.ToLower(value), nil
-}
-
-func validSCIMFilterEmail(value string) bool {
-	if len(value) == 0 || len(value) > 320 || strings.ContainsAny(value, " \t\r\n") {
-		return false
+	value = strings.ToLower(value)
+	if !enterprise.ValidSCIMUserName(value) || strings.ContainsAny(value, `"\`) || strings.ContainsRune(value, utf8.RuneError) {
+		return "", apierr.New("invalid_filter", "the userName filter is invalid")
 	}
-	at := strings.LastIndexByte(value, '@')
-	return at > 0 && at < len(value)-1 && !strings.Contains(value[at+1:], "@")
+	return value, nil
 }
 
 func parseSCIMIfMatch(raw string) (int64, error) {

@@ -61,7 +61,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 	in.ExternalID = strings.TrimSpace(in.ExternalID)
 	in.UserName = strings.TrimSpace(strings.ToLower(in.UserName))
 	in.DisplayName = strings.TrimSpace(in.DisplayName)
-	if in.ExternalID == "" || len(in.ExternalID) > 512 || !validSCIMEmail(in.UserName) || len(in.DisplayName) > 256 {
+	if in.ExternalID == "" || len(in.ExternalID) > 512 || !ValidSCIMUserName(in.UserName) || len(in.DisplayName) > 256 {
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM user fields are invalid")
 	}
 	var out SCIMUser
@@ -236,7 +236,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 	in.ExternalID = strings.TrimSpace(in.ExternalID)
 	in.UserName = strings.TrimSpace(strings.ToLower(in.UserName))
 	in.DisplayName = strings.TrimSpace(in.DisplayName)
-	if !patch && (in.ExternalID == "" || !validSCIMEmail(in.UserName)) || len(in.UserName) > 320 || len(in.DisplayName) > 256 {
+	if !patch && (in.ExternalID == "" || !ValidSCIMUserName(in.UserName)) || len(in.UserName) > 320 || len(in.DisplayName) > 256 {
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM user fields are invalid")
 	}
 	var out SCIMUser
@@ -266,7 +266,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 		if in.ExternalID != row.ExternalID {
 			return apierr.New("invalid_request", "externalId cannot be changed")
 		}
-		if !validSCIMEmail(in.UserName) || len(in.DisplayName) > 256 {
+		if !ValidSCIMUserName(in.UserName) || len(in.DisplayName) > 256 {
 			return apierr.New("invalid_request", "SCIM user fields are invalid")
 		}
 		if in.UserName != row.UserName {
@@ -385,7 +385,8 @@ func scimGroupFromRow(row db.DirectoryGroup, members []string) SCIMGroup {
 	return SCIMGroup{ID: row.ID, ExternalID: row.ExternalID, DisplayName: row.DisplayName, MemberIDs: members, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
 }
 
-func validSCIMEmail(value string) bool {
+// ValidSCIMUserName checks the email form used by directory users and their lookup filters.
+func ValidSCIMUserName(value string) bool {
 	if len(value) == 0 || len(value) > 320 || strings.ContainsAny(value, " \t\r\n") {
 		return false
 	}

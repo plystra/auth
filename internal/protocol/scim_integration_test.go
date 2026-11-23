@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -137,19 +138,24 @@ func TestSCIMDirectoryProvisioningRotationAndRevocation(t *testing.T) {
 	if err := json.Unmarshal(secondResponse.Body.Bytes(), &secondUser); err != nil {
 		t.Fatal(err)
 	}
-	filteredRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=userName%20eq%20%22bob%40example.test%22&count=1`, nil)
-	filteredRequest.Header.Set("Authorization", "Bearer "+directory.Token.Value())
-	filteredResponse := httptest.NewRecorder()
-	mux.ServeHTTP(filteredResponse, filteredRequest)
-	if filteredResponse.Code != http.StatusOK || !strings.Contains(filteredResponse.Body.String(), `"totalResults":1`) {
-		t.Fatalf("SCIM user filter = %d %s", filteredResponse.Code, filteredResponse.Body.String())
-	}
-	invalidFilterRequest := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+`/Users?filter=displayName%20eq%20%22Bob%22`, nil)
-	invalidFilterRequest.Header.Set("Authorization", "Bearer "+directory.Token.Value())
-	invalidFilterResponse := httptest.NewRecorder()
-	mux.ServeHTTP(invalidFilterResponse, invalidFilterRequest)
-	if invalidFilterResponse.Code != http.StatusBadRequest || !strings.Contains(invalidFilterResponse.Body.String(), "invalidFilter") {
-		t.Fatalf("unsupported SCIM filter = %d %s", invalidFilterResponse.Code, invalidFilterResponse.Body.String())
+	for _, tc := range []struct {
+		filter string
+		status int
+		want   string
+	}{
+		{`userName eq "bob@example.test"`, http.StatusOK, `"totalResults":1`},
+		{`userName eq "Bob\u0040example.test"`, http.StatusOK, `"totalResults":1`},
+		{`displayName eq "Bob"`, http.StatusBadRequest, `"scimType":"invalidFilter"`},
+		{`userName eq "bob@@example.test"`, http.StatusBadRequest, `"scimType":"invalidFilter"`},
+		{`userName eq "bob@example.test" or userName eq "anyone@example.test"`, http.StatusBadRequest, `"scimType":"invalidFilter"`},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/scim/v2/"+directory.ID+"/Users?count=1&filter="+url.QueryEscape(tc.filter), nil)
+		req.Header.Set("Authorization", "Bearer "+directory.Token.Value())
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		if res.Code != tc.status || !strings.Contains(res.Body.String(), tc.want) {
+			t.Fatalf("SCIM filter %q returned HTTP %d, want %d and %s", tc.filter, res.Code, tc.status, tc.want)
+		}
 	}
 	postGroup := func(payload string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/scim/v2/"+directory.ID+"/Groups", strings.NewReader(payload))
