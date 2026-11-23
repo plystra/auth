@@ -21,7 +21,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-func samlWorkforceFixture(t *testing.T, method string) (*humanRP, oidcBrowser, enterprise.Connection, *dsig.SigningContext) {
+func samlWorkforceFixture(t *testing.T, method string, rollover bool) (*humanRP, oidcBrowser, enterprise.Connection, *dsig.SigningContext) {
 	t.Helper()
 	rp := newConfiguredHumanRP(t, false, newOIDCTestProvider(t))
 	ctx := t.Context()
@@ -30,6 +30,11 @@ func samlWorkforceFixture(t *testing.T, method string) (*humanRP, oidcBrowser, e
 		t.Fatal(err)
 	}
 	metadata, signer := newSAMLTestIssuer(t)
+	if rollover {
+		replacement, successor := newSAMLTestIssuer(t)
+		metadata = appendSAMLTestKey(t, metadata, replacement, "signing")
+		signer = successor
+	}
 	if method == http.MethodPost {
 		metadata = strings.Replace(metadata, "bindings:HTTP-Redirect", "bindings:HTTP-POST", 1)
 	}
@@ -116,7 +121,8 @@ func postSAMLBrowserForm(t *testing.T, rp *humanRP, target, body, contentType, k
 func TestSAMLWorkforceBrowserReturnsToIndependentRelyingParty(t *testing.T) {
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		t.Run(method, func(t *testing.T) {
-			rp, browser, connection, signer := samlWorkforceFixture(t, method)
+			rollover := method == http.MethodPost
+			rp, browser, connection, signer := samlWorkforceFixture(t, method, rollover)
 			callback := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 			t.Cleanup(callback.Close)
 			rp.config.RedirectURL = callback.URL + "/callback"
@@ -124,9 +130,12 @@ func TestSAMLWorkforceBrowserReturnsToIndependentRelyingParty(t *testing.T) {
 				t.Fatal(err)
 			}
 			verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
-			path, _ := browser.begin(t, verifier, state, nonce)
+			path := browser.beginFromAuthorization(t, verifier, state, nonce)
 			requestID, relay := startSAMLBrowser(t, browser, connection, path, method)
 			payload := signedSAMLTestResponseForAudience(t, signer, connection.RedirectURI, rp.host.URL+"/saml/"+connection.ID, requestID, "saml-workforce", nil, false)
+			if rollover {
+				payload = samlTestWithoutKeyInfo(t, payload)
+			}
 			form := url.Values{"RelayState": {relay}, "SAMLResponse": {payload}}
 			encoded := form.Encode()
 			const contentType = "application/x-www-form-urlencoded"
@@ -202,7 +211,7 @@ func TestSAMLWorkforceBrowserReturnsToIndependentRelyingParty(t *testing.T) {
 }
 
 func TestSAMLWorkforceBrowserPreservesStagedResponseOnRollbackAndExpiresIt(t *testing.T) {
-	rp, browser, connection, signer := samlWorkforceFixture(t, http.MethodPost)
+	rp, browser, connection, signer := samlWorkforceFixture(t, http.MethodPost, false)
 	path, _ := browser.begin(t, oauth2.GenerateVerifier(), "saml-state", "saml-nonce")
 	requestID, relay := startSAMLBrowser(t, browser, connection, path, http.MethodPost)
 	payload := signedSAMLTestResponseForAudience(t, signer, connection.RedirectURI, rp.host.URL+"/saml/"+connection.ID, requestID, "saml-workforce", nil, false)

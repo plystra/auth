@@ -16,7 +16,10 @@ import (
 	dsig "github.com/russellhaering/goxmldsig"
 )
 
-const maxSAMLResponseSize = 8 * 1024 * 1024
+const (
+	maxSAMLResponseSize                = 8 * 1024 * 1024
+	maxImplicitSAMLSigningCertificates = 4
+)
 
 type samlSignatureKeyHint struct {
 	KeyInfo *struct{} `xml:"http://www.w3.org/2000/09/xmldsig# KeyInfo"`
@@ -107,22 +110,27 @@ func (p *samlLoginProvider) verify(ctx context.Context, response string, keyHint
 		info, err := p.RetrieveAssertionInfo(response)
 		return info, err == nil && info != nil && info.WarningInfo != nil && !info.WarningInfo.InvalidTime && !info.WarningInfo.NotInAudience && info.ResponseSignatureValidated
 	}
-	if info, ok := validate(); ok {
-		return info, nil
-	}
-	// Preserve implicit verification with the first active metadata key.
-	// Additional overlapping keys use XMLDSig KeyInfo to identify their certificate.
-	if keyHintMissing && len(p.certs) > 1 {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		fullStore := p.IDPCertificateStore
-		p.IDPCertificateStore = &dsig.MemoryX509CertificateStore{Roots: p.certs[:1]}
+	if !keyHintMissing || len(p.certs) == 1 {
 		if info, ok := validate(); ok {
-			p.setTrust(p.certs[:1])
 			return info, nil
 		}
-		p.IDPCertificateStore = fullStore
+	} else if len(p.certs) <= maxImplicitSAMLSigningCertificates {
+		// The XMLDSig verifier requires a single trust candidate when KeyInfo is absent.
+		// The successful pin also governs the commit-time validity check.
+		trust := p.IDPCertificateStore
+		for i := range p.certs {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			candidate := p.certs[i : i+1]
+			p.IDPCertificateStore = &dsig.MemoryX509CertificateStore{Roots: candidate}
+			info, ok := validate()
+			p.IDPCertificateStore = trust
+			if ok {
+				p.setTrust(candidate)
+				return info, nil
+			}
+		}
 	}
 	return nil, apierr.New("invalid_grant", "the SAML assertion is invalid")
 }

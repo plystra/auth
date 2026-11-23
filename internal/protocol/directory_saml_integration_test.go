@@ -262,10 +262,12 @@ func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
 		{"predecessor", predecessor, false, true},
 		{"successor", successor, false, true},
 		{"predecessor without KeyInfo", predecessor, true, true},
-		{"unidentified successor during overlap", successor, true, false},
+		{"successor without KeyInfo", successor, true, true},
 		{"expired predecessor", expiredSigner, false, false},
+		{"expired predecessor without KeyInfo", expiredSigner, true, false},
 		{"before validity window", futureSigner, false, false},
 		{"encryption only", encryptionSigner, false, false},
+		{"encryption only without KeyInfo", encryptionSigner, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			req := samlLoginRequest(t, ctx, &mux, connection, tc.signing, tc.omitKeyInfo)
@@ -282,6 +284,29 @@ func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
 			}
 		})
 	}
+	t.Run("explicit KeyInfo with more than four active signers", func(t *testing.T) {
+		for range 3 {
+			extra, _ := newSAMLTestIssuer(t)
+			metadata = appendSAMLTestKey(t, metadata, extra, "signing")
+		}
+		large, err := f.svc.CreateConnection(actor, f.owner, f.space, enterprise.ConnectionInput{
+			Name: "IdP with multiple active signing keys", Provider: "saml", SAMLMetadata: metadata,
+			RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := samlLoginRequest(t, ctx, &mux, large, successor, true)
+		before := f.counts(t)
+		response := httptest.NewRecorder()
+		mux.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest || f.counts(t) != before {
+			t.Fatalf("omitted KeyInfo exceeded the verification budget: status=%d", response.Code)
+		}
+		response = httptest.NewRecorder()
+		mux.ServeHTTP(response, samlLoginRequest(t, ctx, &mux, large, successor, false))
+		requireSAMLLogin(t, response)
+	})
 }
 
 func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, connection enterprise.Connection, signer *dsig.SigningContext, omitKeyInfo bool) *http.Request {
@@ -312,26 +337,31 @@ func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, con
 	}
 	payload := signedSAMLTestResponse(t, signer, connection, authRequest.ID, "rollover-user", nil, false)
 	if omitKeyInfo {
-		raw, err := base64.StdEncoding.DecodeString(payload)
-		if err != nil {
-			t.Fatal(err)
-		}
-		document := etree.NewDocument()
-		if err := document.ReadFromBytes(raw); err != nil {
-			t.Fatal(err)
-		}
-		signature := document.Root().FindElement("./Signature")
-		signature.RemoveChild(signature.FindElement("./KeyInfo"))
-		raw, err = document.WriteToBytes()
-		if err != nil {
-			t.Fatal(err)
-		}
-		payload = base64.StdEncoding.EncodeToString(raw)
+		payload = samlTestWithoutKeyInfo(t, payload)
 	}
 	form := url.Values{"RelayState": {result.Data.State}, "SAMLResponse": {payload}}
 	req := httptest.NewRequestWithContext(ctx, http.MethodPost, path+"/callback", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	return req
+}
+
+func samlTestWithoutKeyInfo(t *testing.T, response string) string {
+	t.Helper()
+	raw, err := base64.StdEncoding.DecodeString(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := etree.NewDocument()
+	if err := document.ReadFromBytes(raw); err != nil {
+		t.Fatal(err)
+	}
+	signature := document.Root().FindElement("./Signature")
+	signature.RemoveChild(signature.FindElement("./KeyInfo"))
+	raw, err = document.WriteToBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.StdEncoding.EncodeToString(raw)
 }
 
 func requireSAMLLogin(t *testing.T, w *httptest.ResponseRecorder) {
