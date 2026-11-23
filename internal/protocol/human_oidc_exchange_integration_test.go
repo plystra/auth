@@ -114,7 +114,7 @@ func newConfiguredHumanRP(t *testing.T, managed bool, upstream *oidcTestProvider
 	}
 	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors, Enterprise: workforce}
 	api.Register(humago.New(&mux, route.HumaConfig("RP publisher", "1")))
-	(HTTP{Issuer: issuer, Applications: apps, Sessions: sessions, Enterprise: workforce}).Register(&mux)
+	(HTTP{Issuer: issuer, HostedOrigin: issuer, Applications: apps, Sessions: sessions, Enterprise: workforce}).Register(&mux)
 	mux.HandleFunc("GET /.well-known/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		keys, err := sessions.Signer.JWKS()
 		if err != nil {

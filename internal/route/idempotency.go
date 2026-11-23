@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	maxIdempotencyBody   = 1 << 20
-	OIDCInteractionsPath = "/v1/auth/oidc-interactions"
+	maxIdempotencyBody        = 1 << 20
+	OIDCInteractionsPath      = "/v1/auth/oidc-interactions"
+	SAMLBrowserCallbackPrefix = "/oidc/upstream/saml/"
 )
 
 // One-time publisher credentials must never enter the replay store, including
@@ -30,6 +31,9 @@ func checkOAuthSecretIdempotency(r *http.Request, plane Plane) error {
 		return nil
 	}
 	path := r.URL.Path
+	if isSAMLBrowserPost(r) {
+		return apierr.New("VALIDATION_FAILED", "Idempotency-Key is not supported for SAML browser callbacks")
+	}
 	if path == OIDCInteractionsPath || strings.HasPrefix(path, OIDCInteractionsPath+"/") {
 		return apierr.New("VALIDATION_FAILED", "Idempotency-Key is not supported for hosted sign-in interactions")
 	}
@@ -58,6 +62,11 @@ func checkOAuthSecretIdempotency(r *http.Request, plane Plane) error {
 		return denied
 	}
 	return nil
+}
+
+func isSAMLBrowserPost(r *http.Request) bool {
+	connection, ok := strings.CutPrefix(r.URL.Path, SAMLBrowserCallbackPrefix)
+	return r.Method == http.MethodPost && ok && connection != "" && !strings.Contains(connection, "/")
 }
 
 type idempotencyResponseWriter struct {

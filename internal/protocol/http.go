@@ -28,6 +28,7 @@ import (
 
 type HTTP struct {
 	Issuer        string
+	HostedOrigin  string
 	Agents        *agent.Service
 	Accounts      *account.Service
 	Applications  *application.Service
@@ -60,6 +61,7 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	route.RegisterNonJSON(mux, route.NewSpec("scim.group.delete", "DELETE", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.start", "GET", "/v1/sso/{connection_id}/start", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.ssoStart))
 	route.RegisterNonJSON(mux, route.NewSpec("sso.callback", "POST", "/v1/sso/{connection_id}/callback", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(64<<10)), http.HandlerFunc(h.ssoCallback))
+	route.RegisterNonJSON(mux, route.NewSpec("oidc.interactions.saml.receive", "POST", route.SAMLBrowserCallbackPrefix+"{connection_id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(samlBrowserFormLimit)), http.HandlerFunc(h.samlBrowserCallback))
 }
 func (h HTTP) metadata(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(h.Issuer, "/")

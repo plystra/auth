@@ -55,6 +55,23 @@ func (w *AgentExpiryWorker) Work(ctx context.Context, _ *river.Job[AgentExpiryAr
 	return err
 }
 
+type SAMLBrowserExpiryService interface {
+	ExpireSAMLBrowserResponses(context.Context) error
+}
+
+type SAMLBrowserExpiryArgs struct{}
+
+func (SAMLBrowserExpiryArgs) Kind() string { return "saml_browser_expiry" }
+
+type SAMLBrowserExpiryWorker struct {
+	river.WorkerDefaults[SAMLBrowserExpiryArgs]
+	Service SAMLBrowserExpiryService
+}
+
+func (w *SAMLBrowserExpiryWorker) Work(ctx context.Context, _ *river.Job[SAMLBrowserExpiryArgs]) error {
+	return w.Service.ExpireSAMLBrowserResponses(ctx)
+}
+
 // Client is the process-local River producer. Workers are added by the
 // capability that owns a job; this producer is safe to use from business
 // transactions without opening a second connection.
@@ -106,6 +123,24 @@ func (c *Client) RegisterEmailDelivery(service EmailDeliveryService) error {
 	}
 	river.AddWorker(c.workers, &EmailDeliveryWorker{Service: service})
 	c.emailDeliveryRegistered = true
+	return nil
+}
+
+func (c *Client) RegisterSAMLBrowserExpiry(service SAMLBrowserExpiryService) error {
+	if c == nil || c.pool == nil || c.river == nil || service == nil {
+		return fmt.Errorf("SAML browser expiry service is not configured")
+	}
+	if err := c.ensureWorkers(); err != nil {
+		return err
+	}
+	if err := river.AddWorkerSafely(c.workers, &SAMLBrowserExpiryWorker{Service: service}); err != nil {
+		return err
+	}
+	c.river.PeriodicJobs().Add(river.NewPeriodicJob(
+		river.PeriodicInterval(time.Minute),
+		func() (river.JobArgs, *river.InsertOpts) { return SAMLBrowserExpiryArgs{}, nil },
+		&river.PeriodicJobOpts{RunOnStart: true},
+	))
 	return nil
 }
 

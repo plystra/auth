@@ -412,6 +412,11 @@ const samlTestAuthenticationTime = "2025-01-01T00:00:00Z"
 
 func signedSAMLTestResponse(t *testing.T, signing *dsig.SigningContext, connection enterprise.Connection, requestID, subject string, attributes []samlTestAttribute, tamper bool) string {
 	t.Helper()
+	return signedSAMLTestResponseForAudience(t, signing, connection.RedirectURI, "https://auth.test/saml/"+connection.ID, requestID, subject, attributes, tamper)
+}
+
+func signedSAMLTestResponseForAudience(t *testing.T, signing *dsig.SigningContext, recipient, audience, requestID, subject string, attributes []samlTestAttribute, tamper bool) string {
+	t.Helper()
 	now := time.Now().UTC()
 	xml := fmt.Sprintf(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_response" Version="2.0" IssueInstant="%s" Destination="%s" InResponseTo="%s">
 		<saml:Issuer>https://directory-idp.test/entity</saml:Issuer>
@@ -426,9 +431,9 @@ func signedSAMLTestResponse(t *testing.T, signing *dsig.SigningContext, connecti
 		</saml:AuthnContext></saml:AuthnStatement>
 		<saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>different-saml-email@example.test</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>
 		</saml:Assertion></samlp:Response>`,
-		now.Format(time.RFC3339), connection.RedirectURI, requestID, now.Format(time.RFC3339), connection.RedirectURI, requestID,
+		now.Format(time.RFC3339), recipient, requestID, now.Format(time.RFC3339), recipient, requestID,
 		now.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339), now.Add(time.Minute).Format(time.RFC3339),
-		"https://auth.test/saml/"+connection.ID, samlTestAuthenticationTime)
+		audience, samlTestAuthenticationTime)
 	doc := etree.NewDocument()
 	if err := doc.ReadFromString(xml); err != nil {
 		t.Fatal(err)

@@ -2595,6 +2595,9 @@
       "OidcBrowserState": {
         "additionalProperties": false,
         "properties": {
+          "authorization_method": {
+            "type": "string"
+          },
           "authorization_url": {
             "type": "string"
           },
@@ -2613,6 +2616,12 @@
           },
           "passkey_options": {
             "$ref": "#/components/schemas/CredentialAssertion"
+          },
+          "relay_state": {
+            "type": "string"
+          },
+          "saml_request": {
+            "type": "string"
           },
           "scopes": {
             "items": {
@@ -4602,6 +4611,58 @@
           }
         },
         "summary": "oidc.interactions.sso.complete"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}/sso/saml/complete": {
+      "post": {
+        "operationId": "oidc.interactions.saml.complete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.saml.complete"
       }
     },
     "/v1/auth/password/forgot": {

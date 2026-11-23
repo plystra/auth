@@ -78,15 +78,18 @@ type oidcBrowserSSOInput struct {
 }
 
 type oidcBrowserState struct {
-	ID               string                        `json:"id"`
-	ClientName       string                        `json:"client_name"`
-	Scopes           []string                      `json:"scopes"`
-	ExpiresAt        time.Time                     `json:"expires_at"`
-	NextStep         string                        `json:"next_step"`
-	SignedInEmail    string                        `json:"signed_in_email,omitempty"`
-	SSOConnectionID  string                        `json:"sso_connection_id,omitempty"`
-	AuthorizationURL string                        `json:"authorization_url,omitempty"`
-	PasskeyOptions   *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
+	ID                  string                        `json:"id"`
+	ClientName          string                        `json:"client_name"`
+	Scopes              []string                      `json:"scopes"`
+	ExpiresAt           time.Time                     `json:"expires_at"`
+	NextStep            string                        `json:"next_step"`
+	SignedInEmail       string                        `json:"signed_in_email,omitempty"`
+	SSOConnectionID     string                        `json:"sso_connection_id,omitempty"`
+	AuthorizationURL    string                        `json:"authorization_url,omitempty"`
+	AuthorizationMethod string                        `json:"authorization_method,omitempty"`
+	SAMLRequest         string                        `json:"saml_request,omitempty"`
+	RelayState          string                        `json:"relay_state,omitempty"`
+	PasskeyOptions      *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
 }
 
 type oidcBrowserCookieOutput[T any] struct {
@@ -108,6 +111,7 @@ func (a *API) registerOIDCBrowserRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("oidc.interactions.identify", http.MethodPost, path+"/{id}/identify", route.Principal, "", subjects), a.identifyOIDCBrowserUser)
 	route.Register(api, route.NewSpec("oidc.interactions.authenticate", http.MethodPost, path+"/{id}/authenticate", route.Principal, "", subjects), a.authenticateOIDCBrowserUser)
 	route.Register(api, route.NewSpec("oidc.interactions.sso.complete", http.MethodPost, path+"/{id}/sso/complete", route.Principal, "", subjects), a.completeOIDCBrowserSSO)
+	route.Register(api, route.NewSpec("oidc.interactions.saml.complete", http.MethodPost, path+"/{id}/sso/saml/complete", route.Principal, "", subjects), a.completeOIDCBrowserSAML)
 	route.Register(api, route.NewSpec("oidc.interactions.decision", http.MethodPost, path+"/{id}/decision", route.Principal, "", subjects), a.decideOIDCBrowserInteraction)
 }
 
@@ -185,14 +189,16 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 			return nil, err
 		}
 		if connection != "" {
-			start, err := a.Enterprise.StartOIDCBrowser(ctx, connection, a.HostedOrigin+"/oidc/upstream", enterprise.OIDCBrowserBinding{
-				ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie)), ExpiresAt: interaction.ExpiresAt.Time,
-			})
+			start, err := a.Enterprise.StartOIDCBrowser(ctx, connection, a.HostedOrigin+"/oidc/upstream",
+				a.HostedOrigin+route.SAMLBrowserCallbackPrefix+connection, enterprise.OIDCBrowserBinding{
+					ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie)), ExpiresAt: interaction.ExpiresAt.Time,
+				})
 			if err != nil {
 				return nil, err
 			}
 			state.NextStep, state.SSOConnectionID = "sso", connection
 			state.AuthorizationURL = start.AuthorizationURL
+			state.AuthorizationMethod, state.SAMLRequest, state.RelayState = start.AuthorizationMethod, start.SAMLRequest, start.RelayState
 			return oidcStateOutput(state), nil
 		}
 	}
@@ -217,6 +223,25 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 		return nil, apierr.New("CONFLICT", "the authentication interaction changed")
 	}
 	state.NextStep, state.PasskeyOptions = challenge.NextStep, challenge.PasskeyOptions
+	return oidcStateOutput(state), nil
+}
+
+func (a *API) completeOIDCBrowserSAML(ctx context.Context, in *OIDCBrowserInput) (*authorizationDataOutput[oidcBrowserState], error) {
+	interaction, err := a.oidcBrowserInteraction(ctx, *in, true)
+	if err != nil {
+		return nil, err
+	}
+	connection := interaction.SsoConnectionID
+	if a.Enterprise == nil || connection == "" || interaction.BrowserSessionID.Valid {
+		return nil, apierr.New("invalid_grant", "the authentication interaction has no pending single sign-on")
+	}
+	user, err := a.Enterprise.CompleteSAMLBrowser(ctx, connection, a.HostedOrigin+route.SAMLBrowserCallbackPrefix+connection,
+		enterprise.OIDCBrowserBinding{ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie))})
+	if err != nil {
+		return nil, err
+	}
+	state := oidcInteractionState(interaction)
+	state.NextStep, state.SignedInEmail = "consent", user.Email
 	return oidcStateOutput(state), nil
 }
 

@@ -748,7 +748,7 @@ func (s *Service) consumeStepUp(ctx context.Context, q *db.Queries) error {
 }
 
 func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI string) (StartResult, error) {
-	return s.start(ctx, connectionID, requestedRedirectURI, nil)
+	return s.start(ctx, connectionID, requestedRedirectURI, "", nil)
 }
 
 // OIDCBrowserBinding identifies the pending interaction proved by its original cookie.
@@ -758,12 +758,12 @@ type OIDCBrowserBinding struct {
 	ExpiresAt   time.Time
 }
 
-// StartOIDCBrowser starts an upstream OIDC request that can only resume its original interaction.
-func (s *Service) StartOIDCBrowser(ctx context.Context, connectionID, callback string, browser OIDCBrowserBinding) (StartResult, error) {
-	return s.start(ctx, connectionID, callback, &browser)
+// StartOIDCBrowser starts upstream authentication bound to the original interaction.
+func (s *Service) StartOIDCBrowser(ctx context.Context, connectionID, oidcCallback, samlCallback string, browser OIDCBrowserBinding) (StartResult, error) {
+	return s.start(ctx, connectionID, oidcCallback, samlCallback, &browser)
 }
 
-func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI string, browser *OIDCBrowserBinding) (StartResult, error) {
+func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI, samlCallback string, browser *OIDCBrowserBinding) (StartResult, error) {
 	connectionID = strings.TrimSpace(connectionID)
 	row, err := s.Store.Queries().GetSSOConnection(ctx, db.GetSSOConnectionParams{ID: connectionID})
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -775,8 +775,13 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI 
 	if row.Status != "active" {
 		return StartResult{}, apierr.New("forbidden", "SSO connection is disabled")
 	}
-	if browser != nil && (row.Provider != "oidc" || requestedRedirectURI == "" || requestedRedirectURI != row.RedirectUri) {
-		return StartResult{}, nil
+	if browser != nil {
+		if row.Provider == "saml" {
+			requestedRedirectURI = samlCallback
+		}
+		if requestedRedirectURI == "" || requestedRedirectURI != row.RedirectUri {
+			return StartResult{}, nil
+		}
 	}
 	redirectURI := strings.TrimSpace(requestedRedirectURI)
 	if redirectURI == "" {
@@ -786,7 +791,7 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI 
 		return StartResult{}, apierr.New("invalid_request", "redirect_uri does not match the configured connection")
 	}
 	if row.Provider == "saml" {
-		return s.startSAML(ctx, row, redirectURI)
+		return s.startSAML(ctx, row, redirectURI, browser)
 	}
 	provider, err := s.discovery(ctx, row.Issuer)
 	if err != nil {
@@ -813,29 +818,12 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI 
 	if err != nil {
 		return StartResult{}, err
 	}
-	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		created, err := q.CreateSSOState(ctx, db.CreateSSOStateParams{
-			ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
-			StateHash: digest(state), NonceHash: digest(nonce),
-			PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
-			ExpiresAt:    pgtype.Timestamptz{Time: expiresAt, Valid: true},
-			RequestID:    pgtype.Text{},
-			BrowserBound: browser != nil,
-		})
-		if err != nil || browser == nil {
-			return err
-		}
-		changed, err := q.ReserveOIDCBrowserSSO(ctx, db.ReserveOIDCBrowserSSOParams{
-			InteractionID: browser.ID, RequestHash: browser.RequestHash[:], StateID: created.ID,
-		})
-		if err != nil {
-			return err
-		}
-		if changed != 1 {
-			return apierr.New("conflict", "the authentication interaction expired or changed")
-		}
-		return nil
-	}); err != nil {
+	if err := s.createSSOState(ctx, db.CreateSSOStateParams{
+		ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
+		StateHash: digest(state), NonceHash: digest(nonce),
+		PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	}, browser); err != nil {
 		return StartResult{}, err
 	}
 	query := url.Values{}
@@ -850,7 +838,7 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI 
 	return StartResult{AuthorizationURL: provider.Endpoint().AuthURL + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, nil
 }
 
-func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string) (StartResult, error) {
+func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, error) {
 	provider, err := s.samlProvider(row)
 	if err != nil {
 		return StartResult{}, err
@@ -878,20 +866,20 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
 	expiresAt := time.Now().UTC().Add(stateLifetime)
+	if browser != nil && browser.ExpiresAt.Before(expiresAt) {
+		expiresAt = browser.ExpiresAt
+	}
 	verifierCiphertext, err := s.seal([]byte("saml"), pkceVerifierAAD)
 	if err != nil {
 		return StartResult{}, err
 	}
-	if err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		_, err := q.CreateSSOState(ctx, db.CreateSSOStateParams{
-			ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
-			StateHash: digest(relayState), NonceHash: digest(nonce),
-			PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
-			ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
-			RequestID: pgtype.Text{String: request.ID, Valid: true},
-		})
-		return err
-	}); err != nil {
+	if err := s.createSSOState(ctx, db.CreateSSOStateParams{
+		ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
+		StateHash: digest(relayState), NonceHash: digest(nonce),
+		PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		RequestID: pgtype.Text{String: request.ID, Valid: true},
+	}, browser); err != nil {
 		return StartResult{}, err
 	}
 	result := StartResult{State: relayState, ExpiresAt: expiresAt, AuthorizationMethod: "GET"}
@@ -907,6 +895,26 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
 	return result, nil
+}
+
+func (s *Service) createSSOState(ctx context.Context, in db.CreateSSOStateParams, browser *OIDCBrowserBinding) error {
+	in.BrowserBound = browser != nil
+	return s.Store.InTx(ctx, func(q *db.Queries) error {
+		created, err := q.CreateSSOState(ctx, in)
+		if err != nil || browser == nil {
+			return err
+		}
+		changed, err := q.ReserveOIDCBrowserSSO(ctx, db.ReserveOIDCBrowserSSOParams{
+			InteractionID: browser.ID, RequestHash: browser.RequestHash[:], StateID: created.ID,
+		})
+		if err != nil {
+			return err
+		}
+		if changed != 1 {
+			return apierr.New("conflict", "the authentication interaction expired or changed")
+		}
+		return nil
+	})
 }
 
 func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthResult, error) {
@@ -1031,10 +1039,6 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	if err != nil {
 		return account.AuthResult{}, err
 	}
-	provider, err := s.samlProvider(row)
-	if err != nil {
-		return account.AuthResult{}, err
-	}
 	var state db.SsoState
 	if strings.TrimSpace(in.State) != "" {
 		err = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -1045,7 +1049,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 			if err != nil {
 				return err
 			}
-			if state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
+			if state.BrowserBound || state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
 				return apierr.New("invalid_grant", "SAML state is invalid or expired")
 			}
 			if state.RequestID.Valid && inResponseTo != state.RequestID.String {
@@ -1059,29 +1063,48 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	} else if inResponseTo != "" {
 		return account.AuthResult{}, apierr.New("invalid_grant", "an unsolicited SAML response cannot contain InResponseTo")
 	}
-	info, err := provider.verify(ctx, in.SAMLResponse, keyHintMissing)
+	claims, err := s.verifiedSAMLLogin(ctx, row, in.SAMLResponse, keyHintMissing, "", time.Now())
 	if err != nil {
 		return account.AuthResult{}, err
+	}
+	return s.finishCallback(ctx, row, state, claims, nil)
+}
+
+func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, response string, keyHintMissing bool, browserRequestID string, receivedAt time.Time) (idTokenClaims, error) {
+	provider, err := s.samlProvider(row)
+	if err != nil {
+		return idTokenClaims{}, err
+	}
+	info, err := provider.verify(ctx, response, keyHintMissing)
+	if err != nil {
+		return idTokenClaims{}, err
+	}
+	if len(info.Assertions) != 1 {
+		return idTokenClaims{}, directoryIdentityUnavailable()
+	}
+	if browserRequestID != "" {
+		subject := info.Assertions[0].Subject
+		if subject == nil || subject.SubjectConfirmation == nil || subject.SubjectConfirmation.SubjectConfirmationData == nil ||
+			subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo != browserRequestID {
+			return idTokenClaims{}, invalidSAMLBrowserResponse()
+		}
 	}
 	email := firstSAMLValue(info.Values, "email", "Email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
 	if email == "" && strings.Contains(info.NameID, "@") {
 		email = info.NameID
 	}
 	if !validSAMLIdentity(email) || info.NameID == "" || len(info.NameID) > maxExternalSubjectLen {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML identity is not valid for this connection")
+		return idTokenClaims{}, apierr.New("invalid_grant", "the SAML identity is not valid for this connection")
 	}
 	claims := idTokenClaims{
-		samlProof: &samlLoginProof{provider: provider, response: in.SAMLResponse, keyHintMissing: keyHintMissing},
+		samlProof: &samlLoginProof{provider: provider, response: response, keyHintMissing: keyHintMissing},
 		Subject:   info.NameID, Email: email, EmailVerified: true,
 		Name: firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
 	}
-	if instant := info.AuthnInstant; instant != nil && instant.Unix() > 0 && !instant.After(time.Now()) {
+	if instant := info.AuthnInstant; instant != nil && instant.Unix() > 0 && !instant.After(receivedAt) {
 		claims.authTime = instant.UTC()
 	}
 	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
-	if len(info.Assertions) != 1 {
-		return account.AuthResult{}, directoryIdentityUnavailable()
-	}
 	if statement := info.Assertions[0].AttributeStatement; statement != nil {
 		for _, attribute := range statement.Attributes {
 			for _, value := range attribute.Values {
@@ -1090,7 +1113,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 		}
 	}
 	claims.Groups = claims.SAMLAttributes[row.GroupsClaim]
-	return s.finishCallback(ctx, row, state, claims, nil)
+	return claims, nil
 }
 
 func (s *Service) samlProvider(row db.SsoConnection) (*samlLoginProvider, error) {
@@ -1190,7 +1213,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			if err != nil {
 				return err
 			}
-			if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID {
+			if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID || lockedState.BrowserBound != (browser != nil) {
 				return apierr.New("invalid_grant", "SSO state is invalid or expired")
 			}
 			if err := q.ConsumeSSOState(ctx, db.ConsumeSSOStateParams{ID: lockedState.ID}); err != nil {
@@ -1321,13 +1344,24 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			if changed != 1 {
 				return apierr.New("invalid_grant", "the authentication interaction expired or changed")
 			}
+			if connection.Provider == "saml" {
+				if err := q.DeleteSAMLBrowserResponse(ctx, db.DeleteSAMLBrowserResponseParams{StateID: state.ID}); err != nil {
+					return err
+				}
+			}
 		}
 		if connection.Provider == "saml" {
 			// Identity and audit writes may wait on locks after signature verification.
 			if lockedConnection.SamlIdpCertificate != connection.SamlIdpCertificate {
 				return apierr.New("conflict", "SSO signing certificate changed; restart sign-in")
 			}
-			return claims.samlProof.recheck(ctx)
+			if err := claims.samlProof.recheck(ctx); err != nil {
+				return err
+			}
+			if browser != nil {
+				_, err := claims.samlProof.provider.verify(ctx, claims.samlProof.response, claims.samlProof.keyHintMissing)
+				return err
+			}
 		}
 		return nil
 	})

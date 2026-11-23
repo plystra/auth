@@ -314,7 +314,8 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 			apierr.Write(w, apierr.WithRequestID(apierr.New("BROWSER_ORIGIN_REJECTED", "service endpoints do not accept browser origins"), id))
 			return
 		}
-		if p == Principal && r.Header.Get("Origin") != "" {
+		// The signed IdP front-channel POST is a navigation, with no cookie authority.
+		if p == Principal && r.Header.Get("Origin") != "" && !isSAMLBrowserPost(r) {
 			origin := r.Header.Get("Origin")
 			allowed := false
 			var err error

@@ -298,6 +298,9 @@ func serve(ctx context.Context) error {
 	invitationSvc := &invitation.Service{Store: st, Accounts: accounts, Authorization: authorizationSvc}
 	approvalSvc := &approval.Service{Store: st, Authorization: authorizationSvc, StepUp: sessionSvc}
 	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authorizationSvc, Sessions: sessionSvc, StepUp: sessionSvc, DataKey: secret.New(dataKey), Passwords: security.DefaultPasswordHasher(), Issuer: c.Issuer}
+	if err := st.Jobs.RegisterSAMLBrowserExpiry(enterpriseSvc); err != nil {
+		return fmt.Errorf("configure SAML browser expiry job: %w", err)
+	}
 	accounts.SignInPolicy = enterpriseSvc
 	sessionSvc.SpaceSignInPolicy = enterpriseSvc
 	accounts.Invitations = invitationSvc
@@ -346,7 +349,7 @@ func serve(ctx context.Context) error {
 	scfg := route.HumaConfig("Plystra Auth server", "1.0.0")
 	ocfg := route.HumaConfig("Plystra Auth operations", "1.0.0")
 	principalAPI.Register(humago.New(principalMux, pcfg))
-	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Accounts: accounts, Applications: apps, Sessions: sessionSvc, Authorization: authorizationSvc, Enterprise: enterpriseSvc}.Register(principalMux)
+	protocol.HTTP{Issuer: c.Issuer, HostedOrigin: hostedOrigin, Agents: agentSvc, Accounts: accounts, Applications: apps, Sessions: sessionSvc, Authorization: authorizationSvc, Enterprise: enterpriseSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
 	registerJWKS(principalMux, sessionSvc)

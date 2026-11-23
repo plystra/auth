@@ -627,6 +627,13 @@ type RolePermission struct {
 	PermissionID string `json:"permission_id"`
 }
 
+type SamlBrowserResponse struct {
+	StateID    string             `json:"state_id"`
+	Ciphertext []byte             `json:"ciphertext"`
+	ReceivedAt pgtype.Timestamptz `json:"received_at"`
+	ExpiresAt  pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Session struct {
 	ID              string             `json:"id"`
 	UserID          string             `json:"user_id"`
