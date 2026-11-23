@@ -44,10 +44,15 @@ type Service struct {
 	Authorization *authorization.Service
 	Mailer        *mail.Service
 	Invitations   InvitationFinalizer
+	SignInPolicy  LocalSignInPolicy
 }
 
 type InvitationFinalizer interface {
 	FinalizeVerifiedUserTx(context.Context, *db.Queries, string) error
+}
+
+type LocalSignInPolicy interface {
+	CheckLocalSignInTx(context.Context, *db.Queries, string, string) error
 }
 type RegisterInput struct {
 	Email    string
@@ -61,6 +66,7 @@ type ProfileUpdate struct {
 }
 type LoginInput struct {
 	Email     string
+	SpaceID   string
 	Password  string
 	IP        net.IP
 	UserAgent string
@@ -260,12 +266,24 @@ func (s *Service) Login(ctx context.Context, in LoginInput) (AuthResult, error) 
 }
 
 func (s *Service) defaultMemberID(ctx context.Context, userID string) (string, error) {
+	return s.defaultMemberIDTx(ctx, s.Store.Queries(), userID, "")
+}
+
+func (s *Service) defaultMemberIDTx(ctx context.Context, q *db.Queries, userID, targetSpaceID string) (string, error) {
 	if s.Authorization == nil {
 		return "", nil
 	}
-	members, err := s.Authorization.ListMembersForUser(ctx, userID, "human")
+	members, err := q.ListMembersForUserByType(ctx, db.ListMembersForUserByTypeParams{UserID: userID, MemberType: "human"})
 	if err != nil {
 		return "", err
+	}
+	if targetSpaceID != "" {
+		for _, member := range members {
+			if member.SpaceID == targetSpaceID {
+				return member.ID, nil
+			}
+		}
+		return "", nil
 	}
 	for _, member := range members {
 		if member.SpaceID == DefaultSpaceID {

@@ -22,4 +22,5 @@ type SignInAttempt struct {
 	PasswordVerifiedAt pgtype.Timestamptz `json:"password_verified_at"`
 	Method             string             `json:"method"`
 	PasskeySession     []byte             `json:"passkey_session"`
+	TargetSpaceID      pgtype.Text        `json:"target_space_id"`
 }

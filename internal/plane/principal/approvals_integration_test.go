@@ -13,6 +13,8 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/approval"
+	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
@@ -150,4 +152,45 @@ func TestApprovalPrincipalHTTPInboxStepUpAndUserOnlyDecision(t *testing.T) {
 	if err := st.Pool.QueryRow(ctx, `SELECT count(*) FROM approval_requests WHERE id IN ($1, $2) AND decided_by_user_id = $3`, first.ID, second.ID, "usr_principal_actor").Scan(&count); err != nil || count != 2 {
 		t.Fatalf("approval decisions = %d, %v", count, err)
 	}
+
+	t.Run("a local account without enterprise admission cannot approve", func(t *testing.T) {
+		const userID = "usr_principal_actor"
+		pending, err := approvals.CreateBusiness(ctx, "key_principal_approval", createdAgent.ID,
+			"auth.bindings:manage", approval.Resource{Type: "invoice", ID: "inv_managed", SpaceID: spaceID}, digest[:], "Managed request")
+		if err != nil {
+			t.Fatal(err)
+		}
+		unbound, err := sessions.CreateForMember(ctx, userID, "", nil, "", 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		admin := authorization.WithHumanActor(ctx, owner.ID, userID)
+		enterpriseSvc := &enterprise.Service{Store: st, Authorization: authz, DataKey: factors.DataKey}
+		connection, err := enterpriseSvc.CreateConnection(admin, owner.ID, spaceID, enterprise.ConnectionInput{
+			Name: "Managed approval", Provider: "oidc", Issuer: "https://idp.example.test", ClientID: "approval-test",
+			ClientSecret: "test-secret", RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		domain, err := enterpriseSvc.CreateDomain(admin, owner.ID, spaceID,
+			enterprise.DomainInput{Domain: "example.test", ConnectionID: connection.ID, ForceSSO: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		enterpriseSvc.DNSResolver = principalTXTResolver{values: []string{domain.VerificationToken}}
+		if err := enterpriseSvc.VerifyDomain(admin, owner.ID, spaceID, domain.ID); err != nil {
+			t.Fatal(err)
+		}
+		sessions.SpaceSignInPolicy = enterpriseSvc
+		inbox := request(http.MethodGet, "/v1/approvals", unbound.AccessToken, "")
+		if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), pending.ID) {
+			t.Fatalf("account-only session saw managed approval: HTTP %d", inbox.Code)
+		}
+		seedStepUpProof(t, st, unbound.SessionID, "approvals.approve", map[string]any{"approval_id": pending.ID})
+		decision := request(http.MethodPost, "/v1/approvals/"+pending.ID+"/approve", unbound.AccessToken, "")
+		if decision.Code != http.StatusUnauthorized || !strings.Contains(decision.Body.String(), "UNAUTHENTICATED") {
+			t.Fatalf("account-only session reached managed approval decision: HTTP %d", decision.Code)
+		}
+	})
 }

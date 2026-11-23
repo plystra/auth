@@ -24,6 +24,12 @@ SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, 
     verified_at, created_at, updated_at
 FROM sso_domains WHERE id = sqlc.arg(id) FOR UPDATE;
 
+-- name: LockForcedSSODomainForLogin :exec
+SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(domain)::text, 723615832002));
+
+-- name: LockForcedSSODomainForChange :exec
+SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(domain)::text, 723615832002));
+
 -- name: VerifySSODomain :exec
 UPDATE sso_domains SET status = 'verified', verified_at = now(), updated_at = now()
 WHERE id = sqlc.arg(id) AND status = 'pending';
@@ -52,12 +58,12 @@ WITH RECURSIVE ancestors AS (
 SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
     c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
 FROM sso_domains d
-JOIN sso_connections c ON c.id = d.connection_id
+LEFT JOIN sso_connections c ON c.id = d.connection_id
 JOIN ancestors ON ancestors.id = d.space_id
 WHERE d.domain = sqlc.arg(domain)
   AND d.status = 'verified'
   AND d.force_sso = true
-  AND (ancestors.depth = 0 OR (d.covers_subtree AND c.covers_subtree))
+  AND (ancestors.depth = 0 OR (d.covers_subtree AND (c.covers_subtree OR c.id IS NULL)))
 ORDER BY ancestors.depth ASC, d.id ASC
 LIMIT 1;
 

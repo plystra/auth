@@ -100,8 +100,8 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		} else if err != nil {
 			return err
 		}
-		validateSession := func() error {
-			currentClaims, active, err := s.Sessions.IntrospectTx(ctx, q, in.AccessToken.Value(), claims.Audience)
+		validateSession := func(spaceID string) error {
+			currentClaims, active, err := s.Sessions.IntrospectForSpaceTx(ctx, q, in.AccessToken.Value(), claims.Audience, spaceID)
 			if err != nil {
 				return err
 			}
@@ -110,7 +110,7 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 			}
 			return nil
 		}
-		if err := validateSession(); err != nil {
+		if err := validateSession(""); err != nil {
 			return err
 		}
 		if !slices.Contains(client.RedirectURIs, request.RedirectURI) {
@@ -133,7 +133,7 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 			if err != nil {
 				return err
 			}
-			if err := validateSession(); err != nil {
+			if err := validateSession(""); err != nil {
 				return err
 			}
 			if err := s.Applications.FinishOAuthAuthorizationRequestTx(ctx, q, request.ID, "denied"); err != nil {
@@ -179,6 +179,9 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		}
 		if binding.Status != "active" || binding.RevokedAt.Valid || (binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC())) {
 			return apierr.New("invalid_request", "member_id is not bound to the authenticated user")
+		}
+		if err := validateSession(member.SpaceID); err != nil {
+			return err
 		}
 		installation, err := q.LockActiveApplicationInstallationForSpace(ctx, db.LockActiveApplicationInstallationForSpaceParams{
 			ApplicationID: client.ID, TargetSpaceID: member.SpaceID,
@@ -251,7 +254,7 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		}
 		// Time-based identity validity can change while waiting for resource
 		// locks even though account, member, binding, and session rows are held.
-		if err := validateSession(); err != nil {
+		if err := validateSession(member.SpaceID); err != nil {
 			return err
 		}
 		if binding.ExpiresAt.Valid && !binding.ExpiresAt.Time.After(time.Now().UTC()) {

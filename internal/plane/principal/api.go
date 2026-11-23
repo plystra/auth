@@ -295,7 +295,7 @@ func (a *API) acceptInvitation(ctx context.Context, in *AcceptInvitationInput) (
 	return out, nil
 }
 func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutput, error) {
-	if a.Enterprise != nil && in.Body.Method != "passkey" {
+	if a.Enterprise != nil {
 		connectionID, err := a.Enterprise.ForcedConnectionForEmail(ctx, in.Body.Email, in.Body.SpaceID)
 		if err != nil {
 			return nil, err
@@ -310,7 +310,7 @@ func (a *API) login(ctx context.Context, in *SignInStartInput) (*SignInStartOutp
 	if len(ip) == 0 && in.XForwardedFor != "" {
 		ip = net.ParseIP(strings.TrimSpace(strings.Split(in.XForwardedFor, ",")[0]))
 	}
-	login := account.LoginInput{Email: in.Body.Email, IP: ip, UserAgent: in.UserAgent}
+	login := account.LoginInput{Email: in.Body.Email, SpaceID: strings.TrimSpace(in.Body.SpaceID), IP: ip, UserAgent: in.UserAgent}
 	var result account.SignInChallenge
 	var e error
 	switch in.Body.Method {

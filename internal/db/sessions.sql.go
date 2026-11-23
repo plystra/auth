@@ -118,23 +118,24 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, sso_member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()), COALESCE($10, 1), $11)
+INSERT INTO sessions (id, user_id, member_id, sso_member_id, sso_connection_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, now()), COALESCE($11, 1), $12)
 RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 `
 
 type CreateSessionParams struct {
-	ID             string             `json:"id"`
-	UserID         string             `json:"user_id"`
-	MemberID       pgtype.Text        `json:"member_id"`
-	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
-	TokenHash      []byte             `json:"token_hash"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	Ip             pgtype.Text        `json:"ip"`
-	UserAgent      pgtype.Text        `json:"user_agent"`
-	AuthTime       interface{}        `json:"auth_time"`
-	AssuranceLevel interface{}        `json:"assurance_level"`
-	AuthMethods    []string           `json:"auth_methods"`
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
+	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
+	TokenHash       []byte             `json:"token_hash"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+	AuthTime        interface{}        `json:"auth_time"`
+	AssuranceLevel  interface{}        `json:"assurance_level"`
+	AuthMethods     []string           `json:"auth_methods"`
 }
 
 type CreateSessionRow struct {
@@ -159,6 +160,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 		arg.UserID,
 		arg.MemberID,
 		arg.SsoMemberID,
+		arg.SsoConnectionID,
 		arg.TokenHash,
 		arg.ExpiresAt,
 		arg.Ip,
@@ -209,7 +211,7 @@ func (q *Queries) GetRefreshSessionHint(ctx context.Context, arg GetRefreshSessi
 }
 
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, member_id, sso_member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = $1
+SELECT id, user_id, member_id, sso_member_id, sso_connection_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = $1
 `
 
 type GetSessionParams struct {
@@ -217,20 +219,21 @@ type GetSessionParams struct {
 }
 
 type GetSessionRow struct {
-	ID             string             `json:"id"`
-	UserID         string             `json:"user_id"`
-	MemberID       pgtype.Text        `json:"member_id"`
-	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
-	TokenHash      []byte             `json:"token_hash"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
-	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
-	Ip             pgtype.Text        `json:"ip"`
-	UserAgent      pgtype.Text        `json:"user_agent"`
-	AuthTime       pgtype.Timestamptz `json:"auth_time"`
-	AssuranceLevel int16              `json:"assurance_level"`
-	AuthMethods    []string           `json:"auth_methods"`
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
+	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
+	TokenHash       []byte             `json:"token_hash"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt      pgtype.Timestamptz `json:"last_seen_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	Ip              pgtype.Text        `json:"ip"`
+	UserAgent       pgtype.Text        `json:"user_agent"`
+	AuthTime        pgtype.Timestamptz `json:"auth_time"`
+	AssuranceLevel  int16              `json:"assurance_level"`
+	AuthMethods     []string           `json:"auth_methods"`
 }
 
 func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSessionRow, error) {
@@ -241,6 +244,7 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSess
 		&i.UserID,
 		&i.MemberID,
 		&i.SsoMemberID,
+		&i.SsoConnectionID,
 		&i.TokenHash,
 		&i.CreatedAt,
 		&i.LastSeenAt,
@@ -406,7 +410,7 @@ func (q *Queries) LockRefreshToken(ctx context.Context, arg LockRefreshTokenPara
 }
 
 const lockSessionForRefresh = `-- name: LockSessionForRefresh :one
-SELECT id, user_id, member_id, sso_member_id, expires_at, revoked_at, assurance_level, auth_methods
+SELECT id, user_id, member_id, sso_member_id, sso_connection_id, expires_at, revoked_at, assurance_level, auth_methods
 FROM sessions WHERE id = $1 FOR UPDATE
 `
 
@@ -415,14 +419,15 @@ type LockSessionForRefreshParams struct {
 }
 
 type LockSessionForRefreshRow struct {
-	ID             string             `json:"id"`
-	UserID         string             `json:"user_id"`
-	MemberID       pgtype.Text        `json:"member_id"`
-	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
-	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
-	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
-	AssuranceLevel int16              `json:"assurance_level"`
-	AuthMethods    []string           `json:"auth_methods"`
+	ID              string             `json:"id"`
+	UserID          string             `json:"user_id"`
+	MemberID        pgtype.Text        `json:"member_id"`
+	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
+	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt       pgtype.Timestamptz `json:"revoked_at"`
+	AssuranceLevel  int16              `json:"assurance_level"`
+	AuthMethods     []string           `json:"auth_methods"`
 }
 
 func (q *Queries) LockSessionForRefresh(ctx context.Context, arg LockSessionForRefreshParams) (LockSessionForRefreshRow, error) {
@@ -433,6 +438,7 @@ func (q *Queries) LockSessionForRefresh(ctx context.Context, arg LockSessionForR
 		&i.UserID,
 		&i.MemberID,
 		&i.SsoMemberID,
+		&i.SsoConnectionID,
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.AssuranceLevel,

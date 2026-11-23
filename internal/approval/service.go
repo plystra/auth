@@ -193,11 +193,27 @@ func (s *Service) CreateBusiness(ctx context.Context, applicationKeyID, agentMem
 	return publicRequest(created), nil
 }
 
+type UserSpaceAdmission func(context.Context, *db.Queries, ...string) (bool, error)
+
+type userSpaceAdmissionKey struct{}
+
+func WithUserSpaceAdmission(ctx context.Context, admission UserSpaceAdmission) context.Context {
+	return context.WithValue(ctx, userSpaceAdmissionKey{}, admission)
+}
+
+func allowsUserSpace(ctx context.Context, q *db.Queries, spaces ...string) (bool, error) {
+	if admission, ok := ctx.Value(userSpaceAdmissionKey{}).(UserSpaceAdmission); ok {
+		return admission(ctx, q, spaces...)
+	}
+	return true, nil
+}
+
 func (s *Service) ListForUser(ctx context.Context, userID string) ([]InboxRequest, error) {
 	if s == nil || s.Store == nil {
 		return nil, apierr.New("UNAVAILABLE", "approvals are unavailable")
 	}
-	rows, err := s.Store.Queries().ListPendingApprovalRequestsForUser(ctx, db.ListPendingApprovalRequestsForUserParams{UserID: userID})
+	q := s.Store.Queries()
+	rows, err := q.ListPendingApprovalRequestsForUser(ctx, db.ListPendingApprovalRequestsForUserParams{UserID: userID})
 	if err != nil {
 		return nil, err
 	}
@@ -209,6 +225,13 @@ func (s *Service) ListForUser(ctx context.Context, userID string) ([]InboxReques
 		}
 		if len(chain) < 2 || chain[0].ID != row.ApprovalRequest.AgentMemberID || chain[0].Type != "agent" || chain[len(chain)-1].ID != row.ApprovalRequest.ApproverMemberID || chain[len(chain)-1].Type != "human" {
 			return nil, apierr.New("OWNER_INACTIVE", "the approval owner chain is unavailable")
+		}
+		allowed, err := allowsUserSpace(ctx, q, chain[len(chain)-1].SpaceID, row.ApprovalRequest.ResourceSpaceID)
+		if err != nil {
+			return nil, err
+		}
+		if !allowed {
+			continue
 		}
 		out = append(out, InboxRequest{Request: publicRequest(row.ApprovalRequest), DelegationChain: chain})
 	}
@@ -261,6 +284,13 @@ func (s *Service) Decide(ctx context.Context, userID, approvalID string, approve
 		}
 		if err != nil {
 			return err
+		}
+		allowed, err := allowsUserSpace(ctx, q, owner.SpaceID, row.ResourceSpaceID)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return apierr.New("UNAUTHENTICATED", "the approval requires the configured single sign-on")
 		}
 		if err := s.StepUp.ConsumeStepUpTx(ctx, q); err != nil {
 			return err

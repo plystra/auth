@@ -695,7 +695,7 @@ func (a *API) actorForSpace(ctx context.Context, authorizationHeader, spaceID, p
 }
 
 func (a *API) actorForGovernanceTarget(ctx context.Context, authorizationHeader, approvalID, spaceID, targetMemberID, permission, operation string, request any) (authorization.Member, context.Context, error) {
-	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	claims, err := a.authenticatePrincipalForSpace(ctx, authorizationHeader, spaceID)
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
@@ -775,7 +775,7 @@ func (a *API) actorForNode(ctx context.Context, authorizationHeader, spaceID, gr
 }
 
 func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHeader, spaceID, permission, targetMemberID string, self bool) (authorization.Member, context.Context, error) {
-	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	claims, err := a.authenticatePrincipalForSpace(ctx, authorizationHeader, spaceID)
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
@@ -806,7 +806,7 @@ func (a *API) actorForSpaceTargetWithSelf(ctx context.Context, authorizationHead
 }
 
 func (a *API) resolvePrincipalMember(ctx context.Context, authorizationHeader, spaceID string) (authorization.Member, context.Context, error) {
-	claims, err := a.authenticatePrincipal(ctx, authorizationHeader)
+	claims, err := a.authenticatePrincipalForSpace(ctx, authorizationHeader, spaceID)
 	if err != nil {
 		return authorization.Member{}, ctx, err
 	}
@@ -856,6 +856,10 @@ func (a *API) resolvePrincipalMemberClaims(ctx context.Context, claims security.
 }
 
 func (a *API) authenticatePrincipal(ctx context.Context, authorizationHeader string) (security.Claims, error) {
+	return a.authenticatePrincipalForSpace(ctx, authorizationHeader, "")
+}
+
+func (a *API) authenticatePrincipalForSpace(ctx context.Context, authorizationHeader, spaceID string) (security.Claims, error) {
 	parts := strings.Fields(authorizationHeader)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
 		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A bearer access token is required.")
@@ -863,7 +867,7 @@ func (a *API) authenticatePrincipal(ctx context.Context, authorizationHeader str
 	if a.Sessions == nil {
 		return security.Claims{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
 	}
-	claims, active, err := a.Sessions.Introspect(ctx, parts[1], security.DefaultApplicationAudience)
+	claims, active, err := a.Sessions.IntrospectForSpace(ctx, parts[1], security.DefaultApplicationAudience, spaceID)
 	if err != nil {
 		return security.Claims{}, err
 	}

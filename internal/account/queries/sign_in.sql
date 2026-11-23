@@ -1,20 +1,20 @@
 -- name: CreateSignInAttempt :one
 INSERT INTO sign_in_attempts (
-    id, user_id, email_normalized, ip, user_agent, expires_at
+    id, user_id, email_normalized, ip, user_agent, expires_at, target_space_id
 )
 VALUES (
     sqlc.arg(id), sqlc.narg(user_id), sqlc.arg(email_normalized),
-    sqlc.narg(ip), sqlc.narg(user_agent), sqlc.arg(expires_at)
+    sqlc.narg(ip), sqlc.narg(user_agent), sqlc.arg(expires_at), sqlc.narg(target_space_id)
 )
 RETURNING *;
 
 -- name: CreatePasskeySignInAttempt :one
 INSERT INTO sign_in_attempts (
-    id, user_id, email_normalized, ip, user_agent, expires_at, method, passkey_session
+    id, user_id, email_normalized, ip, user_agent, expires_at, method, passkey_session, target_space_id
 )
 VALUES (
     sqlc.arg(id), sqlc.narg(user_id), sqlc.arg(email_normalized),
-    sqlc.narg(ip), sqlc.narg(user_agent), sqlc.arg(expires_at), 'passkey', sqlc.arg(passkey_session)
+    sqlc.narg(ip), sqlc.narg(user_agent), sqlc.arg(expires_at), 'passkey', sqlc.arg(passkey_session), sqlc.narg(target_space_id)
 )
 RETURNING *;
 
@@ -23,6 +23,9 @@ SELECT *
 FROM sign_in_attempts
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
+
+-- name: GetSignInAttemptUserHint :one
+SELECT user_id FROM sign_in_attempts WHERE id = sqlc.arg(id);
 
 -- name: GetSignInAttemptRateIdentity :one
 SELECT email_normalized

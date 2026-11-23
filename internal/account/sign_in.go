@@ -17,6 +17,7 @@ import (
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/session"
 )
 
 const (
@@ -58,6 +59,7 @@ func (s *Service) BeginPasskeySignIn(ctx context.Context, in LoginInput) (SignIn
 		ID: string(ids.New[ids.SignInAttemptID]("sia")), UserID: userID,
 		EmailNormalized: email, Ip: nullableText(rateIdentity(in.IP)), UserAgent: nullableText(in.UserAgent),
 		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}, PasskeySession: sessionData,
+		TargetSpaceID: nullableText(in.SpaceID),
 	})
 	if err != nil {
 		return SignInChallenge{}, err
@@ -88,7 +90,7 @@ func (s *Service) BeginSignIn(ctx context.Context, in LoginInput) (SignInChallen
 	attempt, err := s.Store.Queries().CreateSignInAttempt(ctx, db.CreateSignInAttemptParams{
 		ID: string(ids.New[ids.SignInAttemptID]("sia")), UserID: userID,
 		EmailNormalized: email, Ip: nullableText(rateIdentity(in.IP)), UserAgent: nullableText(in.UserAgent),
-		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true}, TargetSpaceID: nullableText(in.SpaceID),
 	})
 	if err != nil {
 		return SignInChallenge{}, err
@@ -110,21 +112,22 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 		return AuthResult{}, err
 	}
 
+	settings, err := s.signInSessionSettings(ctx)
+	if err != nil {
+		return AuthResult{}, err
+	}
 	var user db.GetUserByIDRow
-	var userID string
+	var tokens session.Tokens
 	var challengeExpires time.Time
 	var requiresTOTP bool
 	var disposition *apierr.Error
 	var authenticationErr *apierr.Error
-	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		attempt, err := q.LockSignInAttempt(ctx, db.LockSignInAttemptParams{ID: attemptID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
-		}
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		attempt, memberID, err := s.lockLocalSignInAttempt(ctx, q, attemptID)
 		if err != nil {
 			return err
 		}
-		if attempt.Method != "password" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || attempt.PasswordVerifiedAt.Valid {
+		if attempt.Method != "password" || attempt.PasswordVerifiedAt.Valid {
 			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 		}
 		if !attempt.UserID.Valid {
@@ -138,6 +141,9 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 		user, err = q.GetUserByID(ctx, db.GetUserByIDParams{ID: attempt.UserID.String})
 		if err != nil {
 			return err
+		}
+		if user.EmailNormalized != attempt.EmailNormalized {
+			return invalidLocalAttempt()
 		}
 		if !s.Passwords.Verify(password, user.PasswordHash) {
 			_, err = q.IncrementSignInAttemptFailure(ctx, db.IncrementSignInAttemptFailureParams{ID: attemptID, MaxFailures: int32(maxSignInFailures)})
@@ -169,7 +175,6 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 				return err
 			}
 		}
-		userID = user.ID
 		factorCount, err := q.CountTOTPFactors(ctx, db.CountTOTPFactorsParams{UserID: user.ID})
 		if err != nil {
 			return err
@@ -185,7 +190,8 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 			challengeExpires = attempt.ExpiresAt.Time
 			return nil
 		}
-		return q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID})
+		tokens, err = s.finishLocalSignInTx(ctx, q, settings, attemptID, user.ID, memberID, ip, userAgent, 1, []string{"pwd"})
+		return err
 	})
 	if err != nil {
 		return AuthResult{}, err
@@ -198,14 +204,6 @@ func (s *Service) CompleteSignIn(ctx context.Context, attemptID, password string
 	}
 	if requiresTOTP {
 		return AuthResult{User: toPublicUser(user.ID, user.Email, user.EmailVerifiedAt.Valid, user.Status, user.CreatedAt.Time), AttemptID: attemptID, NextStep: "totp", ExpiresAt: &challengeExpires}, nil
-	}
-	memberID, err := s.defaultMemberID(ctx, userID)
-	if err != nil {
-		return AuthResult{}, err
-	}
-	tokens, err := s.Sessions.CreateForMember(ctx, userID, memberID, ip, userAgent, 1)
-	if err != nil {
-		return AuthResult{}, err
 	}
 	return AuthResult{User: toPublicUser(user.ID, user.Email, user.EmailVerifiedAt.Valid, user.Status, user.CreatedAt.Time), Tokens: &tokens}, nil
 }
@@ -221,22 +219,27 @@ func (s *Service) CompleteSignInTOTP(ctx context.Context, attemptID, code string
 	if s.Sessions == nil || s.Sessions.Factors == nil {
 		return AuthResult{}, apierr.New("UNAVAILABLE", "TOTP verification is unavailable")
 	}
+	settings, err := s.signInSessionSettings(ctx)
+	if err != nil {
+		return AuthResult{}, err
+	}
 	var user db.GetUserByIDRow
+	var tokens session.Tokens
 	var authenticationErr *apierr.Error
-	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		attempt, err := q.LockSignInAttempt(ctx, db.LockSignInAttemptParams{ID: attemptID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
-		}
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		attempt, memberID, err := s.lockLocalSignInAttempt(ctx, q, attemptID)
 		if err != nil {
 			return err
 		}
-		if attempt.Method != "password" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || !attempt.PasswordVerifiedAt.Valid || !attempt.UserID.Valid {
+		if attempt.Method != "password" || !attempt.PasswordVerifiedAt.Valid || !attempt.UserID.Valid {
 			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 		}
 		user, err = q.GetUserByID(ctx, db.GetUserByIDParams{ID: attempt.UserID.String})
 		if err != nil {
 			return err
+		}
+		if user.EmailNormalized != attempt.EmailNormalized {
+			return invalidLocalAttempt()
 		}
 		if user.Status != "active" || user.DisabledAt.Valid || user.PasswordResetRequiredAt.Valid {
 			return apierr.New("UNAUTHENTICATED", "this account is not active")
@@ -263,21 +266,14 @@ func (s *Service) CompleteSignInTOTP(ctx context.Context, attemptID, code string
 			}
 			return nil
 		}
-		return q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID})
+		tokens, err = s.finishLocalSignInTx(ctx, q, settings, attemptID, user.ID, memberID, ip, userAgent, 2, []string{"pwd", "otp"})
+		return err
 	})
 	if err != nil {
 		return AuthResult{}, err
 	}
 	if authenticationErr != nil {
 		return AuthResult{}, authenticationErr
-	}
-	memberID, err := s.defaultMemberID(ctx, user.ID)
-	if err != nil {
-		return AuthResult{}, err
-	}
-	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, user.ID, memberID, ip, userAgent, 2, []string{"pwd", "otp"})
-	if err != nil {
-		return AuthResult{}, err
 	}
 	return AuthResult{User: toPublicUser(user.ID, user.Email, user.EmailVerifiedAt.Valid, user.Status, user.CreatedAt.Time), Tokens: &tokens}, nil
 }
@@ -293,17 +289,19 @@ func (s *Service) CompletePasskeySignIn(ctx context.Context, attemptID string, r
 	if s.Sessions == nil || s.Sessions.Factors == nil {
 		return AuthResult{}, apierr.New("UNAVAILABLE", "passkey sign-in is unavailable")
 	}
+	settings, err := s.signInSessionSettings(ctx)
+	if err != nil {
+		return AuthResult{}, err
+	}
 	var user db.GetUserByIDRow
+	var tokens session.Tokens
 	var authenticationErr *apierr.Error
-	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		attempt, err := q.LockSignInAttempt(ctx, db.LockSignInAttemptParams{ID: attemptID})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
-		}
+	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		attempt, memberID, err := s.lockLocalSignInAttempt(ctx, q, attemptID)
 		if err != nil {
 			return err
 		}
-		if attempt.Method != "passkey" || !attempt.ExpiresAt.Time.After(time.Now().UTC()) || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid {
+		if attempt.Method != "passkey" {
 			return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 		}
 		if !attempt.UserID.Valid {
@@ -319,6 +317,9 @@ func (s *Service) CompletePasskeySignIn(ctx context.Context, attemptID string, r
 		user, err = q.GetUserByID(ctx, db.GetUserByIDParams{ID: attempt.UserID.String})
 		if err != nil {
 			return err
+		}
+		if user.EmailNormalized != attempt.EmailNormalized {
+			return invalidLocalAttempt()
 		}
 		if user.Status != "active" || user.DisabledAt.Valid || user.PasswordResetRequiredAt.Valid {
 			if _, err := q.IncrementSignInAttemptFailure(ctx, db.IncrementSignInAttemptFailureParams{ID: attemptID, MaxFailures: int32(maxSignInFailures)}); err != nil {
@@ -350,7 +351,8 @@ func (s *Service) CompletePasskeySignIn(ctx context.Context, attemptID string, r
 		if err != nil {
 			return err
 		}
-		if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
+		tokens, err = s.finishLocalSignInTx(ctx, q, settings, attemptID, user.ID, memberID, ip, userAgent, 2, []string{"webauthn"})
+		if err != nil {
 			return err
 		}
 		return audit.Write(ctx, q, "user", user.ID, "factor.passkey.sign_in", user.ID, "success")
@@ -361,15 +363,79 @@ func (s *Service) CompletePasskeySignIn(ctx context.Context, attemptID string, r
 	if authenticationErr != nil {
 		return AuthResult{}, authenticationErr
 	}
-	memberID, err := s.defaultMemberID(ctx, user.ID)
-	if err != nil {
-		return AuthResult{}, err
-	}
-	tokens, err := s.Sessions.CreateForMemberWithMethods(ctx, user.ID, memberID, ip, userAgent, 2, []string{"webauthn"})
-	if err != nil {
-		return AuthResult{}, err
-	}
 	return AuthResult{User: toPublicUser(user.ID, user.Email, user.EmailVerifiedAt.Valid, user.Status, user.CreatedAt.Time), Tokens: &tokens}, nil
+}
+
+func (s *Service) lockLocalSignInAttempt(ctx context.Context, q *db.Queries, id string) (db.SignInAttempt, string, error) {
+	userID, err := q.GetSignInAttemptUserHint(ctx, db.GetSignInAttemptUserHintParams{ID: id})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.SignInAttempt{}, "", invalidLocalAttempt()
+	}
+	if err != nil {
+		return db.SignInAttempt{}, "", err
+	}
+	if userID.Valid {
+		if _, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: userID.String}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = invalidLocalAttempt()
+			}
+			return db.SignInAttempt{}, "", err
+		}
+	}
+	attempt, err := q.LockSignInAttempt(ctx, db.LockSignInAttemptParams{ID: id})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.SignInAttempt{}, "", invalidLocalAttempt()
+	}
+	if err != nil {
+		return db.SignInAttempt{}, "", err
+	}
+	if attempt.UserID != userID || attempt.ConsumedAt.Valid || attempt.LockedAt.Valid || !attempt.ExpiresAt.Time.After(time.Now().UTC()) {
+		return db.SignInAttempt{}, "", invalidLocalAttempt()
+	}
+	memberID := ""
+	if userID.Valid {
+		memberID, err = s.defaultMemberIDTx(ctx, q, userID.String, attempt.TargetSpaceID.String)
+		if err != nil {
+			return db.SignInAttempt{}, "", err
+		}
+	}
+	// Acquire the member before the domain lock, as policy changes lock the
+	// acting member first. Independent members can authenticate concurrently.
+	if memberID != "" {
+		if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: memberID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				err = invalidLocalAttempt()
+			}
+			return db.SignInAttempt{}, "", err
+		}
+	}
+	if s.SignInPolicy != nil {
+		if err := s.SignInPolicy.CheckLocalSignInTx(ctx, q, attempt.EmailNormalized, attempt.TargetSpaceID.String); err != nil {
+			return db.SignInAttempt{}, "", err
+		}
+	}
+	if !attempt.ExpiresAt.Time.After(time.Now().UTC()) {
+		return db.SignInAttempt{}, "", invalidLocalAttempt()
+	}
+	return attempt, memberID, nil
+}
+
+func (s *Service) signInSessionSettings(ctx context.Context) (session.Settings, error) {
+	if s.Sessions == nil || s.Sessions.Settings == nil {
+		return session.Settings{}, apierr.New("UNAVAILABLE", "session issuance is unavailable")
+	}
+	return s.Sessions.Settings(ctx)
+}
+
+func (s *Service) finishLocalSignInTx(ctx context.Context, q *db.Queries, settings session.Settings, attemptID, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (session.Tokens, error) {
+	if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
+		return session.Tokens{}, err
+	}
+	return s.Sessions.CreateForMemberWithMethodsTx(ctx, q, settings, userID, memberID, ip, userAgent, assurance, methods)
+}
+
+func invalidLocalAttempt() error {
+	return apierr.New("invalid_grant", "sign-in attempt is invalid or expired")
 }
 
 func (s *Service) allowSignInAttemptRateLimits(ctx context.Context, attemptID string, ip net.IP) error {

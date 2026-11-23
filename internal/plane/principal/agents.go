@@ -165,6 +165,9 @@ func (a *API) replaceAgentGrants(ctx context.Context, in *agentGrantInput) (*aut
 	if err != nil {
 		return nil, err
 	}
+	if _, err := a.authenticatePrincipalForSpace(ctx, in.Authorization, target.SpaceID); err != nil {
+		return nil, err
+	}
 	ctx = authorization.WithHumanActor(ctx, actorID, userID)
 	var grant authorization.Grant
 	if in.Body.AnchorGroupID != "" || in.Body.Scope == "group" || in.Body.Scope == "group_tree" {
@@ -254,6 +257,9 @@ func (a *API) currentMember(ctx context.Context, authorizationHeader string) (st
 		}
 		ctx = authorization.WithHumanActor(ctx, member.ID, claims.Subject)
 		return member.ID, claims.Subject, authorization.WithTokenScopes(ctx, member.ID, claims.Scopes), nil
+	}
+	if _, err := a.authenticatePrincipalForSpace(ctx, authorizationHeader, spaceID); err != nil {
+		return "", "", ctx, err
 	}
 	member, err := a.Authorization.GetMemberForUser(ctx, claims.Subject, spaceID)
 	if err != nil {

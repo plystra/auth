@@ -1948,3 +1948,16 @@ ALTER TABLE sessions ADD CONSTRAINT sessions_sso_member_context CHECK (
 
 CREATE INDEX sessions_sso_binding_idx ON sessions(user_id, sso_member_id)
 WHERE sso_member_id IS NOT NULL;
+
+
+ALTER TABLE sign_in_attempts ADD COLUMN target_space_id text;
+
+-- Outstanding attempts did not preserve the requested Space.
+UPDATE sign_in_attempts SET consumed_at = now()
+WHERE consumed_at IS NULL AND expires_at > now();
+
+
+ALTER TABLE sessions
+    ADD COLUMN sso_connection_id text REFERENCES sso_connections(id),
+    ADD CONSTRAINT sessions_sso_connection_requires_member
+        CHECK (sso_connection_id IS NULL OR sso_member_id IS NOT NULL);

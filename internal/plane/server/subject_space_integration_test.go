@@ -13,9 +13,73 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 )
+
+func TestAuthorizationHTTPChecksRequiredSSOForUnboundUserTokens(t *testing.T) {
+	ctx := t.Context()
+	st, authz, actor, spaceID, key, sessions := newServerFixture(t)
+	if _, err := st.Pool.Exec(ctx, `
+		INSERT INTO authorization_grants (id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by)
+		VALUES ('grt_server_sso_manage', $1, '["auth.connections:manage", "self:read"]'::jsonb, $2, 'space', $1, $2);
+	`, spaceID, actor.ID); err != nil {
+		t.Fatal(err)
+	}
+	user, err := sessions.Create(ctx, "usr_server_actor", nil, "test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sessions.VerifyAccess(user.AccessToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims.Audience = "server-test-client"
+	token, err := sessions.Signer.Sign(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authz, DataKey: secret.New(strings.Repeat("d", 32))}
+	sessions.SpaceSignInPolicy = enterpriseSvc
+	admin := authorization.WithHumanActor(ctx, actor.ID, "usr_server_actor")
+	connection, err := enterpriseSvc.CreateConnection(admin, actor.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Authorization SSO", Provider: "oidc", Issuer: "https://idp.example.test", ClientID: "authz",
+		ClientSecret: "test-secret", RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := enterpriseSvc.CreateDomain(admin, actor.ID, spaceID,
+		enterprise.DomainInput{Domain: "example.test", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applications := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}
+	mux := http.NewServeMux()
+	(&API{Applications: applications, Authorization: authz, Sessions: sessions}).Register(humago.New(mux, route.HumaConfig("Space admission", "1.0.0")))
+	handler := route.Middleware(route.Server, mux)
+	body := CheckBody{Subject: CheckSubject{Token: token}, Action: "self:read",
+		Resource: CheckResource{SpaceID: spaceID, Type: "member", ID: actor.ID, OwnerMemberID: actor.ID}}
+	if result := groupInstallationHTTP(t, handler, key, http.MethodPost, "/server/v1/authz/check", body); result.Code != http.StatusOK || !strings.Contains(result.Body.String(), `"decision":"allow"`) {
+		t.Fatalf("before verification an unbound session may use its active membership, got %d", result.Code)
+	}
+	enterpriseSvc.DNSResolver = serverDNSVerification{domain.VerificationToken}
+	if err := enterpriseSvc.VerifyDomain(admin, actor.ID, spaceID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	if result := groupInstallationHTTP(t, handler, key, http.MethodPost, "/server/v1/authz/check", body); result.Code != http.StatusUnauthorized || !strings.Contains(result.Body.String(), `"code":"UNAUTHENTICATED"`) {
+		t.Fatalf("after verification an unbound session must fail admission, got %d", result.Code)
+	}
+}
+
+type serverDNSVerification struct{ token string }
+
+func (r serverDNSVerification) LookupTXT(context.Context, string) ([]string, error) {
+	return []string{r.token}, nil
+}
 
 func TestAuthorizationHTTPDefaultsResourceToSubjectSpace(t *testing.T) {
 	ctx := context.Background()

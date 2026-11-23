@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
+	"github.com/go-webauthn/webauthn/webauthn"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/approval"
 	"github.com/plystra/auth/internal/authorization"
@@ -375,15 +377,140 @@ func TestForcedSSODomainRoutesSignInToConfiguredConnection(t *testing.T) {
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO spaces (id, name, slug, parent_id) VALUES ($1, 'Forced SSO Child', 'forced-sso-child', $2)`, childID, spaceID); err != nil {
 		t.Fatal(err)
 	}
-	api := &API{Enterprise: service}
+	api := &API{Enterprise: service, Accounts: &account.Service{Store: st}}
 	mux := http.NewServeMux()
 	api.Register(humago.New(mux, route.HumaConfig("SSO routing integration test", "1.0.0")))
 	handler := route.Middleware(route.Principal, mux)
-	req := httptest.NewRequest(http.MethodPost, "/v1/auth/sign-in", strings.NewReader(`{"email":"user@acme.example","space_id":"`+childID+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, req)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"next_step":"sso"`) || !strings.Contains(response.Body.String(), connection.ID) {
-		t.Fatalf("forced SSO sign-in routing = %d %s", response.Code, response.Body.String())
+	if _, err := st.Pool.Exec(ctx, `UPDATE users SET email='employee@acme.example', email_normalized='employee@acme.example' WHERE id='usr_principal_actor'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"password", "passkey"} {
+		for _, email := range []string{"employee@acme.example", "unknown@acme.example"} {
+			t.Run(method+"/"+email, func(t *testing.T) {
+				body, err := json.Marshal(map[string]string{"email": email, "method": method, "space_id": childID})
+				if err != nil {
+					t.Fatal(err)
+				}
+				req := httptest.NewRequest(http.MethodPost, "/v1/auth/sign-in", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				response := httptest.NewRecorder()
+				handler.ServeHTTP(response, req)
+				var result SignInStartOutput
+				if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &result.Body) != nil ||
+					result.Body.Data.NextStep != "sso" || result.Body.Data.SSOConnectionID != connection.ID ||
+					result.Body.Data.AttemptID != "" || result.Body.Data.PasskeyOptions != nil {
+					t.Fatalf("forced SSO sign-in routing returned HTTP %d without the required SSO route", response.Code)
+				}
+			})
+		}
+	}
+	if err := service.DisableConnection(requestCtx, owner.ID, spaceID, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{spaceID, childID} {
+		_, err := service.ForcedConnectionForEmail(ctx, "employee@acme.example", target)
+		if err == nil {
+			t.Fatal("a verified forcing policy with a disabled connection allowed local sign-in")
+		}
+	}
+}
+
+func TestForcedSSODomainRejectsOutstandingAuthenticatorAttempts(t *testing.T) {
+	ctx := t.Context()
+	st, authz, owner, spaceID, sessions, _ := newPrincipalFixture(t)
+	const userID, email, password = "usr_principal_actor", "principal-actor@example.test", "fixture-only-password"
+	web, err := webauthn.New(&webauthn.Config{RPID: "auth.test", RPDisplayName: "Plystra Auth", RPOrigins: []string{"https://auth.test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataKey := secret.New(strings.Repeat("d", 32))
+	sessions.Factors = &factor.Service{Store: st, DataKey: dataKey, StepUp: sessions, WebAuthn: web}
+	enterpriseSvc := &enterprise.Service{Store: st, Authorization: authz, DataKey: dataKey}
+	passwords := security.DefaultPasswordHasher()
+	hash, err := passwords.Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, "UPDATE users SET password_hash = $1 WHERE id = $2", hash, userID); err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := sessions.Factors.BeginTOTP(ctx, userID, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &API{Enterprise: enterpriseSvc, Accounts: &account.Service{
+		Store: st, Authorization: authz, Sessions: sessions, Passwords: passwords, SignInPolicy: enterpriseSvc,
+	}}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("Local authenticator attempts", "1.0.0")))
+	handler := route.Middleware(route.Principal, mux)
+	post := func(path string, payload any) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, req)
+		return response
+	}
+	start := func(method string) account.SignInChallenge {
+		t.Helper()
+		response := post("/v1/auth/sign-in", map[string]string{"email": email, "method": method, "space_id": spaceID})
+		var challenge SignInStartOutput
+		if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &challenge.Body) != nil || challenge.Body.Data.AttemptID == "" {
+			t.Fatalf("could not start %s authentication before enforcement: HTTP %d", method, response.Code)
+		}
+		return challenge.Body.Data
+	}
+	pwd := start("password")
+	passkey := start("passkey")
+	if response := post("/v1/auth/sign-in/"+pwd.AttemptID, map[string]string{"password": password}); response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), `"next_step":"totp"`) {
+		t.Fatalf("could not reach TOTP before enforcement: HTTP %d", response.Code)
+	}
+	admin := authorization.WithHumanActor(ctx, owner.ID, userID)
+	connection, err := enterpriseSvc.CreateConnection(admin, owner.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Workforce OIDC", Provider: "oidc", Issuer: "https://idp.example.test", ClientID: "test",
+		ClientSecret: "test-secret", RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := enterpriseSvc.CreateDomain(admin, owner.ID, spaceID,
+		enterprise.DomainInput{Domain: "example.test", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enterpriseSvc.DNSResolver = principalTXTResolver{values: []string{domain.VerificationToken}}
+	if err := enterpriseSvc.VerifyDomain(admin, owner.ID, spaceID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range []struct {
+		id      string
+		payload map[string]any
+	}{
+		{pwd.AttemptID, map[string]any{"mfa_code": code}},
+		{passkey.AttemptID, map[string]any{"credential": json.RawMessage(`{}`)}},
+	} {
+		response := post("/v1/auth/sign-in/"+attempt.id, attempt.payload)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"invalid_grant"`) {
+			t.Fatalf("local authenticator completion returned HTTP %d after the force-SSO policy changed", response.Code)
+		}
+	}
+	var sessionsIssued, attemptsConsumed int
+	if err := st.Pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM sessions WHERE user_id = $1),
+		(SELECT count(*) FROM sign_in_attempts WHERE id IN ($2, $3) AND consumed_at IS NOT NULL)`,
+		userID, pwd.AttemptID, passkey.AttemptID).Scan(&sessionsIssued, &attemptsConsumed); err != nil {
+		t.Fatal(err)
+	}
+	if sessionsIssued != 0 || attemptsConsumed != 0 {
+		t.Fatal("denied authenticator completions changed session or challenge state")
 	}
 }

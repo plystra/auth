@@ -169,12 +169,12 @@ WITH RECURSIVE ancestors AS (
 SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
     c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
 FROM sso_domains d
-JOIN sso_connections c ON c.id = d.connection_id
+LEFT JOIN sso_connections c ON c.id = d.connection_id
 JOIN ancestors ON ancestors.id = d.space_id
 WHERE d.domain = $1
   AND d.status = 'verified'
   AND d.force_sso = true
-  AND (ancestors.depth = 0 OR (d.covers_subtree AND c.covers_subtree))
+  AND (ancestors.depth = 0 OR (d.covers_subtree AND (c.covers_subtree OR c.id IS NULL)))
 ORDER BY ancestors.depth ASC, d.id ASC
 LIMIT 1
 `
@@ -192,9 +192,9 @@ type GetForcedSSOForEmailDomainInSpaceRow struct {
 	ForceSso                   bool        `json:"force_sso"`
 	CoversSubtree              bool        `json:"covers_subtree"`
 	Status                     string      `json:"status"`
-	SsoConnectionID            string      `json:"sso_connection_id"`
-	SsoConnectionStatus        string      `json:"sso_connection_status"`
-	SsoConnectionCoversSubtree bool        `json:"sso_connection_covers_subtree"`
+	SsoConnectionID            pgtype.Text `json:"sso_connection_id"`
+	SsoConnectionStatus        pgtype.Text `json:"sso_connection_status"`
+	SsoConnectionCoversSubtree pgtype.Bool `json:"sso_connection_covers_subtree"`
 }
 
 func (q *Queries) GetForcedSSOForEmailDomainInSpace(ctx context.Context, arg GetForcedSSOForEmailDomainInSpaceParams) (GetForcedSSOForEmailDomainInSpaceRow, error) {
@@ -310,6 +310,32 @@ func (q *Queries) ListSSODomains(ctx context.Context, arg ListSSODomainsParams) 
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockForcedSSODomainForChange = `-- name: LockForcedSSODomainForChange :exec
+SELECT pg_advisory_xact_lock(hashtextextended($1::text, 723615832002))
+`
+
+type LockForcedSSODomainForChangeParams struct {
+	Domain string `json:"domain"`
+}
+
+func (q *Queries) LockForcedSSODomainForChange(ctx context.Context, arg LockForcedSSODomainForChangeParams) error {
+	_, err := q.db.Exec(ctx, lockForcedSSODomainForChange, arg.Domain)
+	return err
+}
+
+const lockForcedSSODomainForLogin = `-- name: LockForcedSSODomainForLogin :exec
+SELECT pg_advisory_xact_lock_shared(hashtextextended($1::text, 723615832002))
+`
+
+type LockForcedSSODomainForLoginParams struct {
+	Domain string `json:"domain"`
+}
+
+func (q *Queries) LockForcedSSODomainForLogin(ctx context.Context, arg LockForcedSSODomainForLoginParams) error {
+	_, err := q.db.Exec(ctx, lockForcedSSODomainForLogin, arg.Domain)
+	return err
 }
 
 const lockSSODomain = `-- name: LockSSODomain :one

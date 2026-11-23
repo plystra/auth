@@ -27,11 +27,17 @@ import (
 
 type Settings struct{ AccessTTL, RefreshTTL, RefreshIdleTTL time.Duration }
 type Service struct {
-	Store    *store.Store
-	Signer   *security.Signer
-	Factors  *factor.Service
-	HMACKeys [][]byte
-	Settings func(context.Context) (Settings, error)
+	Store             *store.Store
+	Signer            *security.Signer
+	Factors           *factor.Service
+	HMACKeys          [][]byte
+	Settings          func(context.Context) (Settings, error)
+	SpaceSignInPolicy SpaceSignInPolicy
+}
+
+type SpaceSignInPolicy interface {
+	AllowsSpaceSession(context.Context, *db.Queries, string, string, string) (bool, error)
+	AllowsSpaceSessionTx(context.Context, *db.Queries, string, string, string) (bool, error)
 }
 type Tokens struct {
 	AccessToken  string `json:"access_token"`
@@ -109,6 +115,18 @@ func (s *Service) CreateForMemberWithMethods(ctx context.Context, userID, member
 // CreateForMemberWithMethodsTx signs and persists the session in the caller's transaction.
 // Read the settings before opening the transaction and return the tokens only after commit.
 func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (Tokens, error) {
+	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, ip, userAgent, assurance, methods, "")
+}
+
+// CreateForSSOTx records the verified provider connection on a new enterprise session.
+func (s *Service) CreateForSSOTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID, connectionID, provider string) (Tokens, error) {
+	if connectionID == "" || (provider != "oidc" && provider != "saml") {
+		return Tokens{}, errors.New("invalid enterprise session origin")
+	}
+	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, nil, "", 1, []string{provider}, connectionID)
+}
+
+func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string, ssoConnectionID string) (Tokens, error) {
 	if assurance < 1 || assurance > 3 || len(methods) == 0 {
 		return Tokens{}, errors.New("invalid session authentication methods or assurance")
 	}
@@ -132,7 +150,7 @@ func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	rid := ids.New[ids.RefreshTokenID]("rft")
 	now := time.Now().UTC()
 	exp := now.Add(st.RefreshTTL)
-	active, err := activeUser(ctx, q, userID)
+	user, active, err := activeSessionUser(ctx, q, userID)
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -142,6 +160,9 @@ func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	var persistedMember pgtype.Text
 	spaceID := ""
 	if memberID != "" {
+		if _, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: memberID}); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return Tokens{}, err
+		}
 		var permitted bool
 		spaceID, permitted, err = boundMemberSpace(ctx, q, userID, memberID, now)
 		if err != nil {
@@ -149,6 +170,9 @@ func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 		}
 		if !permitted {
 			return Tokens{}, apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
+		}
+		if err := s.requireSpaceSessionTx(ctx, q, user.EmailNormalized, spaceID, ssoConnectionID); err != nil {
+			return Tokens{}, err
 		}
 		persistedMember = pgtype.Text{String: memberID, Valid: true}
 	}
@@ -162,7 +186,8 @@ func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	refreshHash := s.hashToken(refresh)
 	row, err := q.CreateSession(ctx, db.CreateSessionParams{
 		ID: string(sid), UserID: userID, MemberID: persistedMember, SsoMemberID: ssoMember,
-		TokenHash: refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
+		SsoConnectionID: nullable(ssoConnectionID),
+		TokenHash:       refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
 		AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods,
 	})
 	if err != nil {
@@ -259,7 +284,7 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 			rejected = true
 			return nil
 		}
-		active, err := activeUser(ctx, q, sess.UserID)
+		user, active, err := activeSessionUser(ctx, q, sess.UserID)
 		if err != nil {
 			return err
 		}
@@ -271,6 +296,9 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 		if err != nil {
 			return err
 		}
+		if err := s.requireSpaceSessionTx(ctx, q, user.EmailNormalized, spaceID, sess.SsoConnectionID.String); err != nil {
+			return err
+		}
 		if requestedMemberID != "" && requestedMemberID != memberID {
 			var permitted bool
 			spaceID, permitted, err = boundMemberSpace(ctx, q, sess.UserID, requestedMemberID, now)
@@ -279,6 +307,9 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 			}
 			if !permitted {
 				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
+			}
+			if err := s.requireSpaceSessionTx(ctx, q, user.EmailNormalized, spaceID, sess.SsoConnectionID.String); err != nil {
+				return err
 			}
 			memberID = requestedMemberID
 		}
@@ -332,6 +363,20 @@ func invalidRefreshOnMissing(err error) error {
 		return apierr.New("invalid_grant", "refresh token is invalid")
 	}
 	return err
+}
+
+func (s *Service) requireSpaceSessionTx(ctx context.Context, q *db.Queries, email, spaceID, ssoConnectionID string) error {
+	if s.SpaceSignInPolicy == nil || spaceID == "" {
+		return nil
+	}
+	allowed, err := s.SpaceSignInPolicy.AllowsSpaceSessionTx(ctx, q, email, spaceID, ssoConnectionID)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return apierr.New("PERMISSION_DENIED", "the Space requires its configured single sign-on")
+	}
+	return nil
 }
 
 func refreshBindingSpace(ctx context.Context, q *db.Queries, userID, memberID, ssoMemberID string, now time.Time) (string, error) {
@@ -587,9 +632,19 @@ func (s *Service) Introspect(ctx context.Context, token, audience string) (secur
 	return s.IntrospectTx(ctx, s.Store.Queries(), token, audience)
 }
 
+func (s *Service) IntrospectForSpace(ctx context.Context, token, audience, targetSpaceID string) (security.Claims, bool, error) {
+	return s.IntrospectForSpaceTx(ctx, s.Store.Queries(), token, audience, targetSpaceID)
+}
+
 // IntrospectTx reads live identity through the supplied queries. Mutations must
 // first lock the relevant member/owner chains to stabilize status and epochs.
 func (s *Service) IntrospectTx(ctx context.Context, q *db.Queries, token, audience string) (security.Claims, bool, error) {
+	return s.IntrospectForSpaceTx(ctx, q, token, audience)
+}
+
+// IntrospectForSpaceTx also checks user session admission to the resource Space,
+// including when a user has no selected member or acts across a Space hierarchy.
+func (s *Service) IntrospectForSpaceTx(ctx context.Context, q *db.Queries, token, audience string, targetSpaceIDs ...string) (security.Claims, bool, error) {
 	claims, err := s.Signer.Verify(token, time.Now().UTC(), audience)
 	if err != nil || (claims.Type != "user" && claims.Type != "access" && claims.Type != "agent") {
 		return security.Claims{}, false, nil
@@ -640,18 +695,30 @@ func (s *Service) IntrospectTx(ctx context.Context, q *db.Queries, token, audien
 	} else if claims.SpaceID != "" {
 		return security.Claims{}, false, nil
 	}
+	if s.SpaceSignInPolicy != nil {
+		spaces := append([]string{claims.SpaceID}, targetSpaceIDs...)
+		for i, spaceID := range spaces {
+			if spaceID == "" || slices.Contains(spaces[:i], spaceID) {
+				continue
+			}
+			allowed, err := s.SpaceSignInPolicy.AllowsSpaceSession(ctx, q, user.EmailNormalized, spaceID, sess.SsoConnectionID.String)
+			if err != nil || !allowed {
+				return security.Claims{}, false, err
+			}
+		}
+	}
 	return claims, true, nil
 }
 
-func activeUser(ctx context.Context, q *db.Queries, userID string) (bool, error) {
+func activeSessionUser(ctx context.Context, q *db.Queries, userID string) (db.GetUserByIDRow, bool, error) {
 	user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: userID})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return false, nil
+		return db.GetUserByIDRow{}, false, nil
 	}
 	if err != nil {
-		return false, err
+		return db.GetUserByIDRow{}, false, err
 	}
-	return user.Status == "active" && !user.DisabledAt.Valid, nil
+	return user, user.Status == "active" && !user.DisabledAt.Valid, nil
 }
 
 func boundMemberSpace(ctx context.Context, q *db.Queries, userID, memberID string, now time.Time) (string, bool, error) {

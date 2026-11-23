@@ -588,6 +588,7 @@ type Session struct {
 	AuthMethods     []string           `json:"auth_methods"`
 	StepUpMethod    pgtype.Text        `json:"step_up_method"`
 	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
+	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
 }
 
 type SignInAttempt struct {
@@ -604,6 +605,7 @@ type SignInAttempt struct {
 	PasswordVerifiedAt pgtype.Timestamptz `json:"password_verified_at"`
 	Method             string             `json:"method"`
 	PasskeySession     []byte             `json:"passkey_session"`
+	TargetSpaceID      pgtype.Text        `json:"target_space_id"`
 }
 
 type Space struct {

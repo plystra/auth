@@ -565,6 +565,9 @@ func (s *Service) VerifyDomain(ctx context.Context, actorMemberID, spaceID, doma
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
 		}
+		if err := q.LockForcedSSODomainForChange(ctx, db.LockForcedSSODomainForChangeParams{Domain: locked.Domain}); err != nil {
+			return err
+		}
 		if err := q.VerifySSODomain(ctx, db.VerifySSODomainParams{ID: row.ID}); err != nil {
 			return err
 		}
@@ -595,6 +598,9 @@ func (s *Service) DisableDomain(ctx context.Context, actorMemberID, spaceID, dom
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
 		}
+		if err := q.LockForcedSSODomainForChange(ctx, db.LockForcedSSODomainForChangeParams{Domain: row.Domain}); err != nil {
+			return err
+		}
 		if err := q.DisableSSODomain(ctx, db.DisableSSODomainParams{ID: row.ID}); err != nil {
 			return err
 		}
@@ -612,16 +618,76 @@ func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string, ta
 	if err != nil {
 		return "", nil
 	}
-	if len(targetSpaceID) > 0 && strings.TrimSpace(targetSpaceID[0]) != "" {
-		active, err := s.Store.Queries().AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: strings.TrimSpace(targetSpaceID[0])})
+	spaceID := ""
+	if len(targetSpaceID) > 0 {
+		spaceID = strings.TrimSpace(targetSpaceID[0])
+	}
+	return forcedConnectionForDomain(ctx, s.Store.Queries(), domain, spaceID)
+}
+
+func (s *Service) CheckLocalSignInTx(ctx context.Context, q *db.Queries, email, spaceID string) error {
+	_, domain, err := splitEmailDomain(email)
+	if err != nil {
+		return nil
+	}
+	// Shared locks let logins proceed concurrently. A verification or disable
+	// serializes with the entire authentication and issuance transaction.
+	if err := q.LockForcedSSODomainForLogin(ctx, db.LockForcedSSODomainForLoginParams{Domain: domain}); err != nil {
+		return err
+	}
+	connection, err := forcedConnectionForDomain(ctx, q, domain, spaceID)
+	if err != nil {
+		return err
+	}
+	if connection != "" {
+		return apierr.New("invalid_grant", "single sign-on is required; restart sign-in")
+	}
+	return nil
+}
+
+func (s *Service) AllowsSpaceSession(ctx context.Context, q *db.Queries, email, spaceID, signedInConnectionID string) (bool, error) {
+	return allowsSpaceSession(ctx, q, email, spaceID, signedInConnectionID, false)
+}
+
+func (s *Service) AllowsSpaceSessionTx(ctx context.Context, q *db.Queries, email, spaceID, signedInConnectionID string) (bool, error) {
+	return allowsSpaceSession(ctx, q, email, spaceID, signedInConnectionID, true)
+}
+
+func allowsSpaceSession(ctx context.Context, q *db.Queries, email, spaceID, signedInConnectionID string, lock bool) (bool, error) {
+	if spaceID == "" {
+		return true, nil
+	}
+	_, domain, err := splitEmailDomain(email)
+	if err != nil {
+		return true, nil
+	}
+	if lock {
+		if err := q.LockForcedSSODomainForLogin(ctx, db.LockForcedSSODomainForLoginParams{Domain: domain}); err != nil {
+			return false, err
+		}
+	}
+	required, err := forcedConnectionForDomain(ctx, q, domain, spaceID)
+	if err != nil {
+		var unavailable *apierr.Error
+		if errors.As(err, &unavailable) && unavailable.Code == "temporarily_unavailable" {
+			return false, nil
+		}
+		return false, err
+	}
+	return required == "" || required == signedInConnectionID, nil
+}
+
+func forcedConnectionForDomain(ctx context.Context, q *db.Queries, domain, spaceID string) (string, error) {
+	if spaceID != "" {
+		active, err := q.AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: spaceID})
 		if err != nil {
 			return "", err
 		}
 		if !active {
 			return "", apierr.New("temporarily_unavailable", "the target Space or one of its ancestors is unavailable")
 		}
-		row, err := s.Store.Queries().GetForcedSSOForEmailDomainInSpace(ctx, db.GetForcedSSOForEmailDomainInSpaceParams{
-			Domain: domain, SpaceID: strings.TrimSpace(targetSpaceID[0]),
+		row, err := q.GetForcedSSOForEmailDomainInSpace(ctx, db.GetForcedSSOForEmailDomainInSpaceParams{
+			Domain: domain, SpaceID: spaceID,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", nil
@@ -629,23 +695,23 @@ func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string, ta
 		if err != nil {
 			return "", err
 		}
-		if row.SsoConnectionStatus != "active" || row.SsoConnectionID == "" {
+		if row.SsoConnectionStatus.String != "active" || !row.SsoConnectionID.Valid {
 			return "", apierr.New("temporarily_unavailable", "the configured SSO connection is unavailable")
 		}
-		return row.SsoConnectionID, nil
+		return row.SsoConnectionID.String, nil
 	}
-	row, err := s.Store.Queries().GetForcedSSOForEmailDomain(ctx, db.GetForcedSSOForEmailDomainParams{Domain: domain})
+	row, err := q.GetForcedSSOForEmailDomain(ctx, db.GetForcedSSOForEmailDomainParams{Domain: domain})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
 	if err != nil {
 		return "", err
 	}
-	space, err := s.Store.Queries().GetSpace(ctx, db.GetSpaceParams{ID: row.SpaceID})
+	active, err := q.AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: row.SpaceID})
 	if err != nil {
 		return "", err
 	}
-	if space.Status != "active" {
+	if !active {
 		return "", apierr.New("temporarily_unavailable", "the configured Space is unavailable")
 	}
 	if !row.SsoConnectionID.Valid || !row.SsoConnectionStatus.Valid || row.SsoConnectionStatus.String != "active" {
@@ -1159,7 +1225,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if err != nil {
 			return err
 		}
-		tokens, err = s.Sessions.CreateForMemberWithMethodsTx(ctx, q, sessionSettings, userID, memberID, nil, "", 1, []string{connection.Provider})
+		tokens, err = s.Sessions.CreateForSSOTx(ctx, q, sessionSettings, userID, memberID, connection.ID, connection.Provider)
 		if err != nil {
 			return err
 		}

@@ -440,7 +440,7 @@ func (a *API) resolveSubjectWithQueries(ctx context.Context, q *db.Queries, key 
 		if a.Sessions == nil {
 			return resolvedSubject{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
 		}
-		claims, active, err := a.Sessions.IntrospectTx(ctx, q, subject.Token, key.ClientID)
+		claims, active, err := a.Sessions.IntrospectForSpaceTx(ctx, q, subject.Token, key.ClientID, spaceID)
 		if err != nil {
 			return resolvedSubject{}, err
 		}

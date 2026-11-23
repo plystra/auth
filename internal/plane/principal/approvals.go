@@ -2,11 +2,14 @@ package principal
 
 import (
 	"context"
+	"strings"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/approval"
+	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/security"
 )
 
 type listApprovalsInput struct {
@@ -47,6 +50,7 @@ func (a *API) listApprovals(ctx context.Context, in *listApprovalsInput) (*appro
 	if claims.Type != "user" {
 		return nil, apierr.New("USER_ACCOUNT_REQUIRED", "approval requires a user account")
 	}
+	ctx = approval.WithUserSpaceAdmission(ctx, a.approvalAdmission(in.Authorization, claims.Subject))
 	rows, err := a.Approvals.ListForUser(ctx, claims.Subject)
 	if err != nil {
 		return nil, err
@@ -83,6 +87,7 @@ func (a *API) decideApproval(ctx context.Context, in *decideApprovalInput, appro
 	if err != nil {
 		return nil, err
 	}
+	ctx = approval.WithUserSpaceAdmission(ctx, a.approvalAdmission(in.Authorization, claims.Subject))
 	decided, err := a.Approvals.Decide(ctx, claims.Subject, in.ID, approve)
 	if err != nil {
 		return nil, err
@@ -90,4 +95,12 @@ func (a *API) decideApproval(ctx context.Context, in *decideApprovalInput, appro
 	out := &approvalDecisionOutput{}
 	out.Body.Data = decided
 	return out, nil
+}
+
+func (a *API) approvalAdmission(authorizationHeader, userID string) approval.UserSpaceAdmission {
+	token := strings.Fields(authorizationHeader)[1]
+	return func(ctx context.Context, q *db.Queries, spaces ...string) (bool, error) {
+		claims, active, err := a.Sessions.IntrospectForSpaceTx(ctx, q, token, security.DefaultApplicationAudience, spaces...)
+		return active && claims.Type == "user" && claims.Subject == userID, err
+	}
 }

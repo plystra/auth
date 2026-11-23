@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -16,6 +17,7 @@ import (
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
@@ -29,8 +31,9 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	st, authz, enterpriseSvc, owner, spaceID, provider := newSSOHTTPFixture(t)
 	sessions := enterpriseSvc.Sessions
 	sessions.Factors = &factor.Service{Store: st, DataKey: enterpriseSvc.DataKey}
+	sessions.SpaceSignInPolicy = enterpriseSvc
 	enterpriseSvc.StepUp = sessions
-	accounts := &account.Service{Store: st, Passwords: enterpriseSvc.Passwords, Sessions: sessions, Authorization: authz}
+	accounts := &account.Service{Store: st, Passwords: enterpriseSvc.Passwords, Sessions: sessions, Authorization: authz, SignInPolicy: enterpriseSvc}
 	mux := http.NewServeMux()
 	(&principal.API{Accounts: accounts, Authorization: authz, Sessions: sessions, Signer: sessions.Signer, Enterprise: enterpriseSvc}).Register(
 		humago.New(mux, route.HumaConfig("Enterprise employee lifecycle", "1.0.0")))
@@ -176,6 +179,83 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	independent := employeeLifecycleData[session.Tokens](t, refresh(*passwordLogin.Tokens, otherMember.ID))
 	assertBoundSession(independent, otherMember.ID, "pwd")
 
+	startPassword := func(target string) account.SignInChallenge {
+		t.Helper()
+		return employeeLifecycleData[account.SignInChallenge](t, client.send(t, http.MethodPost, "/v1/auth/sign-in", "", "application/json", "",
+			map[string]string{"email": email, "space_id": target}))
+	}
+	completePassword := func(attempt account.SignInChallenge) employeeLifecycleResponse {
+		t.Helper()
+		return client.send(t, http.MethodPost, "/v1/auth/sign-in/"+attempt.AttemptID, "", "application/json", "",
+			map[string]string{"password": password})
+	}
+	legacyLocal := employeeLifecycleData[account.AuthResult](t, completePassword(startPassword(spaceID)))
+	if legacyLocal.Tokens == nil {
+		t.Fatal("password authentication before enforcement did not issue a managed-Space session")
+	}
+	assertBoundSession(*legacyLocal.Tokens, initialClaims.MemberID, "pwd")
+	members(*legacyLocal.Tokens).requireStatus(t, http.StatusOK)
+	openAttempt := startPassword(spaceID)
+	unbound, err := sessions.CreateForMember(ctx, employeeUserID, "", nil, "", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The test IdP login did not make this ordinary local session an SSO session.
+	members(unbound).requireStatus(t, http.StatusOK)
+	adminContext := authorization.WithHumanActor(ctx, owner.ID, adminID)
+	otherConnection, err := enterpriseSvc.CreateConnection(adminContext, owner.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Other OIDC Connection", Provider: "oidc", Issuer: provider.issuer, ClientID: "other-workforce",
+		ClientSecret: idpClientSecret, RedirectURI: redirectURI,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, err := sessions.Settings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrongConnection session.Tokens
+	if err := st.InTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: employeeUserID}); err != nil {
+			return err
+		}
+		var err error
+		wrongConnection, err = sessions.CreateForSSOTx(ctx, q, settings, employeeUserID, initialClaims.MemberID, otherConnection.ID, "oidc")
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	members(wrongConnection).requireStatus(t, http.StatusOK)
+	forced, err := enterpriseSvc.CreateDomain(adminContext, owner.ID, spaceID,
+		enterprise.DomainInput{Domain: "example.test", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	enterpriseSvc.DNSResolver = employeeDomainResolver{forced.VerificationToken}
+	if err := enterpriseSvc.VerifyDomain(adminContext, owner.ID, spaceID, forced.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("verified policy requires the enterprise connection online", func(t *testing.T) {
+		completePassword(openAttempt).requireError(t, http.StatusBadRequest, "invalid_grant")
+		if routed := startPassword(spaceID); routed.NextStep != "sso" || routed.SSOConnectionID != connection.ID {
+			t.Fatal("managed-Space sign-in did not route to the configured provider")
+		}
+		members(*legacyLocal.Tokens).requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+		refresh(*legacyLocal.Tokens, "").requireError(t, http.StatusForbidden, "PERMISSION_DENIED")
+		members(wrongConnection).requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+		refresh(wrongConnection, "").requireError(t, http.StatusForbidden, "PERMISSION_DENIED")
+		refresh(independent, initialClaims.MemberID).requireError(t, http.StatusForbidden, "PERMISSION_DENIED")
+		client.send(t, http.MethodGet, spacePath, unbound.AccessToken, "", "", nil).
+			requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+		members(independent).requireStatus(t, http.StatusOK)
+		unrelated := employeeLifecycleData[account.AuthResult](t, completePassword(startPassword(otherMember.SpaceID)))
+		if unrelated.Tokens == nil {
+			t.Fatal("explicit independent Space login did not issue a password session")
+		}
+		assertBoundSession(*unrelated.Tokens, otherMember.ID, "pwd")
+		members(current).requireStatus(t, http.StatusOK)
+	})
+
 	second := employeeLifecycleData[account.AuthResult](t, login())
 	third := employeeLifecycleData[account.AuthResult](t, login())
 	if second.Tokens == nil || third.Tokens == nil {
@@ -220,6 +300,19 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	assertBoundSession(*fresh.Tokens, initialClaims.MemberID, "oidc")
 	members(*fresh.Tokens).requireStatus(t, http.StatusOK)
 	members(retained).requireStatus(t, http.StatusOK)
+
+	if err := enterpriseSvc.DisableConnection(adminContext, owner.ID, spaceID, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	members(*fresh.Tokens).requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+	refresh(*fresh.Tokens, "").requireError(t, http.StatusForbidden, "PERMISSION_DENIED")
+	members(retained).requireStatus(t, http.StatusOK)
+}
+
+type employeeDomainResolver struct{ verificationToken string }
+
+func (r employeeDomainResolver) LookupTXT(context.Context, string) ([]string, error) {
+	return []string{r.verificationToken}, nil
 }
 
 type employeeLifecycleClient struct{ server *httptest.Server }
