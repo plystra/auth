@@ -301,7 +301,11 @@ func serve(ctx context.Context) error {
 	accounts.SignInPolicy = enterpriseSvc
 	sessionSvc.SpaceSignInPolicy = enterpriseSvc
 	accounts.Invitations = invitationSvc
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
+	hostedOrigin := ""
+	if issuerURL.Scheme == "https" {
+		hostedOrigin = "https://" + strings.TrimSuffix(strings.ToLower(issuerURL.Host), ":443")
+	}
+	principalAPI := &principal.API{HostedOrigin: hostedOrigin, Accounts: accounts, Sessions: sessionSvc, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
@@ -366,6 +370,9 @@ func serve(ctx context.Context) error {
 	})
 	health.Handle("/metrics", telemetry.MetricsHandler())
 	principalOriginPolicy := func(ctx context.Context, origin string) (bool, error) {
+		if origin == hostedOrigin {
+			return true, nil
+		}
 		v, err := settings.Get(ctx)
 		if err != nil {
 			return false, err

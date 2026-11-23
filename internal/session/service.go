@@ -708,52 +708,74 @@ func (s *Service) IntrospectForSpaceTx(ctx context.Context, q *db.Queries, token
 		}
 		return security.Claims{}, false, err
 	}
-	if sess.UserID != claims.Subject || sess.RevokedAt.Valid || !sess.ExpiresAt.Valid || !sess.ExpiresAt.Time.After(time.Now().UTC()) {
+	if sess.UserID != claims.Subject || claims.MemberID != sess.MemberID.String {
 		return security.Claims{}, false, nil
 	}
-	user, err := q.GetUserByID(ctx, db.GetUserByIDParams{ID: claims.Subject})
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return security.Claims{}, false, nil
-		}
+	spaceID, active, err := s.onlineUserSessionSpace(ctx, q, sess, targetSpaceIDs...)
+	if err != nil || !active || spaceID != claims.SpaceID {
 		return security.Claims{}, false, err
 	}
-	if user.DisabledAt.Valid || user.Status != "active" {
+	return claims, true, nil
+}
+
+// CheckOIDCBrowserSessionTx checks a session ID from the persisted browser
+// interaction. A session ID supplied by a client is not a credential.
+func (s *Service) CheckOIDCBrowserSessionTx(ctx context.Context, q *db.Queries, sessionID string) (security.Claims, bool, error) {
+	if sessionID == "" {
 		return security.Claims{}, false, nil
 	}
-	if claims.MemberID != sess.MemberID.String {
+	sess, err := q.GetSession(ctx, db.GetSessionParams{ID: sessionID})
+	if errors.Is(err, pgx.ErrNoRows) {
 		return security.Claims{}, false, nil
 	}
-	if sess.SsoMemberID.Valid && sess.SsoMemberID.String != claims.MemberID {
-		_, permitted, err := boundMemberSpace(ctx, q, claims.Subject, sess.SsoMemberID.String, time.Now().UTC())
+	if err != nil {
+		return security.Claims{}, false, err
+	}
+	spaceID, active, err := s.onlineUserSessionSpace(ctx, q, sess)
+	if err != nil || !active {
+		return security.Claims{}, false, err
+	}
+	return security.Claims{
+		Type: "user", Subject: sess.UserID, SessionID: sess.ID, MemberID: sess.MemberID.String, SpaceID: spaceID,
+	}, true, nil
+}
+
+func (s *Service) onlineUserSessionSpace(ctx context.Context, q *db.Queries, sess db.GetSessionRow, targetSpaceIDs ...string) (string, bool, error) {
+	now := time.Now().UTC()
+	if sess.RevokedAt.Valid || !sess.ExpiresAt.Valid || !sess.ExpiresAt.Time.After(now) {
+		return "", false, nil
+	}
+	user, active, err := activeSessionUser(ctx, q, sess.UserID)
+	if err != nil || !active {
+		return "", false, err
+	}
+	if sess.SsoMemberID.Valid && sess.SsoMemberID.String != sess.MemberID.String {
+		_, permitted, err := boundMemberSpace(ctx, q, sess.UserID, sess.SsoMemberID.String, now)
 		if err != nil || !permitted {
-			return security.Claims{}, false, err
+			return "", false, err
 		}
 	}
-	if claims.MemberID != "" {
-		spaceID, permitted, err := boundMemberSpace(ctx, q, claims.Subject, claims.MemberID, time.Now().UTC())
-		if err != nil {
-			return security.Claims{}, false, err
+	spaceID := ""
+	if sess.MemberID.Valid {
+		var permitted bool
+		spaceID, permitted, err = boundMemberSpace(ctx, q, sess.UserID, sess.MemberID.String, now)
+		if err != nil || !permitted {
+			return "", false, err
 		}
-		if !permitted || claims.SpaceID != spaceID {
-			return security.Claims{}, false, nil
-		}
-	} else if claims.SpaceID != "" {
-		return security.Claims{}, false, nil
 	}
 	if s.SpaceSignInPolicy != nil {
-		spaces := append([]string{claims.SpaceID}, targetSpaceIDs...)
-		for i, spaceID := range spaces {
-			if spaceID == "" || slices.Contains(spaces[:i], spaceID) {
+		spaces := append([]string{spaceID}, targetSpaceIDs...)
+		for i, target := range spaces {
+			if target == "" || slices.Contains(spaces[:i], target) {
 				continue
 			}
-			allowed, err := s.SpaceSignInPolicy.AllowsSpaceSession(ctx, q, user.EmailNormalized, spaceID, sess.SsoConnectionID.String)
+			allowed, err := s.SpaceSignInPolicy.AllowsSpaceSession(ctx, q, user.EmailNormalized, target, sess.SsoConnectionID.String)
 			if err != nil || !allowed {
-				return security.Claims{}, false, err
+				return "", false, err
 			}
 		}
 	}
-	return claims, true, nil
+	return spaceID, true, nil
 }
 
 func activeSessionUser(ctx context.Context, q *db.Queries, userID string) (db.GetUserByIDRow, bool, error) {

@@ -18,7 +18,10 @@ import (
 	"github.com/plystra/auth/internal/requestinfo"
 )
 
-const maxIdempotencyBody = 1 << 20
+const (
+	maxIdempotencyBody   = 1 << 20
+	OIDCInteractionsPath = "/v1/auth/oidc-interactions"
+)
 
 // One-time publisher credentials must never enter the replay store, including
 // when a caller reuses a key previously reserved by a different operation.
@@ -27,6 +30,9 @@ func checkOAuthSecretIdempotency(r *http.Request, plane Plane) error {
 		return nil
 	}
 	path := r.URL.Path
+	if path == OIDCInteractionsPath || strings.HasPrefix(path, OIDCInteractionsPath+"/") {
+		return apierr.New("VALIDATION_FAILED", "Idempotency-Key is not supported for hosted sign-in interactions")
+	}
 	denied := apierr.New("VALIDATION_FAILED", "Idempotency-Key is not supported for one-time OAuth client secrets")
 	if strings.HasPrefix(path, "/v1/applications/") && strings.HasSuffix(path, "/oauth-client-secret/rotate") {
 		return denied

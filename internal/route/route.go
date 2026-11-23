@@ -51,6 +51,7 @@ type Declaration struct {
 	StepUp                bool
 	AuthoritativeCheck    bool
 	MaxBodyBytes          int64
+	DefaultStatus         int
 	NonJSON               bool
 }
 
@@ -85,6 +86,10 @@ func WithAuthoritativeCheck() SpecOption {
 
 func WithMaxBodyBytes(size int64) SpecOption {
 	return func(spec *Declaration) { spec.MaxBodyBytes = size }
+}
+
+func WithStatus(code int) SpecOption {
+	return func(spec *Declaration) { spec.DefaultStatus = code }
 }
 
 func WithNonJSON() SpecOption {
@@ -211,7 +216,7 @@ func Register[I, O any](api huma.API, spec Spec, handler func(context.Context, *
 	if maxBodyBytes == 0 {
 		maxBodyBytes = 64 * 1024
 	}
-	huma.Register(api, huma.Operation{OperationID: declaration.Name, Method: declaration.Method, Path: declaration.Path, Summary: declaration.Name, MaxBodyBytes: maxBodyBytes}, func(ctx context.Context, input *I) (*O, error) {
+	huma.Register(api, huma.Operation{OperationID: declaration.Name, Method: declaration.Method, Path: declaration.Path, Summary: declaration.Name, MaxBodyBytes: maxBodyBytes, DefaultStatus: declaration.DefaultStatus}, func(ctx context.Context, input *I) (*O, error) {
 		out, err := handler(ctx, input)
 		if err == nil {
 			return out, nil

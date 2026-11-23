@@ -16,6 +16,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/lestrrat-go/jwx/v3/jws"
+	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/credential"
@@ -84,8 +85,12 @@ func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
 		return session.Settings{AccessTTL: 5 * time.Minute, RefreshTTL: time.Hour, RefreshIdleTTL: time.Hour}, nil
 	}}
 	parsers := credential.Validator{Principal: credential.PrincipalParser{Sessions: sessions}}
-	host := httptest.NewUnstartedServer(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, &mux, nil, st, parsers.Validate))
-	issuer := "https://" + host.Listener.Addr().String()
+	var issuer string
+	originPolicy := func(_ context.Context, origin string) (bool, error) {
+		return origin == issuer || origin == "https://other.example.test", nil
+	}
+	host := httptest.NewUnstartedServer(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, &mux, originPolicy, st, parsers.Validate))
+	issuer = "https://" + host.Listener.Addr().String()
 	sessions.Signer, err = security.GenerateSigner(issuer)
 	if err != nil {
 		t.Fatal(err)
@@ -93,9 +98,10 @@ func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
 	if managed {
 		sessions.Factors = &factor.Service{Store: st, DataKey: secret.New(strings.Repeat("d", 32))}
 		authz.StepUp, apps.Authorization, apps.StepUp = sessions, authz, sessions
-		api := &principal.API{Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors}
-		api.Register(humago.New(&mux, route.HumaConfig("RP publisher", "1")))
 	}
+	accounts := &account.Service{Store: st, Sessions: sessions, Passwords: security.DefaultPasswordHasher(), Authorization: authz}
+	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors}
+	api.Register(humago.New(&mux, route.HumaConfig("RP publisher", "1")))
 	(HTTP{Issuer: issuer, Applications: apps, Sessions: sessions}).Register(&mux)
 	mux.HandleFunc("GET /.well-known/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		keys, err := sessions.Signer.JWKS()

@@ -25,6 +25,7 @@ import (
 )
 
 type API struct {
+	HostedOrigin  string
 	Accounts      *account.Service
 	Sessions      *session.Service
 	Signer        *security.Signer
@@ -260,6 +261,7 @@ func (a *API) Register(api huma.API) {
 	a.registerAuthorizationRoutes(api)
 	a.registerApprovalRoutes(api)
 	a.registerApplicationRoutes(api)
+	a.registerOIDCBrowserRoutes(api)
 }
 func (a *API) register(ctx context.Context, in *AuthInput) (*AuthOutput, error) {
 	r := in.Body

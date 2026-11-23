@@ -740,6 +740,18 @@
         ],
         "type": "object"
       },
+      "AuthorizationDataOutputOidcBrowserStateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OidcBrowserState"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
       "AuthorizationDataOutputPublishedApplicationBody": {
         "additionalProperties": false,
         "properties": {
@@ -2413,6 +2425,197 @@
         ],
         "type": "object"
       },
+      "OidcBrowserAuthenticateInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "credential": {},
+          "mfa_code": {
+            "maxLength": 6,
+            "minLength": 6,
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OidcBrowserCookieOutputOidcBrowserRedirectBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OidcBrowserRedirect"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserCookieOutputOidcBrowserStateBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/OidcBrowserState"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserDecisionInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "deny"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserIdentifyInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "maxLength": 320,
+            "minLength": 1,
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "password",
+              "passkey"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "email",
+          "method"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserRedirect": {
+        "additionalProperties": false,
+        "properties": {
+          "redirect_to": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "redirect_to"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserStartInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "code_challenge": {
+            "maxLength": 43,
+            "minLength": 43,
+            "type": "string"
+          },
+          "code_challenge_method": {
+            "enum": [
+              "S256"
+            ],
+            "type": "string"
+          },
+          "nonce": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "redirect_uri": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "response_type": {
+            "enum": [
+              "code"
+            ],
+            "type": "string"
+          },
+          "scope": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "state": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "response_type",
+          "client_id",
+          "redirect_uri",
+          "scope",
+          "state",
+          "nonce",
+          "code_challenge",
+          "code_challenge_method"
+        ],
+        "type": "object"
+      },
+      "OidcBrowserState": {
+        "additionalProperties": false,
+        "properties": {
+          "client_name": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "next_step": {
+            "type": "string"
+          },
+          "passkey_options": {
+            "$ref": "#/components/schemas/CredentialAssertion"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "signed_in_email": {
+            "type": "string"
+          },
+          "sso_connection_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "client_name",
+          "scopes",
+          "expires_at",
+          "next_step"
+        ],
+        "type": "object"
+      },
       "PRFInputs": {
         "additionalProperties": false,
         "properties": {
@@ -4008,6 +4211,312 @@
           }
         },
         "summary": "auth.email_verify"
+      }
+    },
+    "/v1/auth/oidc-interactions": {
+      "post": {
+        "operationId": "oidc.interactions.start",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserStartInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcBrowserCookieOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "Created",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.start"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}": {
+      "get": {
+        "operationId": "oidc.interactions.read",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.read"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}/authenticate": {
+      "post": {
+        "operationId": "oidc.interactions.authenticate",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "User-Agent",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserAuthenticateInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.authenticate"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}/decision": {
+      "post": {
+        "operationId": "oidc.interactions.decision",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserDecisionInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OidcBrowserCookieOutputOidcBrowserRedirectBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Set-Cookie": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.decision"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}/identify": {
+      "post": {
+        "operationId": "oidc.interactions.identify",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserIdentifyInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.identify"
       }
     },
     "/v1/auth/password/forgot": {

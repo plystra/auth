@@ -477,6 +477,9 @@ type OidcLoginRequest struct {
 	CreatedAt             pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
 	ConsumedAt            pgtype.Timestamptz `json:"consumed_at"`
+	BrowserBound          bool               `json:"browser_bound"`
+	BrowserAttemptID      pgtype.Text        `json:"browser_attempt_id"`
+	BrowserSessionID      pgtype.Text        `json:"browser_session_id"`
 }
 
 type OidcUserinfoToken struct {

@@ -427,11 +427,28 @@ func (s *Service) signInSessionSettings(ctx context.Context) (session.Settings, 
 	return s.Sessions.Settings(ctx)
 }
 
+type signInSessionBindingKey struct{}
+
+// WithSignInSessionBinding attaches the issued session to an interaction
+// before committing the sign-in attempt. A binding error rolls back issuance.
+func WithSignInSessionBinding(ctx context.Context, bind func(context.Context, *db.Queries, string, string) error) context.Context {
+	return context.WithValue(ctx, signInSessionBindingKey{}, bind)
+}
+
 func (s *Service) finishLocalSignInTx(ctx context.Context, q *db.Queries, settings session.Settings, attemptID, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (session.Tokens, error) {
 	if err := q.ConsumeSignInAttempt(ctx, db.ConsumeSignInAttemptParams{ID: attemptID}); err != nil {
 		return session.Tokens{}, err
 	}
-	return s.Sessions.CreateForMemberWithMethodsTx(ctx, q, settings, userID, memberID, ip, userAgent, assurance, methods)
+	tokens, err := s.Sessions.CreateForMemberWithMethodsTx(ctx, q, settings, userID, memberID, ip, userAgent, assurance, methods)
+	if err != nil {
+		return session.Tokens{}, err
+	}
+	if bind, ok := ctx.Value(signInSessionBindingKey{}).(func(context.Context, *db.Queries, string, string) error); ok {
+		if err := bind(ctx, q, attemptID, tokens.SessionID); err != nil {
+			return session.Tokens{}, err
+		}
+	}
+	return tokens, nil
 }
 
 func invalidLocalAttempt() error {

@@ -11,14 +11,43 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const bindOIDCBrowserSession = `-- name: BindOIDCBrowserSession :execrows
+UPDATE oidc_login_requests r SET browser_session_id = $1::text
+FROM applications a
+WHERE r.id = $2 AND r.request_hash = $3
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND r.browser_attempt_id = $4::text AND r.browser_session_id IS NULL
+    AND a.id = r.application_id AND a.human_oidc_generation = r.application_generation
+`
+
+type BindOIDCBrowserSessionParams struct {
+	SessionID   string `json:"session_id"`
+	ID          string `json:"id"`
+	RequestHash []byte `json:"request_hash"`
+	AttemptID   string `json:"attempt_id"`
+}
+
+func (q *Queries) BindOIDCBrowserSession(ctx context.Context, arg BindOIDCBrowserSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindOIDCBrowserSession,
+		arg.SessionID,
+		arg.ID,
+		arg.RequestHash,
+		arg.AttemptID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const createOIDCLoginRequest = `-- name: CreateOIDCLoginRequest :one
 INSERT INTO oidc_login_requests (
     id, request_hash, application_id, application_generation, redirect_uri, scope,
-    state, nonce, code_challenge, expires_at
+    state, nonce, code_challenge, browser_bound, expires_at
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
-    $9, clock_timestamp() + interval '5 minutes'
+    $9, $10, clock_timestamp() + interval '5 minutes'
 ) RETURNING expires_at
 `
 
@@ -32,6 +61,7 @@ type CreateOIDCLoginRequestParams struct {
 	State                 string `json:"state"`
 	Nonce                 string `json:"nonce"`
 	CodeChallenge         string `json:"code_challenge"`
+	BrowserBound          bool   `json:"browser_bound"`
 }
 
 func (q *Queries) CreateOIDCLoginRequest(ctx context.Context, arg CreateOIDCLoginRequestParams) (pgtype.Timestamptz, error) {
@@ -45,6 +75,7 @@ func (q *Queries) CreateOIDCLoginRequest(ctx context.Context, arg CreateOIDCLogi
 		arg.State,
 		arg.Nonce,
 		arg.CodeChallenge,
+		arg.BrowserBound,
 	)
 	var expires_at pgtype.Timestamptz
 	err := row.Scan(&expires_at)
@@ -53,15 +84,17 @@ func (q *Queries) CreateOIDCLoginRequest(ctx context.Context, arg CreateOIDCLogi
 
 const findOIDCLoginRequestClient = `-- name: FindOIDCLoginRequestClient :one
 SELECT application_id FROM oidc_login_requests
-WHERE request_hash = $1 AND status = 'pending' AND expires_at > clock_timestamp()
+WHERE request_hash = $1 AND browser_bound = $2
+  AND status = 'pending' AND expires_at > clock_timestamp()
 `
 
 type FindOIDCLoginRequestClientParams struct {
-	RequestHash []byte `json:"request_hash"`
+	RequestHash  []byte `json:"request_hash"`
+	BrowserBound bool   `json:"browser_bound"`
 }
 
 func (q *Queries) FindOIDCLoginRequestClient(ctx context.Context, arg FindOIDCLoginRequestClientParams) (string, error) {
-	row := q.db.QueryRow(ctx, findOIDCLoginRequestClient, arg.RequestHash)
+	row := q.db.QueryRow(ctx, findOIDCLoginRequestClient, arg.RequestHash, arg.BrowserBound)
 	var application_id string
 	err := row.Scan(&application_id)
 	return application_id, err
@@ -71,6 +104,7 @@ const finishOIDCLoginRequest = `-- name: FinishOIDCLoginRequest :one
 UPDATE oidc_login_requests SET status = $1, consumed_at = clock_timestamp()
 WHERE request_hash = $2 AND application_id = $3
     AND application_generation = $4
+    AND browser_bound = $5
     AND status = 'pending' AND expires_at > clock_timestamp()
 RETURNING id, redirect_uri, state, scope, expires_at
 `
@@ -80,6 +114,7 @@ type FinishOIDCLoginRequestParams struct {
 	RequestHash           []byte `json:"request_hash"`
 	ApplicationID         string `json:"application_id"`
 	ApplicationGeneration int64  `json:"application_generation"`
+	BrowserBound          bool   `json:"browser_bound"`
 }
 
 type FinishOIDCLoginRequestRow struct {
@@ -96,6 +131,7 @@ func (q *Queries) FinishOIDCLoginRequest(ctx context.Context, arg FinishOIDCLogi
 		arg.RequestHash,
 		arg.ApplicationID,
 		arg.ApplicationGeneration,
+		arg.BrowserBound,
 	)
 	var i FinishOIDCLoginRequestRow
 	err := row.Scan(
@@ -104,6 +140,56 @@ func (q *Queries) FinishOIDCLoginRequest(ctx context.Context, arg FinishOIDCLogi
 		&i.State,
 		&i.Scope,
 		&i.ExpiresAt,
+	)
+	return i, err
+}
+
+const getPendingOIDCBrowserInteraction = `-- name: GetPendingOIDCBrowserInteraction :one
+SELECT r.id, r.application_id, a.name AS client_name, a.client_id, r.scope, r.expires_at,
+    r.browser_attempt_id, r.browser_session_id,
+    COALESCE(attempt.method, '')::text AS sign_in_method,
+    (attempt.password_verified_at IS NOT NULL)::boolean AS needs_totp
+FROM oidc_login_requests r
+JOIN applications a ON a.id = r.application_id
+LEFT JOIN sign_in_attempts attempt ON attempt.id = r.browser_attempt_id
+WHERE r.id = $1 AND r.request_hash = $2
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+    AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved')
+`
+
+type GetPendingOIDCBrowserInteractionParams struct {
+	ID          string `json:"id"`
+	RequestHash []byte `json:"request_hash"`
+}
+
+type GetPendingOIDCBrowserInteractionRow struct {
+	ID               string             `json:"id"`
+	ApplicationID    string             `json:"application_id"`
+	ClientName       string             `json:"client_name"`
+	ClientID         string             `json:"client_id"`
+	Scope            string             `json:"scope"`
+	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	BrowserAttemptID pgtype.Text        `json:"browser_attempt_id"`
+	BrowserSessionID pgtype.Text        `json:"browser_session_id"`
+	SignInMethod     string             `json:"sign_in_method"`
+	NeedsTotp        bool               `json:"needs_totp"`
+}
+
+func (q *Queries) GetPendingOIDCBrowserInteraction(ctx context.Context, arg GetPendingOIDCBrowserInteractionParams) (GetPendingOIDCBrowserInteractionRow, error) {
+	row := q.db.QueryRow(ctx, getPendingOIDCBrowserInteraction, arg.ID, arg.RequestHash)
+	var i GetPendingOIDCBrowserInteractionRow
+	err := row.Scan(
+		&i.ID,
+		&i.ApplicationID,
+		&i.ClientName,
+		&i.ClientID,
+		&i.Scope,
+		&i.ExpiresAt,
+		&i.BrowserAttemptID,
+		&i.BrowserSessionID,
+		&i.SignInMethod,
+		&i.NeedsTotp,
 	)
 	return i, err
 }
@@ -136,6 +222,29 @@ func (q *Queries) IssueOIDCLoginCode(ctx context.Context, arg IssueOIDCLoginCode
 		arg.SessionID,
 		arg.RequestID,
 	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const setOIDCBrowserAttempt = `-- name: SetOIDCBrowserAttempt :execrows
+UPDATE oidc_login_requests r SET browser_attempt_id = $1::text
+FROM applications a
+WHERE r.id = $2 AND r.request_hash = $3
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL
+    AND a.id = r.application_id AND a.human_oidc_generation = r.application_generation
+`
+
+type SetOIDCBrowserAttemptParams struct {
+	AttemptID   string `json:"attempt_id"`
+	ID          string `json:"id"`
+	RequestHash []byte `json:"request_hash"`
+}
+
+func (q *Queries) SetOIDCBrowserAttempt(ctx context.Context, arg SetOIDCBrowserAttemptParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setOIDCBrowserAttempt, arg.AttemptID, arg.ID, arg.RequestHash)
 	if err != nil {
 		return 0, err
 	}

@@ -35,6 +35,7 @@ type OIDCLoginRequestInput struct {
 }
 
 type OIDCLoginRequest struct {
+	ID          string        `json:"-"`
 	RequestID   secret.String `json:"request_id"`
 	ExpiresAt   time.Time     `json:"expires_at"`
 	ClientID    string        `json:"client_id"`
@@ -44,12 +45,24 @@ type OIDCLoginRequest struct {
 }
 
 func (s *Service) StartOIDCLogin(ctx context.Context, in OIDCLoginRequestInput) (OIDCLoginRequest, error) {
+	return s.startOIDCLogin(ctx, in, false)
+}
+
+func (s *Service) StartOIDCBrowserLogin(ctx context.Context, in OIDCLoginRequestInput) (OIDCLoginRequest, error) {
+	return s.startOIDCLogin(ctx, in, true)
+}
+
+func (s *Service) startOIDCLogin(ctx context.Context, in OIDCLoginRequestInput, browserBound bool) (OIDCLoginRequest, error) {
 	if !slices.Contains(in.Scope, "openid") {
 		return OIDCLoginRequest{}, apierr.New("invalid_scope", "openid is required for user sign-in")
 	}
+	scopes := make([]string, 0, len(in.Scope))
 	for _, scope := range in.Scope {
 		if scope != "openid" && scope != "email" && scope != "profile" {
 			return OIDCLoginRequest{}, apierr.New("invalid_scope", "scope is not available for user sign-in")
+		}
+		if !slices.Contains(scopes, scope) {
+			scopes = append(scopes, scope)
 		}
 	}
 	challenge, err := base64.RawURLEncoding.Strict().DecodeString(in.CodeChallenge)
@@ -66,17 +79,18 @@ func (s *Service) StartOIDCLogin(ctx context.Context, in OIDCLoginRequestInput) 
 		if !client.HumanOIDCEnabled || client.ClientID != in.ClientID || !slices.Contains(client.RedirectURIs, in.RedirectURI) {
 			return apierr.New("invalid_request", "client is not registered for this sign-in request")
 		}
+		requestID := string(ids.New[ids.ID]("lrq"))
 		expires, err := q.CreateOIDCLoginRequest(ctx, db.CreateOIDCLoginRequestParams{
-			ID: string(ids.New[ids.ID]("lrq")), RequestHash: digest, ApplicationID: client.ID,
+			ID: requestID, RequestHash: digest, ApplicationID: client.ID, BrowserBound: browserBound,
 			ApplicationGeneration: client.HumanOIDCGeneration, RedirectUri: in.RedirectURI,
-			Scope: strings.Join(in.Scope, " "), State: in.State, Nonce: in.Nonce, CodeChallenge: in.CodeChallenge,
+			Scope: strings.Join(scopes, " "), State: in.State, Nonce: in.Nonce, CodeChallenge: in.CodeChallenge,
 		})
 		if err != nil {
 			return err
 		}
 		request = OIDCLoginRequest{
-			RequestID: handle, ExpiresAt: expires.Time, ClientID: client.ClientID,
-			ClientName: client.Name, Scopes: in.Scope, RedirectURI: in.RedirectURI,
+			ID: requestID, RequestID: handle, ExpiresAt: expires.Time, ClientID: client.ClientID,
+			ClientName: client.Name, Scopes: scopes, RedirectURI: in.RedirectURI,
 		}
 		return nil
 	})
@@ -95,6 +109,14 @@ func newOIDCLoginCredential(prefix string) (secret.String, []byte) {
 }
 
 func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service, handle, bearer secret.String, decision string) (string, error) {
+	return s.decideOIDCLogin(ctx, sessions, handle, bearer, "", decision)
+}
+
+func (s *Service) DecideOIDCBrowserLogin(ctx context.Context, sessions *session.Service, id string, handle secret.String, decision string) (string, error) {
+	return s.decideOIDCLogin(ctx, sessions, handle, secret.New(""), id, decision)
+}
+
+func (s *Service) decideOIDCLogin(ctx context.Context, sessions *session.Service, handle, bearer secret.String, browserID, decision string) (string, error) {
 	if s == nil || s.Store == nil || sessions == nil {
 		return "", apierr.New("temporarily_unavailable", "user sign-in is unavailable")
 	}
@@ -106,16 +128,20 @@ func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service
 	invalidToken := apierr.New("invalid_token", "an active user session is required")
 	hash := sha256.Sum256([]byte(handle.Value()))
 	var redirectTo string
+	isBrowser := browserID != ""
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		signer, err := sessions.CurrentSigner(ctx, q)
-		if err != nil {
-			return err
+		var claims security.Claims
+		if !isBrowser {
+			signer, err := sessions.CurrentSigner(ctx, q)
+			if err != nil {
+				return err
+			}
+			claims, err = signer.Verify(bearer.Value(), time.Now().UTC(), security.DefaultApplicationAudience)
+			if err != nil || claims.Type != "user" || claims.SessionID == "" {
+				return invalidToken
+			}
 		}
-		claims, err := signer.Verify(bearer.Value(), time.Now().UTC(), security.DefaultApplicationAudience)
-		if err != nil || claims.Type != "user" || claims.SessionID == "" {
-			return invalidToken
-		}
-		appID, err := q.FindOIDCLoginRequestClient(ctx, db.FindOIDCLoginRequestClientParams{RequestHash: hash[:]})
+		appID, err := q.FindOIDCLoginRequestClient(ctx, db.FindOIDCLoginRequestClientParams{RequestHash: hash[:], BrowserBound: isBrowser})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalidRequest
 		}
@@ -128,6 +154,23 @@ func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service
 		}
 		if !client.HumanOIDCEnabled {
 			return invalidRequest
+		}
+		if isBrowser {
+			browser, err := q.GetPendingOIDCBrowserInteraction(ctx, db.GetPendingOIDCBrowserInteractionParams{ID: browserID, RequestHash: hash[:]})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return invalidRequest
+			}
+			if err != nil {
+				return err
+			}
+			var active bool
+			claims, active, err = sessions.CheckOIDCBrowserSessionTx(ctx, q, browser.BrowserSessionID.String)
+			if err != nil {
+				return err
+			}
+			if !active {
+				return invalidToken
+			}
 		}
 		user, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: claims.Subject})
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && user.Status != "active" {
@@ -150,6 +193,7 @@ func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service
 		}
 		request, err := q.FinishOIDCLoginRequest(ctx, db.FinishOIDCLoginRequestParams{
 			Status: status, RequestHash: hash[:], ApplicationID: client.ID, ApplicationGeneration: client.HumanOIDCGeneration,
+			BrowserBound: isBrowser,
 		})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return invalidRequest
@@ -185,20 +229,30 @@ func (s *Service) DecideOIDCLogin(ctx context.Context, sessions *session.Service
 		if err != nil {
 			return err
 		}
+		credential := "user_access_token"
+		if isBrowser {
+			credential = "oidc_browser_interaction"
+		}
 		if err := audit.WriteAccountEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "user", ActorID: claims.Subject, UserID: claims.Subject, ApplicationID: client.ID,
-			Action: "oidc.consent." + decision, Outcome: "success", CredentialType: "user_access_token", PolicyVersion: publisher.PolicyVersion,
+			Action: "oidc.consent." + decision, Outcome: "success", CredentialType: credential, PolicyVersion: publisher.PolicyVersion,
 			Resource: audit.Resource{Type: "application", ID: client.ID, SpaceID: client.SpaceID},
 			Metadata: map[string]string{"authorization_request_id": request.ID, "scope": request.Scope},
 		}); err != nil {
 			return err
 		}
 		// Expiry can advance while waiting for any of the locks or the audit insert.
-		current, active, err := sessions.IntrospectTx(ctx, q, bearer.Value(), security.DefaultApplicationAudience)
+		var current security.Claims
+		var active bool
+		if isBrowser {
+			current, active, err = sessions.CheckOIDCBrowserSessionTx(ctx, q, claims.SessionID)
+		} else {
+			current, active, err = sessions.IntrospectTx(ctx, q, bearer.Value(), security.DefaultApplicationAudience)
+		}
 		if err != nil {
 			return err
 		}
-		if !active || current.Type != "user" || current.Subject != claims.Subject || current.SessionID != claims.SessionID {
+		if !active || current.Type != "user" || current.Subject != claims.Subject || current.SessionID != claims.SessionID || current.MemberID != claims.MemberID {
 			return invalidToken
 		}
 		if !request.ExpiresAt.Time.After(time.Now().UTC()) {
