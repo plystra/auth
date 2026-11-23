@@ -48,8 +48,8 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
-VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, now()), COALESCE($9, 1), $10)
+INSERT INTO sessions (id, user_id, member_id, sso_member_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, COALESCE($9, now()), COALESCE($10, 1), $11)
 RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 `
 
@@ -57,6 +57,7 @@ type CreateSessionParams struct {
 	ID             string             `json:"id"`
 	UserID         string             `json:"user_id"`
 	MemberID       pgtype.Text        `json:"member_id"`
+	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
 	TokenHash      []byte             `json:"token_hash"`
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 	Ip             pgtype.Text        `json:"ip"`
@@ -87,6 +88,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 		arg.ID,
 		arg.UserID,
 		arg.MemberID,
+		arg.SsoMemberID,
 		arg.TokenHash,
 		arg.ExpiresAt,
 		arg.Ip,
@@ -114,8 +116,30 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 	return i, err
 }
 
+const getRefreshSessionHint = `-- name: GetRefreshSessionHint :one
+SELECT s.id AS session_id, s.user_id
+FROM refresh_tokens r JOIN sessions s ON s.id = r.session_id
+WHERE r.token_hash = $1
+`
+
+type GetRefreshSessionHintParams struct {
+	TokenHash []byte `json:"token_hash"`
+}
+
+type GetRefreshSessionHintRow struct {
+	SessionID string `json:"session_id"`
+	UserID    string `json:"user_id"`
+}
+
+func (q *Queries) GetRefreshSessionHint(ctx context.Context, arg GetRefreshSessionHintParams) (GetRefreshSessionHintRow, error) {
+	row := q.db.QueryRow(ctx, getRefreshSessionHint, arg.TokenHash)
+	var i GetRefreshSessionHintRow
+	err := row.Scan(&i.SessionID, &i.UserID)
+	return i, err
+}
+
 const getSession = `-- name: GetSession :one
-SELECT id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = $1
+SELECT id, user_id, member_id, sso_member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods FROM sessions WHERE id = $1
 `
 
 type GetSessionParams struct {
@@ -126,6 +150,7 @@ type GetSessionRow struct {
 	ID             string             `json:"id"`
 	UserID         string             `json:"user_id"`
 	MemberID       pgtype.Text        `json:"member_id"`
+	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
 	TokenHash      []byte             `json:"token_hash"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	LastSeenAt     pgtype.Timestamptz `json:"last_seen_at"`
@@ -145,6 +170,7 @@ func (q *Queries) GetSession(ctx context.Context, arg GetSessionParams) (GetSess
 		&i.ID,
 		&i.UserID,
 		&i.MemberID,
+		&i.SsoMemberID,
 		&i.TokenHash,
 		&i.CreatedAt,
 		&i.LastSeenAt,
@@ -220,6 +246,37 @@ func (q *Queries) ListUserSessions(ctx context.Context, arg ListUserSessionsPara
 	return items, nil
 }
 
+const lockRefreshMembers = `-- name: LockRefreshMembers :many
+SELECT m.id FROM members m JOIN user_members um ON um.member_id = m.id
+WHERE um.user_id = $1 AND m.id = ANY($2::text[])
+ORDER BY m.id FOR UPDATE OF m
+`
+
+type LockRefreshMembersParams struct {
+	UserID    string   `json:"user_id"`
+	MemberIds []string `json:"member_ids"`
+}
+
+func (q *Queries) LockRefreshMembers(ctx context.Context, arg LockRefreshMembersParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, lockRefreshMembers, arg.UserID, arg.MemberIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const lockRefreshToken = `-- name: LockRefreshToken :one
 SELECT id, session_id, family_id, token_hash, issued_at, expires_at, used_at, revoked_at FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE
 `
@@ -244,9 +301,45 @@ func (q *Queries) LockRefreshToken(ctx context.Context, arg LockRefreshTokenPara
 	return i, err
 }
 
+const lockSessionForRefresh = `-- name: LockSessionForRefresh :one
+SELECT id, user_id, member_id, sso_member_id, expires_at, revoked_at, assurance_level, auth_methods
+FROM sessions WHERE id = $1 FOR UPDATE
+`
+
+type LockSessionForRefreshParams struct {
+	ID string `json:"id"`
+}
+
+type LockSessionForRefreshRow struct {
+	ID             string             `json:"id"`
+	UserID         string             `json:"user_id"`
+	MemberID       pgtype.Text        `json:"member_id"`
+	SsoMemberID    pgtype.Text        `json:"sso_member_id"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+	RevokedAt      pgtype.Timestamptz `json:"revoked_at"`
+	AssuranceLevel int16              `json:"assurance_level"`
+	AuthMethods    []string           `json:"auth_methods"`
+}
+
+func (q *Queries) LockSessionForRefresh(ctx context.Context, arg LockSessionForRefreshParams) (LockSessionForRefreshRow, error) {
+	row := q.db.QueryRow(ctx, lockSessionForRefresh, arg.ID)
+	var i LockSessionForRefreshRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.MemberID,
+		&i.SsoMemberID,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.AssuranceLevel,
+		&i.AuthMethods,
+	)
+	return i, err
+}
+
 const markRefreshUsed = `-- name: MarkRefreshUsed :one
-UPDATE refresh_tokens SET used_at = now()
-WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > now()
+UPDATE refresh_tokens SET used_at = clock_timestamp()
+WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > clock_timestamp()
 RETURNING id
 `
 
@@ -259,6 +352,40 @@ func (q *Queries) MarkRefreshUsed(ctx context.Context, arg MarkRefreshUsedParams
 	var id string
 	err := row.Scan(&id)
 	return id, err
+}
+
+const revokeBindingRefreshTokens = `-- name: RevokeBindingRefreshTokens :exec
+UPDATE refresh_tokens SET revoked_at = now()
+WHERE revoked_at IS NULL AND session_id IN (
+    SELECT id FROM sessions WHERE user_id = $1
+      AND (member_id = $2 OR sso_member_id = $2)
+)
+`
+
+type RevokeBindingRefreshTokensParams struct {
+	UserID   string      `json:"user_id"`
+	MemberID pgtype.Text `json:"member_id"`
+}
+
+func (q *Queries) RevokeBindingRefreshTokens(ctx context.Context, arg RevokeBindingRefreshTokensParams) error {
+	_, err := q.db.Exec(ctx, revokeBindingRefreshTokens, arg.UserID, arg.MemberID)
+	return err
+}
+
+const revokeBindingSessions = `-- name: RevokeBindingSessions :exec
+UPDATE sessions SET revoked_at = now()
+WHERE user_id = $1 AND revoked_at IS NULL
+  AND (member_id = $2 OR sso_member_id = $2)
+`
+
+type RevokeBindingSessionsParams struct {
+	UserID   string      `json:"user_id"`
+	MemberID pgtype.Text `json:"member_id"`
+}
+
+func (q *Queries) RevokeBindingSessions(ctx context.Context, arg RevokeBindingSessionsParams) error {
+	_, err := q.db.Exec(ctx, revokeBindingSessions, arg.UserID, arg.MemberID)
+	return err
 }
 
 const revokeRefreshFamily = `-- name: RevokeRefreshFamily :exec

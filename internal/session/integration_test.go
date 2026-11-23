@@ -90,6 +90,13 @@ func TestRefreshTokenUsesPlystraPrefixEntropyHashingAndHMACKeyRotation(t *testin
 	if bytes.Equal(stored, []byte(issued.RefreshToken)) || !bytes.Equal(stored, hmacSHA256(oldKey, issued.RefreshToken)) {
 		t.Fatal("refresh token was not stored as an HMAC hash")
 	}
+	t.Run("signing failure preserves the original credential", func(t *testing.T) {
+		unavailable := *rotating
+		unavailable.Signer = &security.Signer{}
+		if tokens, err := unavailable.Refresh(ctx, issued.RefreshToken); !errors.Is(err, security.ErrNoActiveSigningKey) || tokens != (Tokens{}) {
+			t.Fatal("signing failure did not fail refresh without credentials")
+		}
+	})
 	rotated, err := rotating.Refresh(ctx, issued.RefreshToken)
 	if err != nil {
 		t.Fatal(err)

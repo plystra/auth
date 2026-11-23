@@ -587,6 +587,7 @@ type Session struct {
 	StepUpExpiresAt pgtype.Timestamptz `json:"step_up_expires_at"`
 	AuthMethods     []string           `json:"auth_methods"`
 	StepUpMethod    pgtype.Text        `json:"step_up_method"`
+	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
 }
 
 type SignInAttempt struct {

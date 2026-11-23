@@ -319,7 +319,14 @@ func revokeDirectoryBindingTx(ctx context.Context, q *db.Queries, directory db.D
 	if err := q.RevokeUserMember(ctx, db.RevokeUserMemberParams{UserID: row.UserID, MemberID: row.MemberID}); err != nil {
 		return err
 	}
-	agents, err := q.ListAgentsCreatedByBinding(ctx, db.ListAgentsCreatedByBindingParams{UserID: pgtype.Text{String: row.UserID, Valid: true}, MemberID: pgtype.Text{String: row.MemberID, Valid: true}})
+	boundMember := pgtype.Text{String: row.MemberID, Valid: true}
+	if err := q.RevokeBindingSessions(ctx, db.RevokeBindingSessionsParams{UserID: row.UserID, MemberID: boundMember}); err != nil {
+		return err
+	}
+	if err := q.RevokeBindingRefreshTokens(ctx, db.RevokeBindingRefreshTokensParams{UserID: row.UserID, MemberID: boundMember}); err != nil {
+		return err
+	}
+	agents, err := q.ListAgentsCreatedByBinding(ctx, db.ListAgentsCreatedByBindingParams{UserID: pgtype.Text{String: row.UserID, Valid: true}, MemberID: boundMember})
 	if err != nil {
 		return err
 	}

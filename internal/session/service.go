@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 	"time"
 
@@ -89,6 +90,12 @@ func (s *Service) CreateForMemberWithMethods(ctx context.Context, userID, member
 	}
 	var tokens Tokens
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if _, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: userID}); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "the account is not active")
+			}
+			return err
+		}
 		var err error
 		tokens, err = s.CreateForMemberWithMethodsTx(ctx, q, st, userID, memberID, ip, userAgent, assurance, methods)
 		return err
@@ -145,9 +152,16 @@ func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 		}
 		persistedMember = pgtype.Text{String: memberID, Valid: true}
 	}
+	var ssoMember pgtype.Text
+	if slices.Contains(methods, "oidc") || slices.Contains(methods, "saml") {
+		if !persistedMember.Valid {
+			return Tokens{}, errors.New("enterprise SSO requires a member binding")
+		}
+		ssoMember = persistedMember
+	}
 	refreshHash := s.hashToken(refresh)
 	row, err := q.CreateSession(ctx, db.CreateSessionParams{
-		ID: string(sid), UserID: userID, MemberID: persistedMember,
+		ID: string(sid), UserID: userID, MemberID: persistedMember, SsoMemberID: ssoMember,
 		TokenHash: refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
 		AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods,
 	})
@@ -179,47 +193,62 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 	if err != nil {
 		return Tokens{}, err
 	}
+	if st.AccessTTL <= 0 || st.RefreshTTL <= 0 || s.Signer == nil || len(s.HMACKeys) == 0 {
+		return Tokens{}, errors.New("session issuance is unavailable")
+	}
 	next, err := randomToken("ply_rt_")
 	if err != nil {
 		return Tokens{}, err
 	}
-	now := time.Now().UTC()
-	sid, uid, family, memberID, spaceID := "", "", "", "", ""
-	assurance := 1
-	var methods []string
+	jti, err := randomToken("jti_")
+	if err != nil {
+		return Tokens{}, err
+	}
+	var tokens Tokens
 	rejected := false
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		var token db.RefreshToken
-		found := false
-		for _, hash := range s.tokenHashes(raw) {
-			token, err = q.LockRefreshToken(ctx, db.LockRefreshTokenParams{TokenHash: hash})
-			if err == nil {
-				found = true
-				break
-			}
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-		}
-		if !found {
+		hint, hash, err := s.refreshSessionHint(ctx, q, raw)
+		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("invalid_grant", "refresh token is invalid")
 		}
-		replayed := token.UsedAt.Valid
-		invalid := token.RevokedAt.Valid || replayed || !token.ExpiresAt.Time.After(now) || (st.RefreshIdleTTL > 0 && !token.IssuedAt.Time.Add(st.RefreshIdleTTL).After(now))
-		if !invalid {
-			_, err = q.MarkRefreshUsed(ctx, db.MarkRefreshUsedParams{ID: token.ID})
-			if errors.Is(err, pgx.ErrNoRows) {
-				replayed = true
-				invalid = true
-			} else if err != nil {
-				return err
-			}
+		if err != nil {
+			return err
 		}
+		// Match binding and session revocation order. The hint only selects the
+		// lock set. All authorization uses fresh facts after the locks are held.
+		if _, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: hint.UserID}); err != nil {
+			return invalidRefreshOnMissing(err)
+		}
+		current, err := q.GetSession(ctx, db.GetSessionParams{ID: hint.SessionID})
+		if err != nil {
+			return invalidRefreshOnMissing(err)
+		}
+		if _, err := q.LockRefreshMembers(ctx, db.LockRefreshMembersParams{
+			UserID: hint.UserID, MemberIds: []string{current.MemberID.String, current.SsoMemberID.String, requestedMemberID},
+		}); err != nil {
+			return err
+		}
+		sess, err := q.LockSessionForRefresh(ctx, db.LockSessionForRefreshParams{ID: hint.SessionID})
+		if err != nil {
+			return invalidRefreshOnMissing(err)
+		}
+		token, err := q.LockRefreshToken(ctx, db.LockRefreshTokenParams{TokenHash: hash})
+		if err != nil {
+			return invalidRefreshOnMissing(err)
+		}
+		if token.SessionID != sess.ID || sess.UserID != hint.UserID {
+			return apierr.New("invalid_grant", "refresh token is invalid")
+		}
+		now := time.Now().UTC()
+		replayed := token.UsedAt.Valid
+		invalid := token.RevokedAt.Valid || replayed || !token.ExpiresAt.Time.After(now) ||
+			(st.RefreshIdleTTL > 0 && !token.IssuedAt.Time.Add(st.RefreshIdleTTL).After(now)) ||
+			sess.RevokedAt.Valid || !sess.ExpiresAt.Time.After(now)
 		if invalid {
-			if err = q.RevokeRefreshFamily(ctx, db.RevokeRefreshFamilyParams{FamilyID: token.FamilyID}); err != nil {
+			if err := q.RevokeSession(ctx, db.RevokeSessionParams{ID: sess.ID}); err != nil {
 				return err
 			}
-			if err = q.RevokeSession(ctx, db.RevokeSessionParams{ID: token.SessionID}); err != nil {
+			if err := q.RevokeRefreshFamily(ctx, db.RevokeRefreshFamilyParams{FamilyID: token.FamilyID}); err != nil {
 				return err
 			}
 			if replayed {
@@ -230,48 +259,54 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 			rejected = true
 			return nil
 		}
-		sid, family = token.SessionID, token.FamilyID
-		sess, err := q.GetSession(ctx, db.GetSessionParams{ID: sid})
+		active, err := activeUser(ctx, q, sess.UserID)
 		if err != nil {
 			return err
-		}
-		if sess.RevokedAt.Valid || !sess.ExpiresAt.Time.After(now) {
-			if err := q.RevokeRefreshFamily(ctx, db.RevokeRefreshFamilyParams{FamilyID: family}); err != nil {
-				return err
-			}
-			rejected = true
-			return nil
-		}
-		uid, assurance, methods = sess.UserID, int(sess.AssuranceLevel), append([]string(nil), sess.AuthMethods...)
-		active, checkErr := activeUser(ctx, q, uid)
-		if checkErr != nil {
-			return checkErr
 		}
 		if !active {
 			return apierr.New("invalid_grant", "the account is not active")
 		}
-		memberID = sess.MemberID.String
-		if requestedMemberID != "" {
-			memberID = requestedMemberID
+		memberID := sess.MemberID.String
+		spaceID, err := refreshBindingSpace(ctx, q, sess.UserID, memberID, sess.SsoMemberID.String, now)
+		if err != nil {
+			return err
 		}
-		if memberID != "" {
+		if requestedMemberID != "" && requestedMemberID != memberID {
 			var permitted bool
-			spaceID, permitted, checkErr = boundMemberSpace(ctx, q, uid, memberID, now)
-			if checkErr != nil {
-				return checkErr
+			spaceID, permitted, err = boundMemberSpace(ctx, q, sess.UserID, requestedMemberID, now)
+			if err != nil {
+				return err
 			}
 			if !permitted {
 				return apierr.New("PERMISSION_DENIED", "the selected member is not available to this user")
 			}
-			if err := q.SetSessionMember(ctx, db.SetSessionMemberParams{ID: sid, UserID: uid, MemberID: pgtype.Text{String: memberID, Valid: true}}); err != nil {
+			memberID = requestedMemberID
+		}
+		if _, err := q.MarkRefreshUsed(ctx, db.MarkRefreshUsedParams{ID: token.ID}); err != nil {
+			return invalidRefreshOnMissing(err)
+		}
+		if memberID != "" {
+			if err := q.SetSessionMember(ctx, db.SetSessionMemberParams{ID: sess.ID, UserID: sess.UserID, MemberID: pgtype.Text{String: memberID, Valid: true}}); err != nil {
 				return err
 			}
 		}
-		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{ID: string(ids.New[ids.RefreshTokenID]("rft")), SessionID: sid, FamilyID: family, TokenHash: s.hashToken(next), ExpiresAt: pgTime(now.Add(st.RefreshTTL))})
+		_, err = q.CreateRefreshToken(ctx, db.CreateRefreshTokenParams{
+			ID: string(ids.New[ids.RefreshTokenID]("rft")), SessionID: sess.ID, FamilyID: token.FamilyID,
+			TokenHash: s.hashToken(next), ExpiresAt: pgTime(now.Add(st.RefreshTTL)),
+		})
 		if err != nil {
 			return err
 		}
-		return audit.Write(ctx, q, "user", uid, "auth.session.refresh", sid, "success")
+		jwt, err := s.Signer.Sign(security.Claims{
+			Issuer: s.Signer.Issuer(), Subject: sess.UserID, MemberID: memberID, SpaceID: spaceID,
+			Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(),
+			JWTID: jti, SessionID: sess.ID, Assurance: int(sess.AssuranceLevel), AMR: sess.AuthMethods, Type: "user",
+		})
+		if err != nil {
+			return err
+		}
+		tokens = Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: next, SessionID: sess.ID}
+		return audit.Write(ctx, q, "user", sess.UserID, "auth.session.refresh", sess.ID, "success")
 	})
 	if err != nil {
 		return Tokens{}, err
@@ -279,12 +314,47 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 	if rejected {
 		return Tokens{}, apierr.New("invalid_grant", "refresh token has been revoked")
 	}
-	jti, _ := randomToken("jti_")
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: uid, MemberID: memberID, SpaceID: spaceID, Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(), JWTID: jti, SessionID: sid, Assurance: assurance, AMR: methods, Type: "user"})
-	if err != nil {
-		return Tokens{}, err
+	return tokens, nil
+}
+
+func (s *Service) refreshSessionHint(ctx context.Context, q *db.Queries, raw string) (db.GetRefreshSessionHintRow, []byte, error) {
+	for _, hash := range s.tokenHashes(raw) {
+		hint, err := q.GetRefreshSessionHint(ctx, db.GetRefreshSessionHintParams{TokenHash: hash})
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return hint, hash, err
+		}
 	}
-	return Tokens{AccessToken: jwt, TokenType: "Bearer", ExpiresIn: int64(st.AccessTTL / time.Second), RefreshToken: next, SessionID: sid}, nil
+	return db.GetRefreshSessionHintRow{}, nil, pgx.ErrNoRows
+}
+
+func invalidRefreshOnMissing(err error) error {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return apierr.New("invalid_grant", "refresh token is invalid")
+	}
+	return err
+}
+
+func refreshBindingSpace(ctx context.Context, q *db.Queries, userID, memberID, ssoMemberID string, now time.Time) (string, error) {
+	if ssoMemberID != "" && ssoMemberID != memberID {
+		_, permitted, err := boundMemberSpace(ctx, q, userID, ssoMemberID, now)
+		if err != nil {
+			return "", err
+		}
+		if !permitted {
+			return "", apierr.New("invalid_grant", "the original SSO binding is no longer active")
+		}
+	}
+	if memberID == "" {
+		return "", nil
+	}
+	spaceID, permitted, err := boundMemberSpace(ctx, q, userID, memberID, now)
+	if err != nil {
+		return "", err
+	}
+	if !permitted {
+		return "", apierr.New("PERMISSION_DENIED", "the session member binding is no longer active")
+	}
+	return spaceID, nil
 }
 
 // CreateAgentAccess exchanges a one-time agent credential validation for a
@@ -552,6 +622,12 @@ func (s *Service) IntrospectTx(ctx context.Context, q *db.Queries, token, audien
 	}
 	if claims.MemberID != sess.MemberID.String {
 		return security.Claims{}, false, nil
+	}
+	if sess.SsoMemberID.Valid && sess.SsoMemberID.String != claims.MemberID {
+		_, permitted, err := boundMemberSpace(ctx, q, claims.Subject, sess.SsoMemberID.String, time.Now().UTC())
+		if err != nil || !permitted {
+			return security.Claims{}, false, err
+		}
 	}
 	if claims.MemberID != "" {
 		spaceID, permitted, err := boundMemberSpace(ctx, q, claims.Subject, claims.MemberID, time.Now().UTC())
