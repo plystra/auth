@@ -81,7 +81,7 @@ func TestSAMLConnectionParsesMetadataBuildsBoundRequestAndRejectsInvalidResponse
 	}
 }
 
-func testSAMLMetadata(t *testing.T, key *rsa.PrivateKey) string {
+func testSAMLMetadata(t testing.TB, key *rsa.PrivateKey) string {
 	t.Helper()
 	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test-idp"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, BasicConstraintsValid: true, IsCA: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
