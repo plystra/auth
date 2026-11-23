@@ -1,6 +1,8 @@
 package protocol
 
 import (
+	"bytes"
+	"compress/flate"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -8,8 +10,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -116,12 +118,30 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 }
 
 func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testing.T) {
+	t.Run("single certificate", func(t *testing.T) { checkSAMLExpiryDuringLogin(t, false, false) })
+	t.Run("implicit signer expires with same-key renewal", func(t *testing.T) { checkSAMLExpiryDuringLogin(t, true, false) })
+	t.Run("active signer with expired predecessor", func(t *testing.T) { checkSAMLExpiryDuringLogin(t, true, true) })
+}
+
+func checkSAMLExpiryDuringLogin(t *testing.T, overlap, signWithReplacement bool) {
+	t.Helper()
 	f := newJITMappingFixture(t, false)
 	ctx, cancel := context.WithTimeout(t.Context(), 25*time.Second)
 	defer cancel()
 	f.svc.Issuer = "https://auth.test"
 	notAfter := time.Now().Add(8 * time.Second).Truncate(time.Second)
-	metadata, signing := newSAMLTestIssuerUntil(t, notAfter)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata, signing := samlTestIssuerWithKey(t, key, time.Now().Add(-time.Minute), notAfter)
+	if overlap {
+		nextMetadata, replacement := samlTestIssuerWithKey(t, key, time.Now().Add(-time.Minute), time.Now().Add(time.Hour))
+		metadata = appendSAMLTestKey(t, metadata, nextMetadata, "signing")
+		if signWithReplacement {
+			signing = replacement
+		}
+	}
 	actor := authorization.WithHumanActor(ctx, f.owner, "usr_sso_http_owner")
 	connection, err := f.svc.CreateConnection(actor, f.owner, f.space, enterprise.ConnectionInput{
 		Name: "Expiring IdP", Provider: "saml", SAMLMetadata: metadata,
@@ -132,21 +152,7 @@ func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testin
 	}
 	var mux http.ServeMux
 	(HTTP{Enterprise: f.svc}).Register(&mux)
-	path := "/v1/sso/" + connection.ID
-	start := httptest.NewRecorder()
-	mux.ServeHTTP(start, httptest.NewRequestWithContext(ctx, http.MethodGet, path+"/start", nil))
-	var result struct{ Data enterprise.StartResult }
-	if start.Code != http.StatusOK || json.Unmarshal(start.Body.Bytes(), &result) != nil || result.Data.State == "" {
-		t.Fatalf("SSO start did not return an authorization request: status=%d", start.Code)
-	}
-	var requestID string
-	if err := f.st.Pool.QueryRow(ctx, "SELECT request_id FROM sso_states WHERE connection_id=$1", connection.ID).Scan(&requestID); err != nil {
-		t.Fatal(err)
-	}
-	payload := signedSAMLTestResponse(t, signing, connection, requestID, "expiring-idp-subject", nil, false)
-	form := url.Values{"RelayState": {result.Data.State}, "SAMLResponse": {payload}}
-	req := httptest.NewRequestWithContext(ctx, http.MethodPost, path+"/callback", strings.NewReader(form.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req := samlLoginRequest(t, ctx, &mux, connection, signing, overlap && !signWithReplacement)
 	before := f.counts(t)
 	gate, err := f.st.BeginIdempotency(ctx)
 	if err != nil {
@@ -191,6 +197,14 @@ func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testin
 		t.Fatal(err)
 	}
 	w := <-done
+	if signWithReplacement {
+		requireSAMLLogin(t, w)
+		// Once it is the sole active signer the successor can omit KeyInfo.
+		after := httptest.NewRecorder()
+		mux.ServeHTTP(after, samlLoginRequest(t, ctx, &mux, connection, signing, true))
+		requireSAMLLogin(t, after)
+		return
+	}
 	var refused struct{ Error struct{ Code string } }
 	if w.Code != http.StatusServiceUnavailable || json.Unmarshal(w.Body.Bytes(), &refused) != nil || refused.Error.Code != "temporarily_unavailable" {
 		t.Fatalf("callback after certificate expiry: status=%d code=%q", w.Code, refused.Error.Code)
@@ -200,6 +214,152 @@ func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testin
 	}
 }
 
+func TestSAMLMetadataSigningOverlapAuthenticatesEitherIdPKey(t *testing.T) {
+	f := newJITMappingFixture(t, false)
+	ctx := t.Context()
+	f.svc.Issuer = "https://auth.test"
+	metadata, predecessor := newSAMLTestIssuer(t)
+	next, successor := newSAMLTestIssuer(t)
+	encryption, encryptionSigner := newSAMLTestIssuer(t)
+	expired, expiredSigner := newSAMLTestIssuerUntil(t, time.Now().Add(-time.Second))
+	upcoming, futureSigner := newSAMLTestIssuerWithWindow(t, time.Now().Add(time.Hour), time.Now().Add(2*time.Hour))
+	metadata = appendSAMLTestKey(t, metadata, next, "")
+	metadata = appendSAMLTestKey(t, metadata, expired, "signing")
+	metadata = appendSAMLTestKey(t, metadata, upcoming, "signing")
+	metadata = appendSAMLTestKey(t, metadata, encryption, "encryption")
+	// A certificate can also appear after the signing leaf in an X509Data chain.
+	document := etree.NewDocument()
+	if err := document.ReadFromString(metadata); err != nil {
+		t.Fatal(err)
+	}
+	x509Data := document.Root().FindElement("./IDPSSODescriptor/KeyDescriptor/KeyInfo/X509Data")
+	chainCert := document.Root().FindElement("./IDPSSODescriptor/KeyDescriptor[@use='encryption']/KeyInfo/X509Data/X509Certificate")
+	x509Data.AddChild(chainCert.Copy())
+	metadata, err := document.WriteToString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := authorization.WithHumanActor(ctx, f.owner, "usr_sso_http_owner")
+	connection, err := f.svc.CreateConnection(actor, f.owner, f.space, enterprise.ConnectionInput{
+		Name: "IdP signing rollover", Provider: "saml", SAMLMetadata: metadata,
+		RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mux http.ServeMux
+	(HTTP{Enterprise: f.svc}).Register(&mux)
+	for _, tc := range []struct {
+		name                 string
+		signing              *dsig.SigningContext
+		omitKeyInfo, allowed bool
+	}{
+		{"predecessor", predecessor, false, true},
+		{"successor", successor, false, true},
+		{"predecessor without KeyInfo", predecessor, true, true},
+		{"unidentified successor during overlap", successor, true, false},
+		{"expired predecessor", expiredSigner, false, false},
+		{"before validity window", futureSigner, false, false},
+		{"encryption only", encryptionSigner, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := samlLoginRequest(t, ctx, &mux, connection, tc.signing, tc.omitKeyInfo)
+			before := f.counts(t)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if tc.allowed {
+				requireSAMLLogin(t, w)
+				return
+			}
+			var out struct{ Error struct{ Code string } }
+			if w.Code != http.StatusBadRequest || json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Error.Code != "invalid_grant" || f.counts(t) != before {
+				t.Fatalf("unavailable signing key: status=%d code=%q", w.Code, out.Error.Code)
+			}
+		})
+	}
+}
+
+func samlLoginRequest(t *testing.T, ctx context.Context, mux *http.ServeMux, connection enterprise.Connection, signer *dsig.SigningContext, omitKeyInfo bool) *http.Request {
+	t.Helper()
+	path := "/v1/sso/" + connection.ID
+	start := httptest.NewRecorder()
+	mux.ServeHTTP(start, httptest.NewRequestWithContext(ctx, http.MethodGet, path+"/start", nil))
+	var result struct{ Data enterprise.StartResult }
+	if start.Code != http.StatusOK || json.Unmarshal(start.Body.Bytes(), &result) != nil {
+		t.Fatalf("SSO start status=%d", start.Code)
+	}
+	redirect, err := url.Parse(result.Data.AuthorizationURL)
+	if err != nil || result.Data.State == "" || redirect.Query().Get("RelayState") != result.Data.State {
+		t.Fatal("SSO start did not return a bound redirect")
+	}
+	raw, err := base64.StdEncoding.DecodeString(redirect.Query().Get("SAMLRequest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := flate.NewReader(bytes.NewReader(raw))
+	defer func() { _ = reader.Close() }()
+	var authRequest struct {
+		XMLName xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:protocol AuthnRequest"`
+		ID      string   `xml:"ID,attr"`
+	}
+	if err := xml.NewDecoder(reader).Decode(&authRequest); err != nil || authRequest.ID == "" {
+		t.Fatalf("invalid AuthnRequest in the redirect: %v", err)
+	}
+	payload := signedSAMLTestResponse(t, signer, connection, authRequest.ID, "rollover-user", nil, false)
+	if omitKeyInfo {
+		raw, err := base64.StdEncoding.DecodeString(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		document := etree.NewDocument()
+		if err := document.ReadFromBytes(raw); err != nil {
+			t.Fatal(err)
+		}
+		signature := document.Root().FindElement("./Signature")
+		signature.RemoveChild(signature.FindElement("./KeyInfo"))
+		raw, err = document.WriteToBytes()
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload = base64.StdEncoding.EncodeToString(raw)
+	}
+	form := url.Values{"RelayState": {result.Data.State}, "SAMLResponse": {payload}}
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, path+"/callback", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func requireSAMLLogin(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	var out struct{ Data account.AuthResult }
+	if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &out) != nil || out.Data.User.ID == "" || out.Data.Tokens == nil || out.Data.Tokens.SessionID == "" {
+		t.Fatalf("SAML login did not return a session: status=%d", w.Code)
+	}
+}
+
+func appendSAMLTestKey(t *testing.T, metadata, additional, use string) string {
+	t.Helper()
+	document, other := etree.NewDocument(), etree.NewDocument()
+	if err := document.ReadFromString(metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.ReadFromString(additional); err != nil {
+		t.Fatal(err)
+	}
+	key := other.Root().FindElement("./IDPSSODescriptor/KeyDescriptor").Copy()
+	key.RemoveAttr("use")
+	if use != "" {
+		key.CreateAttr("use", use)
+	}
+	idp := document.Root().FindElement("./IDPSSODescriptor")
+	idp.InsertChildAt(idp.FindElement("./SingleSignOnService").Index(), key)
+	encoded, err := document.WriteToString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
+
 func newSAMLTestIssuer(t *testing.T) (string, *dsig.SigningContext) {
 	t.Helper()
 	return newSAMLTestIssuerUntil(t, time.Now().Add(time.Hour))
@@ -207,12 +367,22 @@ func newSAMLTestIssuer(t *testing.T) (string, *dsig.SigningContext) {
 
 func newSAMLTestIssuerUntil(t *testing.T, notAfter time.Time) (string, *dsig.SigningContext) {
 	t.Helper()
+	return newSAMLTestIssuerWithWindow(t, time.Now().Add(-time.Minute), notAfter)
+}
+
+func newSAMLTestIssuerWithWindow(t *testing.T, notBefore, notAfter time.Time) (string, *dsig.SigningContext) {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cert := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "directory-idp"},
-		NotBefore: time.Now().Add(-time.Minute), NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature}
+	return samlTestIssuerWithKey(t, key, notBefore, notAfter)
+}
+
+func samlTestIssuerWithKey(t *testing.T, key *rsa.PrivateKey, notBefore, notAfter time.Time) (string, *dsig.SigningContext) {
+	t.Helper()
+	cert := &x509.Certificate{Subject: pkix.Name{CommonName: "directory-idp"},
+		NotBefore: notBefore, NotAfter: notAfter, KeyUsage: x509.KeyUsageDigitalSignature}
 	der, err := x509.CreateCertificate(rand.Reader, cert, cert, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
