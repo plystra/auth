@@ -53,6 +53,23 @@ Stop the stack with `docker compose -f docker-compose.dev.yml down`. The databas
 persists. For an application example with its own database and online authorization checks,
 see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 
+### Set up workforce sign-in
+
+1. A Space administrator creates an OIDC or SAML connection at
+   `POST /v1/spaces/{id}/sso-connections` with request-bound step-up.
+2. The administrator creates a directory at `POST /v1/spaces/{id}/directories`, selects
+   `sso_connection_id` and the IdP's stable `sso_identity_claim`, and stores the SCIM
+   token returned once. Provision the employee through `/scim/v2/{dir_id}/Users`.
+   The employee's `externalId` must exactly match the selected IdP claim.
+3. Start the employee's login at `GET /v1/sso/{connection_id}/start` and submit the IdP
+   response to the matching callback. The account can renew its session at `/v1/auth/refresh`.
+4. On departure, use SCIM to set `active=false` with the current resource `If-Match` value.
+   Related sessions and refresh credentials lose online access on commit, including sessions
+   established through that binding before switching members. Reprovisioned employees sign in again.
+
+Migration `0068` revokes existing enterprise SSO sessions whose original binding was unrecorded.
+Deploy updated Auth binaries with the migration and plan for those users to sign in again.
+
 ## Verify a checkout
 
 Install the Go version declared in [go.mod](go.mod), Make and Docker. Run `make check` from
