@@ -4,19 +4,53 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
+	"encoding/xml"
+	"strings"
 	"time"
 
 	"github.com/plystra/auth/internal/apierr"
 	saml2 "github.com/russellhaering/gosaml2"
+	"github.com/russellhaering/gosaml2/types"
 	dsig "github.com/russellhaering/goxmldsig"
 )
+
+const maxSAMLResponseSize = 8 * 1024 * 1024
 
 type samlSignatureKeyHint struct {
 	KeyInfo *struct{} `xml:"http://www.w3.org/2000/09/xmldsig# KeyInfo"`
 }
 
 func (h *samlSignatureKeyHint) missing() bool { return h != nil && h.KeyInfo == nil }
+
+func parseSAMLResponseHints(response string) (inResponseTo string, keyHintMissing bool, err error) {
+	if len(response) > maxSAMLResponseSize {
+		return "", false, apierr.New("invalid_request", "SAMLResponse is too large")
+	}
+	if strings.TrimSpace(response) == "" {
+		return "", false, apierr.New("invalid_request", "SAMLResponse is required")
+	}
+	decoded, err := base64.StdEncoding.DecodeString(response)
+	if err != nil {
+		return "", false, apierr.New("invalid_grant", "the SAML response is invalid")
+	}
+	var hints struct {
+		types.UnverifiedBaseResponse
+		Signature  *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
+		Assertions []struct {
+			Signature *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
+		} `xml:"urn:oasis:names:tc:SAML:2.0:assertion Assertion"`
+	}
+	if err := xml.Unmarshal(decoded, &hints); err != nil {
+		return "", false, apierr.New("invalid_grant", "the SAML response is invalid")
+	}
+	keyHintMissing = hints.Signature.missing()
+	for _, assertion := range hints.Assertions {
+		keyHintMissing = keyHintMissing || assertion.Signature.missing()
+	}
+	return hints.InResponseTo, keyHintMissing, nil
+}
 
 func certificateValidAt(cert *x509.Certificate, now time.Time) bool {
 	return !now.Before(cert.NotBefore) && !now.After(cert.NotAfter)

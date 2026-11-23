@@ -895,29 +895,13 @@ func (s *Service) Callback(ctx context.Context, in CallbackInput) (account.AuthR
 }
 
 func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in CallbackInput) (account.AuthResult, error) {
-	if strings.TrimSpace(in.SAMLResponse) == "" {
-		return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is required")
-	}
-	if len(in.SAMLResponse) > 8*1024*1024 {
-		return account.AuthResult{}, apierr.New("invalid_request", "SAMLResponse is too large")
+	inResponseTo, keyHintMissing, err := parseSAMLResponseHints(in.SAMLResponse)
+	if err != nil {
+		return account.AuthResult{}, err
 	}
 	provider, err := s.samlProvider(row)
 	if err != nil {
 		return account.AuthResult{}, err
-	}
-	decoded, err := base64.StdEncoding.DecodeString(in.SAMLResponse)
-	if err != nil {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
-	}
-	var unverified struct {
-		types.UnverifiedBaseResponse
-		Signature  *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
-		Assertions []struct {
-			Signature *samlSignatureKeyHint `xml:"http://www.w3.org/2000/09/xmldsig# Signature"`
-		} `xml:"urn:oasis:names:tc:SAML:2.0:assertion Assertion"`
-	}
-	if err := xml.Unmarshal(decoded, &unverified); err != nil {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the SAML response is invalid")
 	}
 	var state db.SsoState
 	if strings.TrimSpace(in.State) != "" {
@@ -932,7 +916,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 			if state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
 				return apierr.New("invalid_grant", "SAML state is invalid or expired")
 			}
-			if state.RequestID.Valid && unverified.InResponseTo != state.RequestID.String {
+			if state.RequestID.Valid && inResponseTo != state.RequestID.String {
 				return apierr.New("invalid_grant", "the SAML response does not match the authorization request")
 			}
 			return nil
@@ -940,12 +924,8 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 		if err != nil {
 			return account.AuthResult{}, err
 		}
-	} else if unverified.InResponseTo != "" {
+	} else if inResponseTo != "" {
 		return account.AuthResult{}, apierr.New("invalid_grant", "an unsolicited SAML response cannot contain InResponseTo")
-	}
-	keyHintMissing := unverified.Signature.missing()
-	for _, assertion := range unverified.Assertions {
-		keyHintMissing = keyHintMissing || assertion.Signature.missing()
 	}
 	info, err := provider.verify(ctx, in.SAMLResponse, keyHintMissing)
 	if err != nil {
