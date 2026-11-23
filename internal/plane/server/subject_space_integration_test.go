@@ -33,7 +33,7 @@ func TestAuthorizationHTTPChecksRequiredSSOForUnboundUserTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := sessions.VerifyAccess(user.AccessToken)
+	claims, err := sessions.VerifyAccess(ctx, user.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}

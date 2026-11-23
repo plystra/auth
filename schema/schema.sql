@@ -1961,3 +1961,125 @@ ALTER TABLE sessions
     ADD COLUMN sso_connection_id text REFERENCES sso_connections(id),
     ADD CONSTRAINT sessions_sso_connection_requires_member
         CHECK (sso_connection_id IS NULL OR sso_member_id IS NOT NULL);
+
+
+ALTER TABLE applications
+    ADD COLUMN human_oidc_generation bigint NOT NULL DEFAULT 1 CHECK (human_oidc_generation > 0);
+
+-- A client that is restored to an earlier configuration must not regain
+-- access to requests, codes or UserInfo credentials issued before the change.
+CREATE FUNCTION set_human_oidc_generation() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.human_oidc_enabled, NEW.status, NEW.visibility, NEW.review_status,
+        NEW.client_id, NEW.redirect_uris, NEW.client_secret_hash)
+        IS DISTINCT FROM
+       (OLD.human_oidc_enabled, OLD.status, OLD.visibility, OLD.review_status,
+        OLD.client_id, OLD.redirect_uris, OLD.client_secret_hash) THEN
+        NEW.human_oidc_generation := OLD.human_oidc_generation + 1;
+    ELSE
+        NEW.human_oidc_generation := OLD.human_oidc_generation;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER applications_human_oidc_generation
+    BEFORE UPDATE ON applications FOR EACH ROW EXECUTE FUNCTION set_human_oidc_generation();
+
+CREATE TABLE oidc_login_requests (
+    id text PRIMARY KEY CHECK (left(id, 4) = 'lrq_'),
+    request_hash bytea NOT NULL UNIQUE CHECK (octet_length(request_hash) = 32),
+    application_id text NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    application_generation bigint NOT NULL CHECK (application_generation > 0),
+    redirect_uri text NOT NULL CHECK (redirect_uri <> ''),
+    scope text NOT NULL CHECK (scope <> ''),
+    state text NOT NULL CHECK (state <> ''),
+    nonce text NOT NULL CHECK (nonce <> ''),
+    code_challenge text NOT NULL CHECK (length(code_challenge) = 43),
+    status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'approved', 'denied')),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz,
+    CHECK ((status = 'pending') = (consumed_at IS NULL))
+);
+CREATE INDEX oidc_login_requests_expiry_idx ON oidc_login_requests (expires_at);
+
+CREATE TABLE oidc_login_codes (
+    id text PRIMARY KEY CHECK (left(id, 4) = 'lcd_'),
+    code_hash bytea NOT NULL UNIQUE CHECK (octet_length(code_hash) = 32),
+    request_id text NOT NULL UNIQUE REFERENCES oidc_login_requests(id) ON DELETE CASCADE,
+    application_id text NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    application_generation bigint NOT NULL CHECK (application_generation > 0),
+    user_id text NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    session_id text NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    redirect_uri text NOT NULL CHECK (redirect_uri <> ''),
+    scope text NOT NULL CHECK (scope <> ''),
+    nonce text NOT NULL CHECK (nonce <> ''),
+    code_challenge text NOT NULL CHECK (length(code_challenge) = 43),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    expires_at timestamptz NOT NULL,
+    consumed_at timestamptz
+);
+CREATE INDEX oidc_login_codes_expiry_idx ON oidc_login_codes (expires_at);
+
+
+-- The redeemed code is the immutable link to the client generation,
+-- approved scopes, subject and original session.
+CREATE TABLE oidc_userinfo_tokens (
+    code_id text PRIMARY KEY REFERENCES oidc_login_codes(id) ON DELETE CASCADE,
+    token_hash bytea NOT NULL UNIQUE CHECK (octet_length(token_hash) = 32),
+    expires_at timestamptz NOT NULL
+);
+CREATE INDEX oidc_userinfo_tokens_expiry_idx ON oidc_userinfo_tokens(expires_at);
+
+CREATE VIEW oidc_active_login_sessions AS
+SELECT s.id AS session_id, u.id AS user_id, u.email, u.email_verified_at,
+       u.display_name, u.avatar_url, LEAST(s.expires_at, b.expires_at) AS expires_at
+FROM sessions s
+JOIN users u ON u.id = s.user_id
+LEFT JOIN user_members b ON b.user_id = s.user_id AND b.member_id = s.member_id
+LEFT JOIN members m ON m.id = s.member_id
+WHERE s.revoked_at IS NULL AND s.expires_at > statement_timestamp()
+  AND u.disabled_at IS NULL AND u.status = 'active'
+  AND (s.member_id IS NULL OR (
+      m.type = 'human' AND m.status = 'active'
+      AND b.status = 'active' AND b.revoked_at IS NULL
+      AND (b.expires_at IS NULL OR b.expires_at > statement_timestamp())
+  ));
+
+
+CREATE TABLE signing_keys (
+    kid text PRIMARY KEY CHECK (kid ~ '^[0-9a-f]{16}$'),
+    issuer text NOT NULL CHECK (issuer <> ''),
+    private_key_ciphertext bytea NOT NULL CHECK (octet_length(private_key_ciphertext) > 28),
+    status text NOT NULL CHECK (status IN ('next', 'active', 'retiring'))
+);
+
+CREATE UNIQUE INDEX signing_keys_current_status_idx
+    ON signing_keys (status) WHERE status IN ('next', 'active');
+
+REVOKE UPDATE, DELETE ON TABLE signing_keys FROM plystra_auth_app;
+ALTER TABLE signing_keys ENABLE ROW LEVEL SECURITY;
+CREATE POLICY signing_keys_read ON signing_keys
+    FOR SELECT TO plystra_auth_app USING (true);
+CREATE POLICY signing_keys_bootstrap ON signing_keys
+    FOR INSERT TO plystra_auth_app WITH CHECK (status = 'active');
+
+-- Publisher-managed secrets follow a fixed authentication method. Keeping their
+-- digests separate from the original client_secret_hash preserves outstanding
+-- authorization codes when a publisher rotates its credential.
+ALTER TABLE applications
+    ADD COLUMN token_endpoint_auth_method text NOT NULL DEFAULT 'none'
+        CHECK (token_endpoint_auth_method IN ('none', 'client_secret_basic')),
+    ADD COLUMN oauth_client_secret_hash bytea,
+    ADD COLUMN oauth_previous_secret_hash bytea,
+    ADD COLUMN oauth_previous_secret_expires_at timestamptz,
+    ADD CONSTRAINT applications_oauth_client_secrets CHECK (
+        (token_endpoint_auth_method = 'none' AND oauth_client_secret_hash IS NULL AND oauth_previous_secret_hash IS NULL)
+        OR (token_endpoint_auth_method = 'client_secret_basic' AND client_secret_hash IS NULL
+            AND oauth_client_secret_hash IS NOT NULL AND octet_length(oauth_client_secret_hash) = 32
+            AND jsonb_array_length(redirect_uris) > 0)
+    ),
+    ADD CONSTRAINT applications_prior_oauth_secret CHECK (
+        (oauth_previous_secret_hash IS NULL) = (oauth_previous_secret_expires_at IS NULL)
+        AND (oauth_previous_secret_hash IS NULL OR octet_length(oauth_previous_secret_hash) = 32)
+    );

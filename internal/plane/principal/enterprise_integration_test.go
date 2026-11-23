@@ -38,7 +38,7 @@ func TestDirectoryManagementHTTPBindsVersionAndAcceptsBodylessDelete(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := sessions.VerifyAccess(tokens.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), tokens.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestDirectorySSOConfigurationHTTPBindsClaimAndPresenceToStepUp(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := sessions.VerifyAccess(tokens.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), tokens.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func verifyEnterpriseListAuthorization(t *testing.T, operation, collection strin
 		}
 		return response.StatusCode, body
 	}
-	claims, err := sessions.VerifyAccess(humanTokens.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), humanTokens.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}

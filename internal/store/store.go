@@ -94,6 +94,15 @@ func (s *Store) Close() {
 	}
 }
 func (s *Store) Queries() *db.Queries { return db.New(s.Pool) }
+
+// RequestQueries reads through the open HTTP request transaction when present.
+func (s *Store) RequestQueries(ctx context.Context) *db.Queries {
+	if tx := requestTransaction(ctx); tx != nil {
+		return tx.q
+	}
+	return s.Queries()
+}
+
 func (s *Store) InTx(ctx context.Context, fn func(*db.Queries) error) error {
 	if request := requestTransaction(ctx); request != nil {
 		if request.closed {

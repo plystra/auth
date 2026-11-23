@@ -3,3 +3,10 @@
 //   sqlc v1.31.1
 
 package db
+
+type SigningKey struct {
+	Kid                  string `json:"kid"`
+	Issuer               string `json:"issuer"`
+	PrivateKeyCiphertext []byte `json:"private_key_ciphertext"`
+	Status               string `json:"status"`
+}

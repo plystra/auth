@@ -70,6 +70,39 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 Migration `0068` revokes existing enterprise SSO sessions whose original binding was unrecorded.
 Deploy updated Auth binaries with the migration and plan for those users to sign in again.
 
+### Provision signing keys
+
+Run `plystra-auth migrate` before serving. In deployments that configure an encrypted
+ES256 PEM, use the same initial file, issuer and signing-key encryption key on every replica.
+The first successful startup initializes the shared PostgreSQL signing key set. Later starts
+load that set using the configured issuer and encryption key. Running replicas read the
+database ring for issuance, verification, JWKS and readiness. After a rotation commits,
+new tokens use the active key and JWKS publishes the active and retiring public keys.
+An unreadable ring makes the service unready. Requests that need its keys return HTTP
+503 until access is restored. Failed issuance rolls back the consumption of an OAuth
+authorization code or a session refresh token, allowing the caller to retry.
+The mounted file supplies the initial key when the database has no signing keys.
+Development without a configured file continues to use an ephemeral process-local key.
+
+Keep the signing-key encryption key outside PostgreSQL and available to restore its backups.
+
+### Integrate application sign-in
+
+1. Register an application with its exact HTTPS callback and `human_oidc_enabled: true`.
+   An application that only signs users in can supply an empty permission manifest.
+   Select `client_secret_basic` for a confidential server client and securely retain the
+   one-time client secret.
+2. Load the issuer's OpenID configuration from `/.well-known/openid-configuration`.
+   Begin a code request with `scope=openid`, unique state and nonce, and a PKCE S256
+   challenge. The authorization API returns the pending request for authenticated consent.
+3. Submit the consent decision to `POST /oauth/authorize` with a user access token.
+   The application receives the code at its registered callback after consent navigation.
+   Verify state, exchange the code with its original callback and PKCE verifier, and validate
+   the signed ID token against the issuer's JWKS, issuer, audience, expiry and original nonce.
+4. Use the returned access token with UserInfo for approved claims. To roll a confidential
+   client's credentials, use `POST /v1/applications/{app_id}/oauth-client-secret/rotate`
+   with request-bound step-up and choose the old secret's overlap window.
+
 ## Verify a checkout
 
 Install the Go version declared in [go.mod](go.mod), Make and Docker. Run `make check` from

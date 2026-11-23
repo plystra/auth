@@ -92,7 +92,7 @@ func (f *jitMappingFixture) login(t *testing.T, subject string, groups ...string
 	if err != nil || result.Tokens == nil {
 		t.Fatalf("SSO callback failed to create a session: %v", err)
 	}
-	claims, err := f.svc.Sessions.VerifyAccess(result.Tokens.AccessToken)
+	claims, err := f.svc.Sessions.VerifyAccess(t.Context(), result.Tokens.AccessToken)
 	if err != nil || claims.MemberID == "" {
 		t.Fatalf("SSO callback did not issue a member token: %v", err)
 	}

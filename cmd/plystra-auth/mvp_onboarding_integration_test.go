@@ -231,7 +231,7 @@ func TestEmptyDeploymentCreatesBusinessPermissionsThroughPublicEntrypoints(t *te
 	(&principal.API{Accounts: accounts, Sessions: sessions, Signer: signer, Authorization: authz, Factors: factors, Applications: apps, Agents: agents, Approvals: approvals}).Register(
 		humago.New(principalMux, route.HumaConfig("MVP onboarding principal", "1.0.0")))
 	(protocol.HTTP{Issuer: "https://auth.example.test", Agents: agents, Accounts: accounts, Applications: apps, Sessions: sessions, Authorization: authz}).Register(principalMux)
-	registerJWKS(principalMux, signer)
+	registerJWKS(principalMux, sessions)
 	principalHandler := route.MiddlewareWithOriginPolicyAndIdempotencyAndCredentialAuditAndRateLimit(route.Principal, principalMux, nil, st, validateCredential, nil, nil)
 	principalRequest := func(path, token, body string) *httptest.ResponseRecorder {
 		t.Helper()

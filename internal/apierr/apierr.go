@@ -36,6 +36,8 @@ func WithRequestID(e *Error, requestID string) *Error { c := *e; c.RequestID = r
 func WithStatus(e *Error, status int) *Error          { c := *e; c.status = status; return &c }
 func Status(code string) int {
 	switch strings.ToLower(strings.TrimSpace(code)) {
+	case "request_body_too_large":
+		return http.StatusRequestEntityTooLarge
 	case "invalid_request", "invalid_grant", "invalid_scope", "invalid_target", "validation_failed", "inline_grants_not_allowed":
 		return http.StatusBadRequest
 	case "invalid_client", "invalid_credentials", "invalid_token", "unauthorized", "unauthenticated", "credential_plane_mismatch":

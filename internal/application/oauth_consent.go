@@ -22,6 +22,7 @@ import (
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 )
 
@@ -56,10 +57,6 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 	if in.Decision == "deny" && (in.MemberID != "" || len(in.Permissions) != 0) {
 		return "", apierr.New("invalid_request", "denial must not select a member or permissions")
 	}
-	claims, err := s.Sessions.VerifyAccess(in.AccessToken.Value())
-	if err != nil || claims.Type != "user" || claims.Subject != in.UserID || claims.SessionID == "" {
-		return "", apierr.New("invalid_token", "an authenticated user session is required")
-	}
 	permissions := uniqueConsentPermissions(in.Permissions)
 	if in.Decision == "approve" && len(permissions) != len(in.Permissions) {
 		return "", apierr.New("invalid_scope", "permissions contain duplicates or empty values")
@@ -74,7 +71,15 @@ func (s OAuthConsent) Decide(ctx context.Context, in OAuthConsentInput) (string,
 		}
 	}
 	var redirectTo string
-	err = s.Applications.Store.InTx(ctx, func(q *db.Queries) error {
+	err := s.Applications.Store.InTx(ctx, func(q *db.Queries) error {
+		signer, err := s.Sessions.CurrentSigner(ctx, q)
+		if err != nil {
+			return err
+		}
+		claims, err := signer.Verify(in.AccessToken.Value(), time.Now().UTC(), security.DefaultApplicationAudience)
+		if err != nil || claims.Type != "user" || claims.Subject != in.UserID || claims.SessionID == "" {
+			return apierr.New("invalid_token", "an authenticated user session is required")
+		}
 		request, err := s.Applications.LockOAuthAuthorizationRequestTx(ctx, q, in.RequestID)
 		if err != nil {
 			return err

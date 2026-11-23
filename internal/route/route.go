@@ -351,7 +351,7 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 			}
 		}
 		request := r.WithContext(ctx)
-		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" {
+		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" && !usesProtocolCredential(p, r) {
 			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
 				if auditFailure != nil {
 					if auditErr := auditFailure(ctx, p, credentialType(r.Header.Get("Authorization")), credentialErrorCode(err)); auditErr != nil {
@@ -359,9 +359,17 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 						return
 					}
 				}
+				var public *apierr.Error
+				if p == Principal && isUserInfoRead(r) && errors.As(err, &public) && public.GetStatus() == http.StatusUnauthorized {
+					w.Header().Set("WWW-Authenticate", BearerChallenge(r.Header.Get("Authorization")))
+				}
 				writeRouteError(w, ctx, err)
 				return
 			}
+		}
+		if err := checkOAuthSecretIdempotency(request, p); err != nil {
+			writeRouteError(w, ctx, err)
+			return
 		}
 		if manager != nil && isWriteMethod(r.Method) {
 			serveIdempotent(w, request, next, p, manager, nil)
@@ -369,6 +377,38 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 		}
 		next.ServeHTTP(w, request)
 	})
+}
+
+// These credentials are verified by the named protocol handler. Neither
+// represents a principal-plane session on any other route.
+func usesProtocolCredential(p Plane, r *http.Request) bool {
+	if p != Principal {
+		return false
+	}
+	switch {
+	case isUserInfoRead(r):
+		parts := strings.Fields(r.Header.Get("Authorization"))
+		return len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") && strings.HasPrefix(parts[1], "oui_")
+	case r.Method == http.MethodPost && (r.URL.Path == "/oauth/token" || r.URL.Path == "/oauth/revoke"):
+		scheme, _, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+		return strings.EqualFold(scheme, "Basic")
+	default:
+		return false
+	}
+}
+
+func isUserInfoRead(r *http.Request) bool {
+	return r.Method == http.MethodGet && r.URL.Path == "/oauth/userinfo"
+}
+
+// BearerChallenge distinguishes unsuccessful token authentication from a request
+// that did not supply a Bearer credential (RFC 6750 section 3.1).
+func BearerChallenge(authorization string) string {
+	parts := strings.Fields(authorization)
+	if len(parts) == 2 && strings.EqualFold(parts[0], "Bearer") {
+		return `Bearer error="invalid_token"`
+	}
+	return "Bearer"
 }
 
 func transportRateLimitKey(p Plane, ip net.IP) string {

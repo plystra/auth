@@ -19,6 +19,7 @@ import (
 	"github.com/plystra/auth/internal/jobs"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
 )
@@ -114,7 +115,7 @@ func TestJWKSWellKnownEndpointPublishesSigningKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	var mux http.ServeMux
-	registerJWKS(&mux, signer)
+	registerJWKS(&mux, &session.Service{Signer: signer})
 	res := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/jwks.json", nil)
 	mux.ServeHTTP(res, req)

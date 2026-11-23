@@ -41,7 +41,7 @@ func TestEnterpriseSSOCommitsLoginAndSessionTogether(t *testing.T) {
 				if status != http.StatusOK || out.Data == nil || out.Data.Tokens == nil || out.Data.Tokens.RefreshToken == "" {
 					t.Fatalf("login after repair returned status=%d code=%q; want a complete session", status, out.Error.Code)
 				}
-				claims, err := f.svc.Sessions.VerifyAccess(out.Data.Tokens.AccessToken)
+				claims, err := f.svc.Sessions.VerifyAccess(t.Context(), out.Data.Tokens.AccessToken)
 				if err != nil || claims.Subject != out.Data.User.ID || claims.MemberID == "" ||
 					claims.SessionID != out.Data.Tokens.SessionID || !slices.Equal(claims.AMR, []string{method}) {
 					t.Fatal("successful login returned an invalid member-bound access token")

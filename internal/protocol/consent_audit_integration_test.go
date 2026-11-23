@@ -295,7 +295,7 @@ func TestOAuthConsentHTTPRechecksIdentityClientAndExpiryAfterWaiting(t *testing.
 					}
 				}
 				if strings.HasPrefix(change, "access_expiry") {
-					claims, err := f.sessions.VerifyAccess(f.tokens.AccessToken)
+					claims, err := f.sessions.VerifyAccess(t.Context(), f.tokens.AccessToken)
 					if err != nil {
 						t.Fatal(err)
 					}

@@ -129,7 +129,7 @@ func TestDirectoryOIDCSSOReusesProvisionedIdentityWithoutEmailOrRoleLinking(t *t
 		t.Fatal("SSO did not reuse the exact SCIM user, profile, member and binding")
 	}
 	var users, members, grants, provenance, audits int
-	claims, err := f.svc.Sessions.VerifyAccess(result.Data.Tokens.AccessToken)
+	claims, err := f.svc.Sessions.VerifyAccess(t.Context(), result.Data.Tokens.AccessToken)
 	if err != nil || claims.MemberID != f.memberID {
 		t.Fatal("SSO token is not bound to the provisioned directory member")
 	}

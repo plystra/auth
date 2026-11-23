@@ -18,13 +18,15 @@ type applicationsPathInput struct {
 
 type registerApplicationInput struct {
 	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	Body          struct {
-		Name                string   `json:"name" minLength:"1" maxLength:"120"`
-		RedirectURIs        []string `json:"redirect_uris,omitempty" maxItems:"20"`
-		ManifestPermissions []string `json:"manifest_permissions" maxItems:"100"`
-		Visibility          string   `json:"visibility,omitempty" enum:"private,public"`
-		HumanOIDCEnabled    *bool    `json:"human_oidc_enabled,omitempty"`
+		Name                    string   `json:"name" minLength:"1" maxLength:"120"`
+		RedirectURIs            []string `json:"redirect_uris,omitempty" maxItems:"20"`
+		ManifestPermissions     []string `json:"manifest_permissions" maxItems:"100"`
+		Visibility              string   `json:"visibility,omitempty" enum:"private,public"`
+		HumanOIDCEnabled        *bool    `json:"human_oidc_enabled,omitempty"`
+		TokenEndpointAuthMethod *string  `json:"token_endpoint_auth_method,omitempty" enum:"none,client_secret_basic"`
 	}
 }
 
@@ -99,7 +101,25 @@ type applicationKeyCreation struct {
 	Secret secret.String          `json:"secret"`
 }
 
+type oauthCredentialOutput[T any] struct {
+	CacheControl string `header:"Cache-Control"`
+	Pragma       string `header:"Pragma"`
+	Body         struct {
+		Data T `json:"data"`
+	}
+}
+
+type rotateOAuthSecretInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ApplicationID string `path:"app_id"`
+	Body          struct {
+		Grace *int32 `json:"grace_period_seconds,omitempty" minimum:"0" maximum:"86400"`
+	}
+}
+
 func (a *API) registerApplicationRoutes(api huma.API) {
+	route.Register(api, route.NewSpec(application.RotateOAuthSecretOperation, "POST", "/v1/applications/{app_id}/oauth-client-secret/rotate", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.rotateOAuthSecret)
 	route.Register(api, route.NewSpec("applications.list", "GET", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithAuthoritativeCheck()), a.listApplications)
 	route.Register(api, route.NewSpec("applications.register", "POST", "/v1/spaces/{id}/applications", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}, route.WithStepUp()), a.registerApplication)
 	route.Register(api, route.NewSpec("applications.update", "PATCH", "/v1/applications/{app_id}", route.Principal, "auth.applications:manage", []route.Subject{route.HumanAgent}), a.updateApplication)
@@ -362,13 +382,9 @@ func (a *API) listApplications(ctx context.Context, in *applicationsPathInput) (
 	return out, nil
 }
 
-func (a *API) registerApplication(ctx context.Context, in *registerApplicationInput) (*authorizationDataOutput[application.PublishedApplication], error) {
+func (a *API) registerApplication(ctx context.Context, in *registerApplicationInput) (*oauthCredentialOutput[application.RegisteredApplication], error) {
 	if a.Applications == nil {
 		return nil, apierr.New("UNAVAILABLE", "application registration is unavailable")
-	}
-	actor, ctx, err := a.actorForSpace(ctx, in.Authorization, in.ID, "auth.applications:manage")
-	if err != nil {
-		return nil, err
 	}
 	stepUpRequest := map[string]any{
 		"space_id": in.ID, "name": in.Body.Name,
@@ -380,20 +396,62 @@ func (a *API) registerApplication(ctx context.Context, in *registerApplicationIn
 	if in.Body.HumanOIDCEnabled != nil {
 		stepUpRequest["human_oidc_enabled"] = *in.Body.HumanOIDCEnabled
 	}
+	registration := application.RegisterInput{
+		SpaceID: in.ID, Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs,
+		ManifestPermissions: in.Body.ManifestPermissions, Visibility: in.Body.Visibility,
+		HumanOIDCEnabled: in.Body.HumanOIDCEnabled != nil && *in.Body.HumanOIDCEnabled,
+	}
+	if in.Body.TokenEndpointAuthMethod != nil {
+		registration.TokenEndpointAuthMethod = *in.Body.TokenEndpointAuthMethod
+		stepUpRequest["token_endpoint_auth_method"] = *in.Body.TokenEndpointAuthMethod
+	}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.applications:manage", "applications.register", registration.GovernanceRequest())
+	if err != nil {
+		return nil, err
+	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, "applications.register", stepUpRequest)
 	if err != nil {
 		return nil, err
 	}
-	registered, err := a.Applications.Register(ctx, actor.ID, application.RegisterInput{
-		SpaceID: in.ID, Name: in.Body.Name, RedirectURIs: in.Body.RedirectURIs,
-		ManifestPermissions: in.Body.ManifestPermissions, Visibility: in.Body.Visibility,
-		HumanOIDCEnabled: in.Body.HumanOIDCEnabled != nil && *in.Body.HumanOIDCEnabled,
-	})
+	registered, err := a.Applications.Register(ctx, actor.ID, registration)
 	if err != nil {
 		return nil, err
 	}
-	out := &authorizationDataOutput[application.PublishedApplication]{}
+	out := &oauthCredentialOutput[application.RegisteredApplication]{CacheControl: "no-store", Pragma: "no-cache"}
 	out.Body.Data = registered
+	return out, nil
+}
+
+func (a *API) rotateOAuthSecret(ctx context.Context, in *rotateOAuthSecretInput) (*oauthCredentialOutput[application.OAuthSecretRotation], error) {
+	if a.Applications == nil {
+		return nil, apierr.New("UNAVAILABLE", "application management is unavailable")
+	}
+	if _, err := a.authenticatePrincipal(ctx, in.Authorization); err != nil {
+		return nil, err
+	}
+	space, err := a.Applications.ApplicationSpace(ctx, in.ApplicationID)
+	if err != nil {
+		return nil, err
+	}
+	grace := int32(86400)
+	if in.Body.Grace != nil {
+		grace = *in.Body.Grace
+	}
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, space, "", "auth.applications:manage", application.RotateOAuthSecretOperation,
+		application.OAuthRotationGovernanceRequest(space, in.ApplicationID, grace))
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, application.RotateOAuthSecretOperation, map[string]any{"application_id": in.ApplicationID, "grace_period_seconds": grace})
+	if err != nil {
+		return nil, err
+	}
+	rotated, err := a.Applications.RotateOAuthSecret(ctx, actor.ID, in.ApplicationID, grace)
+	if err != nil {
+		return nil, err
+	}
+	out := &oauthCredentialOutput[application.OAuthSecretRotation]{CacheControl: "no-store", Pragma: "no-cache"}
+	out.Body.Data = rotated
 	return out, nil
 }
 

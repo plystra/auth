@@ -104,20 +104,25 @@ type ApiKeyGraceSecret struct {
 }
 
 type Application struct {
-	ID                         string             `json:"id"`
-	SpaceID                    string             `json:"space_id"`
-	Name                       string             `json:"name"`
-	RedirectUris               []byte             `json:"redirect_uris"`
-	AllowedScopes              []byte             `json:"allowed_scopes"`
-	ClientID                   string             `json:"client_id"`
-	ClientSecretHash           []byte             `json:"client_secret_hash"`
-	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
-	ManifestPermissions        []byte             `json:"manifest_permissions"`
-	Visibility                 string             `json:"visibility"`
-	Status                     string             `json:"status"`
-	ReviewStatus               string             `json:"review_status"`
-	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
-	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
+	ID                           string             `json:"id"`
+	SpaceID                      string             `json:"space_id"`
+	Name                         string             `json:"name"`
+	RedirectUris                 []byte             `json:"redirect_uris"`
+	AllowedScopes                []byte             `json:"allowed_scopes"`
+	ClientID                     string             `json:"client_id"`
+	ClientSecretHash             []byte             `json:"client_secret_hash"`
+	CreatedAt                    pgtype.Timestamptz `json:"created_at"`
+	ManifestPermissions          []byte             `json:"manifest_permissions"`
+	Visibility                   string             `json:"visibility"`
+	Status                       string             `json:"status"`
+	ReviewStatus                 string             `json:"review_status"`
+	PendingManifestPermissions   []byte             `json:"pending_manifest_permissions"`
+	HumanOidcEnabled             bool               `json:"human_oidc_enabled"`
+	HumanOidcGeneration          int64              `json:"human_oidc_generation"`
+	TokenEndpointAuthMethod      string             `json:"token_endpoint_auth_method"`
+	OauthClientSecretHash        []byte             `json:"oauth_client_secret_hash"`
+	OauthPreviousSecretHash      []byte             `json:"oauth_previous_secret_hash"`
+	OauthPreviousSecretExpiresAt pgtype.Timestamptz `json:"oauth_previous_secret_expires_at"`
 }
 
 type ApplicationInstallation struct {
@@ -431,6 +436,55 @@ type OauthAuthorizationRequest struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
+type OidcActiveLoginSession struct {
+	SessionID       string             `json:"session_id"`
+	UserID          string             `json:"user_id"`
+	Email           string             `json:"email"`
+	EmailVerifiedAt pgtype.Timestamptz `json:"email_verified_at"`
+	DisplayName     string             `json:"display_name"`
+	AvatarUrl       string             `json:"avatar_url"`
+	ExpiresAt       interface{}        `json:"expires_at"`
+}
+
+type OidcLoginCode struct {
+	ID                    string             `json:"id"`
+	CodeHash              []byte             `json:"code_hash"`
+	RequestID             string             `json:"request_id"`
+	ApplicationID         string             `json:"application_id"`
+	ApplicationGeneration int64              `json:"application_generation"`
+	UserID                string             `json:"user_id"`
+	SessionID             string             `json:"session_id"`
+	RedirectUri           string             `json:"redirect_uri"`
+	Scope                 string             `json:"scope"`
+	Nonce                 string             `json:"nonce"`
+	CodeChallenge         string             `json:"code_challenge"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt            pgtype.Timestamptz `json:"consumed_at"`
+}
+
+type OidcLoginRequest struct {
+	ID                    string             `json:"id"`
+	RequestHash           []byte             `json:"request_hash"`
+	ApplicationID         string             `json:"application_id"`
+	ApplicationGeneration int64              `json:"application_generation"`
+	RedirectUri           string             `json:"redirect_uri"`
+	Scope                 string             `json:"scope"`
+	State                 string             `json:"state"`
+	Nonce                 string             `json:"nonce"`
+	CodeChallenge         string             `json:"code_challenge"`
+	Status                string             `json:"status"`
+	CreatedAt             pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt             pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt            pgtype.Timestamptz `json:"consumed_at"`
+}
+
+type OidcUserinfoToken struct {
+	CodeID    string             `json:"code_id"`
+	TokenHash []byte             `json:"token_hash"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Operator struct {
 	UserID       string             `json:"user_id"`
 	Capabilities []byte             `json:"capabilities"`
@@ -606,6 +660,13 @@ type SignInAttempt struct {
 	Method             string             `json:"method"`
 	PasskeySession     []byte             `json:"passkey_session"`
 	TargetSpaceID      pgtype.Text        `json:"target_space_id"`
+}
+
+type SigningKey struct {
+	Kid                  string `json:"kid"`
+	Issuer               string `json:"issuer"`
+	PrivateKeyCiphertext []byte `json:"private_key_ciphertext"`
+	Status               string `json:"status"`
 }
 
 type Space struct {

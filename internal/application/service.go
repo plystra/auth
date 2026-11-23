@@ -27,6 +27,7 @@ import (
 	"github.com/plystra/auth/internal/ids"
 	"github.com/plystra/auth/internal/member"
 	"github.com/plystra/auth/internal/requestinfo"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/stepup"
 	"github.com/plystra/auth/internal/store"
 )
@@ -53,43 +54,64 @@ type PublishedApplication struct {
 	CreatedAt                  time.Time `json:"created_at"`
 }
 
+type RegisteredApplication struct {
+	PublishedApplication
+	TokenEndpointAuthMethod string        `json:"token_endpoint_auth_method"`
+	ClientSecret            secret.String `json:"client_secret,omitempty"`
+}
+
 type RegisterInput struct {
-	SpaceID             string
-	Name                string
-	RedirectURIs        []string
-	ManifestPermissions []string
-	Visibility          string
-	HumanOIDCEnabled    bool
+	TokenEndpointAuthMethod string
+	SpaceID                 string
+	Name                    string
+	RedirectURIs            []string
+	ManifestPermissions     []string
+	Visibility              string
+	HumanOIDCEnabled        bool
 }
 
 // Register records a publisher-owned application. Registration does not
 // grant the application authority; installations and their positive delta are
 // evaluated separately.
-func (s *Service) Register(ctx context.Context, actorMemberID string, in RegisterInput) (PublishedApplication, error) {
+func (s *Service) Register(ctx context.Context, actorMemberID string, in RegisterInput) (RegisteredApplication, error) {
 	if s == nil || s.Store == nil || s.Authorization == nil {
-		return PublishedApplication{}, apierr.New("UNAVAILABLE", "application registration is unavailable")
+		return RegisteredApplication{}, apierr.New("UNAVAILABLE", "application registration is unavailable")
+	}
+	governanceDigest, err := stepup.DigestValue(in.GovernanceRequest())
+	if err != nil {
+		return RegisteredApplication{}, err
+	}
+	ctx = authorization.BindGovernanceApproval(ctx, "applications.register", in.SpaceID, governanceDigest)
+	if in.TokenEndpointAuthMethod == "" {
+		in.TokenEndpointAuthMethod = "none"
+	}
+	if in.TokenEndpointAuthMethod != "none" && in.TokenEndpointAuthMethod != "client_secret_basic" {
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "unsupported token endpoint authentication method")
+	}
+	if in.TokenEndpointAuthMethod == "client_secret_basic" && len(in.RedirectURIs) == 0 {
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "confidential clients require a registered redirect URI")
 	}
 	in.Name = strings.TrimSpace(in.Name)
 	if in.Visibility == "" {
 		in.Visibility = "private"
 	}
 	if in.Visibility != "private" && in.Visibility != "public" {
-		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application visibility is invalid")
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "application visibility is invalid")
 	}
 	if in.Name == "" || utf8.RuneCountInString(in.Name) > 120 {
-		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application name must contain 1 to 120 characters")
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "application name must contain 1 to 120 characters")
 	}
 	if in.ManifestPermissions == nil || len(in.ManifestPermissions) > 100 || len(in.ManifestPermissions) == 0 && !in.HumanOIDCEnabled {
-		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest needs 1 to 100 permissions or an empty list for human OIDC sign-in")
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "application manifest needs 1 to 100 permissions or an empty list for human OIDC sign-in")
 	}
 	if len(in.RedirectURIs) > 20 {
-		return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application has too many redirect URIs")
+		return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "application has too many redirect URIs")
 	}
 	permissions := append([]string{}, in.ManifestPermissions...)
 	slices.Sort(permissions)
 	for index, key := range permissions {
 		if strings.TrimSpace(key) != key || key == "" || (index > 0 && key == permissions[index-1]) {
-			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "application manifest contains an invalid or duplicate permission")
+			return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "application manifest contains an invalid or duplicate permission")
 		}
 	}
 	redirects := append([]string(nil), in.RedirectURIs...)
@@ -97,16 +119,16 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		parsed, err := url.Parse(raw)
 		if err != nil || parsed.Host == "" || parsed.Fragment != "" || parsed.User != nil ||
 			(parsed.Scheme != "https" && (parsed.Scheme != "http" || !isLoopbackHost(parsed.Hostname()))) {
-			return PublishedApplication{}, apierr.New("VALIDATION_FAILED", "redirect URI must use HTTPS or HTTP on a loopback host")
+			return RegisteredApplication{}, apierr.New("VALIDATION_FAILED", "redirect URI must use HTTPS or HTTP on a loopback host")
 		}
 	}
 	manifest, err := json.Marshal(permissions)
 	if err != nil {
-		return PublishedApplication{}, err
+		return RegisteredApplication{}, err
 	}
 	redirectJSON, err := json.Marshal(redirects)
 	if err != nil {
-		return PublishedApplication{}, err
+		return RegisteredApplication{}, err
 	}
 	id := string(ids.New[ids.ApplicationID]("app"))
 	effectiveManifest := manifest
@@ -117,9 +139,9 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		pendingManifest = manifest
 		reviewStatus = "pending"
 	}
-	var out PublishedApplication
+	var out RegisteredApplication
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		decision, err := s.Authorization.CheckNodeTx(ctx, q, authorization.CheckRequest{
+		decision, err := s.Authorization.CheckMutationTx(ctx, q, authorization.CheckRequest{
 			MemberID: actorMemberID, Permission: "auth.applications:manage", ResourceSpace: in.SpaceID,
 		})
 		if err != nil {
@@ -148,8 +170,16 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 				return err
 			}
 		}
+		var digest []byte
+		if in.TokenEndpointAuthMethod == "client_secret_basic" {
+			raw, hash, err := s.newPublisherOAuthSecret()
+			if err != nil {
+				return err
+			}
+			out.ClientSecret, digest = raw, hash
+		}
 		row, err := q.CreateApplication(ctx, db.CreateApplicationParams{
-			ID: id, SpaceID: in.SpaceID, Name: in.Name, ClientID: id,
+			TokenEndpointAuthMethod: in.TokenEndpointAuthMethod, OauthClientSecretHash: digest, ID: id, SpaceID: in.SpaceID, Name: in.Name, ClientID: id,
 			RedirectUris: redirectJSON, AllowedScopes: effectiveManifest,
 			ManifestPermissions: effectiveManifest, PendingManifestPermissions: pendingManifest,
 			Visibility: in.Visibility, ReviewStatus: reviewStatus, HumanOidcEnabled: in.HumanOIDCEnabled,
@@ -165,7 +195,8 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		}); err != nil {
 			return err
 		}
-		out = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,
+		out.TokenEndpointAuthMethod = in.TokenEndpointAuthMethod
+		out.PublishedApplication = PublishedApplication{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID,
 			RedirectURIs: redirects, Visibility: row.Visibility, ReviewStatus: row.ReviewStatus,
 			Status: row.Status, CreatedAt: row.CreatedAt.Time, HumanOIDCEnabled: row.HumanOidcEnabled}
 		if in.Visibility == "public" {
@@ -176,7 +207,10 @@ func (s *Service) Register(ctx context.Context, actorMemberID string, in Registe
 		}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return RegisteredApplication{}, err
+	}
+	return out, nil
 }
 
 func (s *Service) ListPublished(ctx context.Context, actorMemberID, spaceID string) ([]PublishedApplication, error) {
@@ -236,14 +270,16 @@ func isLoopbackHost(host string) bool {
 }
 
 type OAuthClient struct {
-	ID               string
-	SpaceID          string
-	Name             string
-	ClientID         string
-	RedirectURIs     []string
-	AllowedScopes    []string
-	ClientSecretHash []byte
-	HumanOIDCEnabled bool
+	TokenEndpointAuthMethod string
+	ID                      string
+	SpaceID                 string
+	Name                    string
+	ClientID                string
+	RedirectURIs            []string
+	AllowedScopes           []string
+	ClientSecretHash        []byte
+	HumanOIDCEnabled        bool
+	HumanOIDCGeneration     int64
 }
 
 type AuthorizationCode struct {
@@ -458,7 +494,7 @@ func (s *Service) OAuthClient(ctx context.Context, clientID string) (OAuthClient
 	if err := json.Unmarshal(row.AllowedScopes, &allowedScopes); err != nil {
 		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
 	}
-	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled}, nil
+	return OAuthClient{TokenEndpointAuthMethod: row.TokenEndpointAuthMethod, ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirectURIs, AllowedScopes: allowedScopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled, HumanOIDCGeneration: row.HumanOidcGeneration}, nil
 }
 
 func (s *Service) OAuthClientInstalled(ctx context.Context, applicationID, spaceID string) (bool, error) {
@@ -498,20 +534,27 @@ func (s *Service) OAuthClientByIDTx(ctx context.Context, q *db.Queries, id strin
 	if json.Unmarshal(row.RedirectUris, &redirects) != nil || json.Unmarshal(row.AllowedScopes, &scopes) != nil {
 		return OAuthClient{}, apierr.New("temporarily_unavailable", "client metadata is invalid")
 	}
-	return OAuthClient{ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects, AllowedScopes: scopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled}, nil
+	return OAuthClient{TokenEndpointAuthMethod: row.TokenEndpointAuthMethod, ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, ClientID: row.ClientID, RedirectURIs: redirects, AllowedScopes: scopes, ClientSecretHash: row.ClientSecretHash, HumanOIDCEnabled: row.HumanOidcEnabled, HumanOIDCGeneration: row.HumanOidcGeneration}, nil
 }
 
 // AuthenticateOAuthClient resolves a registered OAuth client and verifies its
 // secret when the client is confidential. Public PKCE clients have no stored
 // secret and are intentionally accepted without one.
 func (s *Service) AuthenticateOAuthClient(ctx context.Context, clientID, rawSecret string) (OAuthClient, error) {
-	client, err := s.OAuthClient(ctx, clientID)
-	return s.authenticateOAuthClient(client, rawSecret, err)
+	var client OAuthClient
+	err := s.Store.InTx(ctx, func(q *db.Queries) error {
+		var err error
+		client, err = s.AuthenticateOAuthClientTx(ctx, q, clientID, rawSecret)
+		return err
+	})
+	return client, err
 }
 
-// AuthenticateOAuthClientTx revalidates client status and secret after taking
-// the application lock shared with suspension, metadata changes and rotation.
 func (s *Service) AuthenticateOAuthClientTx(ctx context.Context, q *db.Queries, clientID, rawSecret string) (OAuthClient, error) {
+	return s.AuthenticateOAuthClientMethodTx(ctx, q, clientID, rawSecret, "")
+}
+
+func (s *Service) AuthenticateOAuthClientMethodTx(ctx context.Context, q *db.Queries, clientID, rawSecret, method string) (OAuthClient, error) {
 	row, err := q.GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: clientID})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
@@ -520,6 +563,25 @@ func (s *Service) AuthenticateOAuthClientTx(ctx context.Context, q *db.Queries, 
 		return OAuthClient{}, err
 	}
 	client, err := s.OAuthClientByIDTx(ctx, q, row.ID)
+	if err == nil && client.TokenEndpointAuthMethod == "client_secret_basic" {
+		if method != "client_secret_basic" || !strings.HasPrefix(rawSecret, "ply_ocs_") {
+			return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+		}
+		hashes, err := q.GetPublisherOAuthSecret(ctx, db.GetPublisherOAuthSecretParams{ApplicationID: client.ID})
+		if err != nil {
+			return OAuthClient{}, err
+		}
+		if !validOAuthHMACKeys(s.HMACKeys) {
+			return OAuthClient{}, apierr.New("temporarily_unavailable", "OAuth client authentication is unavailable")
+		}
+		for _, key := range s.HMACKeys {
+			hash := HMACClientSecretHash(key, rawSecret)
+			if hmac.Equal(hash, hashes.OauthClientSecretHash) || (hashes.PreviousValid && hmac.Equal(hash, hashes.OauthPreviousSecretHash)) {
+				return client, nil
+			}
+		}
+		return OAuthClient{}, apierr.New("invalid_client", "OAuth client authentication failed")
+	}
 	return s.authenticateOAuthClient(client, rawSecret, err)
 }
 

@@ -125,13 +125,13 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	}
 	employeeUserID := result.User.ID
 	initial := *result.Tokens
-	initialClaims, err := sessions.VerifyAccess(initial.AccessToken)
+	initialClaims, err := sessions.VerifyAccess(ctx, initial.AccessToken)
 	if err != nil || initialClaims.MemberID == "" || initialClaims.SpaceID != spaceID {
 		t.Fatal("SSO login did not issue an access token bound to the workforce Space")
 	}
 	assertBoundSession := func(tokens session.Tokens, memberID, authenticationMethod string) {
 		t.Helper()
-		claims, err := sessions.VerifyAccess(tokens.AccessToken)
+		claims, err := sessions.VerifyAccess(ctx, tokens.AccessToken)
 		if err != nil || claims.Subject != employeeUserID || claims.MemberID != memberID || claims.SessionID != tokens.SessionID ||
 			!slices.Equal(claims.AMR, []string{authenticationMethod}) || tokens.RefreshToken == "" {
 			t.Fatal("issued session did not preserve the employee, current membership, or authentication method")

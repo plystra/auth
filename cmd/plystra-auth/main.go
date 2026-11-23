@@ -209,18 +209,28 @@ func serve(ctx context.Context) error {
 	}
 	defer st.Close()
 	tasks := jobs.New(ctx)
-	var signer *security.Signer
+	sessionSvc := &session.Service{Store: st, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	signingKeyEncryptionKey, e := decodeDataKey(c.SigningKeyEncryptionKey)
 	if e != nil {
 		return e
 	}
 	if c.SigningKeyFile != "" {
-		signer, e = security.NewSigner(c.SigningKeyFile, c.Issuer, []byte(signingKeyEncryptionKey))
+		wrappingKey := []byte(signingKeyEncryptionKey)
+		seed, err := security.NewSigner(c.SigningKeyFile, c.Issuer, wrappingKey)
+		if err != nil {
+			return err
+		}
+		if _, err := st.InitializeSigningKeys(ctx, seed, wrappingKey); err != nil {
+			return err
+		}
+		sessionSvc.LoadSigner = func(ctx context.Context, q *db.Queries) (*security.Signer, error) {
+			return store.LoadSigningKeys(ctx, q, c.Issuer, wrappingKey)
+		}
 	} else {
-		signer, e = security.GenerateSigner(c.Issuer)
-	}
-	if e != nil {
-		return e
+		sessionSvc.Signer, e = security.GenerateSigner(c.Issuer)
+		if e != nil {
+			return e
+		}
 	}
 	settings := &space.Service{Store: st}
 	authorizationSvc := &authorization.Service{Store: st, MaxDelegationDepth: c.AgentDelegationMaxDepth}
@@ -269,7 +279,6 @@ func serve(ctx context.Context) error {
 		return fmt.Errorf("configure passkey relying party: %w", err)
 	}
 	factorSvc := &factor.Service{Store: st, DataKey: secret.New(dataKey), Limiter: limiter, WebAuthn: passkeys}
-	sessionSvc := &session.Service{Store: st, Signer: signer, HMACKeys: parseKeys(c.SessionHMACKeys)}
 	sessionSvc.Factors = factorSvc
 	sessionSvc.Settings = func(ctx context.Context) (session.Settings, error) {
 		v, e := settings.Get(ctx)
@@ -292,7 +301,7 @@ func serve(ctx context.Context) error {
 	accounts.SignInPolicy = enterpriseSvc
 	sessionSvc.SpaceSignInPolicy = enterpriseSvc
 	accounts.Invitations = invitationSvc
-	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Signer: signer, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
+	principalAPI := &principal.API{Accounts: accounts, Sessions: sessionSvc, Authorization: authorizationSvc, Agents: agentSvc, Invitations: invitationSvc, Factors: factorSvc, Approvals: approvalSvc, Applications: apps, Enterprise: enterpriseSvc}
 	serverAPI := &server.API{Applications: apps, Members: &member.Service{Store: st}, Authorization: authorizationSvc, Sessions: sessionSvc, Agents: agentSvc, Approvals: approvalSvc}
 	opsSvc, e := operator.New(st, factorSvc, parseKeys(c.SessionHMACKeys))
 	if e != nil {
@@ -336,7 +345,7 @@ func serve(ctx context.Context) error {
 	protocol.HTTP{Issuer: c.Issuer, Agents: agentSvc, Accounts: accounts, Applications: apps, Sessions: sessionSvc, Authorization: authorizationSvc, Enterprise: enterpriseSvc}.Register(principalMux)
 	serverAPI.Register(humago.New(serverMux, scfg))
 	opsAPI.Register(humago.New(opsMux, ocfg))
-	registerJWKS(principalMux, signer)
+	registerJWKS(principalMux, sessionSvc)
 	for name, mux := range map[string]*route.Mux{
 		"principal": principalMux,
 		"server":    serverMux,
@@ -351,7 +360,7 @@ func serve(ctx context.Context) error {
 		return checkReadiness(ctx, st.Pool.Ping, func(ctx context.Context) error {
 			return store.CheckMigrationVersion(ctx, st.Pool)
 		}, func() error {
-			_, err := signer.JWKS()
+			_, err := sessionSvc.JWKS(ctx)
 			return err
 		})
 	})
@@ -460,10 +469,10 @@ func checkReadiness(ctx context.Context, ping, migrations func(context.Context) 
 	return signingKey()
 }
 
-func registerJWKS(mux route.HandlerMux, signer *security.Signer) {
+func registerJWKS(mux route.HandlerMux, sessions *session.Service) {
 	route.RegisterNonJSON(mux, route.NewSpec("jwks", "GET", "/.well-known/jwks.json", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		jwks, err := signer.JWKS()
+		jwks, err := sessions.JWKS(r.Context())
 		if err != nil {
 			http.Error(w, `{"status":"not_ready"}`, http.StatusServiceUnavailable)
 			return

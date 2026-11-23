@@ -104,6 +104,10 @@ func (s *Service) CreateGovernance(ctx context.Context, in GovernanceInput) (Req
 			details.MemberID != "" || details.Kind != "human" || details.Policy != "shared" {
 			return Request{}, apierr.New("VALIDATION_FAILED", "shared member approval must target its Space")
 		}
+	} else if in.Operation == "applications.register" || in.Operation == "applications.oauth_client_secret.rotate" {
+		if in.Permission != "auth.applications:manage" || in.ResourceID != in.SpaceID || in.ResourceGroup != "" || details.MemberID != "" {
+			return Request{}, apierr.New("VALIDATION_FAILED", "application approval must target its publisher Space")
+		}
 	} else if strings.HasPrefix(in.Operation, "sso_connections.") || in.Operation == "domains.list" || in.Operation == "directories.list" {
 		if in.Permission != "auth.connections:manage" || in.ResourceID != in.SpaceID || in.ResourceGroup != "" || details.MemberID != "" {
 			return Request{}, apierr.New("VALIDATION_FAILED", "enterprise connection approval must target its Space")

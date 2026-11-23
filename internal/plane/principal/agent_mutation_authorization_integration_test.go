@@ -74,7 +74,7 @@ func TestAgentLifecycleHTTPRechecksAuthorityAfterWaitingForLocks(t *testing.T) {
 						}
 						token = issued.AccessToken
 					} else {
-						claims, err := f.sessions.VerifyAccess(token)
+						claims, err := f.sessions.VerifyAccess(t.Context(), token)
 						if err != nil {
 							t.Fatal(err)
 						}

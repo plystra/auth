@@ -40,7 +40,7 @@ func (s *Service) StepUp(ctx context.Context, raw, code, operation string, diges
 	if operation == "" || len(digest) != sha256.Size {
 		return apierr.New("VALIDATION_FAILED", "operation and a canonical request digest are required")
 	}
-	if s == nil || s.Store == nil || s.Signer == nil || s.Factors == nil {
+	if s == nil || s.Store == nil || s.Factors == nil {
 		return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
 	}
 	claims, active, err := s.Introspect(ctx, raw, security.DefaultApplicationAudience)
@@ -87,7 +87,7 @@ func (s *Service) StepUpFirstTOTP(ctx context.Context, raw string, password secr
 	if len(digest) != sha256.Size || password.Value() == "" {
 		return apierr.New("VALIDATION_FAILED", "a password and canonical request digest are required")
 	}
-	if s == nil || s.Store == nil || s.Signer == nil {
+	if s == nil || s.Store == nil {
 		return apierr.New("UNAVAILABLE", "step-up authentication is unavailable")
 	}
 	claims, active, err := s.Introspect(ctx, raw, security.DefaultApplicationAudience)

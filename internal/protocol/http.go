@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +18,6 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
-	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/route"
@@ -63,10 +63,33 @@ func (h HTTP) Register(mux route.HandlerMux) {
 }
 func (h HTTP) metadata(w http.ResponseWriter, r *http.Request) {
 	base := strings.TrimRight(h.Issuer, "/")
-	writeJSON(w, http.StatusOK, map[string]any{"issuer": h.Issuer, "authorization_endpoint": base + "/oauth/authorize", "token_endpoint": base + "/oauth/token", "revocation_endpoint": base + "/oauth/revoke", "jwks_uri": base + "/.well-known/jwks.json", "userinfo_endpoint": base + "/oauth/userinfo", "response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:token-exchange"}, "code_challenge_methods_supported": []string{"S256"}})
+	document := map[string]any{
+		"issuer": h.Issuer, "authorization_endpoint": base + "/oauth/authorize", "token_endpoint": base + "/oauth/token",
+		"revocation_endpoint": base + "/oauth/revoke", "jwks_uri": base + "/.well-known/jwks.json", "userinfo_endpoint": base + "/oauth/userinfo",
+		"response_types_supported": []string{"code"}, "grant_types_supported": []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:token-exchange"},
+		"code_challenge_methods_supported":           []string{"S256"},
+		"token_endpoint_auth_methods_supported":      []string{"client_secret_basic", "client_secret_post", "none"},
+		"revocation_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
+	}
+	if r.URL.Path == "/.well-known/openid-configuration" {
+		document["subject_types_supported"] = []string{"public"}
+		document["id_token_signing_alg_values_supported"] = []string{"ES256"}
+		document["scopes_supported"] = []string{"openid", "email", "profile"}
+	}
+	writeJSON(w, http.StatusOK, document)
 }
 func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
+	q, queryErr := url.ParseQuery(r.URL.RawQuery)
+	if queryErr != nil {
+		writeErr(w, apierr.New("invalid_request", "authorization query is invalid"))
+		return
+	}
+	for _, values := range q {
+		if len(values) != 1 {
+			writeErr(w, apierr.New("invalid_request", "authorization parameters must appear once"))
+			return
+		}
+	}
 	if q.Get("response_type") != "code" || q.Get("client_id") == "" || q.Get("redirect_uri") == "" {
 		writeErr(w, apierr.New("invalid_request", "response_type, client_id and redirect_uri are required"))
 		return
@@ -94,9 +117,29 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "redirect_uri is not registered for this client"))
 		return
 	}
-	scopes := uniqueScopes(strings.Fields(q.Get("scope")))
-	if len(scopes) == 0 || len(scopes) > 100 {
-		writeErr(w, apierr.New("invalid_scope", "at least one scope is required"))
+	scopes := parseAuthorizationScopes(q.Get("scope"))
+	if len(scopes) == 0 {
+		writeErr(w, apierr.New("invalid_scope", "scope must contain OAuth scope tokens separated by a single space"))
+		return
+	}
+	if containsString(scopes, "openid") {
+		if q.Get("resource") != "" {
+			writeErr(w, apierr.New("invalid_target", "user sign-in does not accept a business resource"))
+			return
+		}
+		request, err := h.Applications.StartOIDCLogin(r.Context(), application.OIDCLoginRequestInput{
+			ApplicationID: client.ID, ClientID: client.ClientID, RedirectURI: q.Get("redirect_uri"), Scope: scopes,
+			State: q.Get("state"), Nonce: q.Get("nonce"), CodeChallenge: challenge,
+		})
+		if err != nil {
+			writeProtocolErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, request)
+		return
+	}
+	if len(scopes) > 100 {
+		writeErr(w, apierr.New("invalid_scope", "at most 100 scopes can be requested"))
 		return
 	}
 	for _, scope := range scopes {
@@ -141,7 +184,7 @@ func (h HTTP) consent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		RequestID   string   `json:"request_id"`
 		Decision    string   `json:"decision"`
-		MemberID    string   `json:"member_id"`
+		MemberID    *string  `json:"member_id"`
 		Permissions []string `json:"permissions"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
@@ -155,10 +198,24 @@ func (h HTTP) consent(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_request", "authorization decision body is invalid"))
 		return
 	}
-	redirectTo, err := (application.OAuthConsent{Applications: h.Applications, Agents: h.Agents, Authorization: h.Authorization, Sessions: h.Sessions}).Decide(r.Context(), application.OAuthConsentInput{
-		RequestID: secret.New(body.RequestID), AccessToken: secret.New(strings.Fields(r.Header.Get("Authorization"))[1]), UserID: claims.Subject, Decision: body.Decision,
-		MemberID: body.MemberID, Permissions: body.Permissions,
-	})
+	bearer := secret.New(strings.Fields(r.Header.Get("Authorization"))[1])
+	var redirectTo string
+	if strings.HasPrefix(body.RequestID, application.OIDCLoginRequestPrefix) {
+		if body.MemberID != nil || body.Permissions != nil {
+			writeErr(w, apierr.New("invalid_request", "user sign-in does not select a member or business permissions"))
+			return
+		}
+		redirectTo, err = h.Applications.DecideOIDCLogin(r.Context(), h.Sessions, secret.New(body.RequestID), bearer, body.Decision)
+	} else {
+		var memberID string
+		if body.MemberID != nil {
+			memberID = *body.MemberID
+		}
+		redirectTo, err = (application.OAuthConsent{Applications: h.Applications, Agents: h.Agents, Authorization: h.Authorization, Sessions: h.Sessions}).Decide(r.Context(), application.OAuthConsentInput{
+			RequestID: secret.New(body.RequestID), AccessToken: bearer, UserID: claims.Subject, Decision: body.Decision,
+			MemberID: memberID, Permissions: body.Permissions,
+		})
+	}
 	if err != nil {
 		writeProtocolErr(w, err)
 		return
@@ -166,11 +223,17 @@ func (h HTTP) consent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"redirect_to": redirectTo})
 }
 func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
-	if e := r.ParseForm(); e != nil {
-		writeErr(w, apierr.New("invalid_request", "form body is invalid"))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	if err := parseOAuthForm(r); err != nil {
+		writeStandardOAuthError(w, err)
 		return
 	}
-	grantType := r.Form.Get("grant_type")
+	grantType := r.PostForm.Get("grant_type")
+	if (len(r.Header.Values("Authorization")) > 0 || r.PostForm.Has("client_secret")) && grantType != "authorization_code" && grantType != "refresh_token" {
+		writeOAuthErr(w, apierr.New("invalid_client", "client authentication is not used with this grant"))
+		return
+	}
 	if grantType == "urn:ietf:params:oauth:grant-type:token-exchange" && r.Form.Get("actor_token") != "" {
 		h.tokenExchange(w, r)
 		return
@@ -180,13 +243,13 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, apierr.New("temporarily_unavailable", "agent refresh is unavailable"))
 			return
 		}
-		clientID, clientSecret, err := oauthClientCredentials(r)
+		client, err := oauthClientCredentials(r, true)
 		if err != nil {
 			writeOAuthErr(w, err)
 			return
 		}
 		tokens, scope, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions, authorization: h.Authorization}).refresh(
-			r.Context(), clientID, secret.New(clientSecret), secret.New(r.Form.Get("refresh_token")), r.Form.Get("resource"), r.Form.Get("scope"))
+			r.Context(), client, secret.New(r.Form.Get("refresh_token")), r.Form.Get("resource"), r.Form.Get("scope"))
 		if err != nil {
 			writeOAuthErr(w, err)
 			return
@@ -223,11 +286,15 @@ func (h HTTP) token(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
+	if strings.HasPrefix(r.Form.Get("code"), "olc_") {
+		h.exchangeHumanLogin(w, r)
+		return
+	}
 	if h.Applications == nil || h.Agents == nil || h.Sessions == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "authorization code exchange is unavailable"))
 		return
 	}
-	clientID, clientSecret, err := oauthClientCredentials(r)
+	client, err := oauthClientCredentials(r, true)
 	if err != nil {
 		writeOAuthErr(w, err)
 		return
@@ -235,12 +302,12 @@ func (h HTTP) authorizationCodeToken(w http.ResponseWriter, r *http.Request) {
 	redirectURI := strings.TrimSpace(r.Form.Get("redirect_uri"))
 	verifier := r.Form.Get("code_verifier")
 	code := r.Form.Get("code")
-	if clientID == "" || redirectURI == "" || verifier == "" || code == "" {
+	if redirectURI == "" || verifier == "" || code == "" {
 		writeErr(w, apierr.New("invalid_request", "client_id, redirect_uri, code and code_verifier are required"))
 		return
 	}
 	tokens, scope, err := (tokenService{applications: h.Applications, agents: h.Agents, sessions: h.Sessions}).authorizationCode(r.Context(), codeExchangeInput{
-		clientID: clientID, clientSecret: secret.New(clientSecret), redirectURI: redirectURI, code: secret.New(code), verifier: secret.New(verifier),
+		client: client, redirectURI: redirectURI, code: secret.New(code), verifier: secret.New(verifier),
 		resource: strings.TrimSpace(r.Form.Get("resource")),
 	})
 	if err != nil {
@@ -274,46 +341,23 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-func (h HTTP) revoke(w http.ResponseWriter, r *http.Request) {
-	if e := r.ParseForm(); e != nil {
-		writeErr(w, apierr.New("invalid_request", "form body is invalid"))
-		return
-	}
-	raw := strings.TrimSpace(r.Form.Get("token"))
-	if raw == "" {
-		writeErr(w, apierr.New("invalid_request", "token is required"))
-		return
-	}
-	if h.Agents == nil || h.Sessions == nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
-		return
-	}
-	if strings.HasPrefix(raw, "ply_rt_") {
-		ctx := audit.WithCaller(r.Context(), audit.Caller{CredentialType: "oauth_refresh_token"})
-		_, err := h.Agents.RevokeOAuthRefreshToken(ctx, raw)
-		if err != nil {
-			writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if err := (tokenService{agents: h.Agents, sessions: h.Sessions}).revokeOAuthAccess(r.Context(), secret.New(raw)); err != nil {
-		writeErr(w, apierr.New("temporarily_unavailable", "token revocation is unavailable"))
-		return
-	}
-	// RFC 7009 intentionally hides whether an opaque or JWT token was known.
-	w.WriteHeader(http.StatusOK)
-}
-
 func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
 	if h.Sessions == nil {
 		writeErr(w, apierr.New("temporarily_unavailable", "userinfo is unavailable"))
 		return
 	}
-	parts := strings.Fields(r.Header.Get("Authorization"))
+	authorization := r.Header.Get("Authorization")
+	unauthorized := func(message string) {
+		w.Header().Set("WWW-Authenticate", route.BearerChallenge(authorization))
+		writeErr(w, apierr.New("invalid_token", message))
+	}
+	parts := strings.Fields(authorization)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		writeErr(w, apierr.New("invalid_token", "a bearer access token is required"))
+		unauthorized("a bearer access token is required")
+		return
+	}
+	if strings.HasPrefix(parts[1], userInfoPrefix) {
+		h.humanUserInfo(w, r, parts[1])
 		return
 	}
 	claims, active, err := h.Sessions.Introspect(r.Context(), parts[1], security.DefaultApplicationAudience)
@@ -322,7 +366,7 @@ func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !active {
-		writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
+		unauthorized("the access token is invalid")
 		return
 	}
 	if claims.Type == "user" {
@@ -332,7 +376,12 @@ func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
 		}
 		user, err := h.Accounts.Me(r.Context(), claims)
 		if err != nil {
-			writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
+			var public *apierr.Error
+			if errors.As(err, &public) && public.GetStatus() == http.StatusUnauthorized {
+				unauthorized("the access token is invalid")
+			} else {
+				writeErr(w, apierr.New("temporarily_unavailable", "userinfo is unavailable"))
+			}
 			return
 		}
 		body := map[string]any{"sub": user.ID, "email": user.Email, "email_verified": user.EmailVerified}
@@ -349,7 +398,7 @@ func (h HTTP) userinfo(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"sub": claims.Subject, "member_id": claims.MemberID, "space_id": claims.SpaceID, "principal_type": "agent"})
 		return
 	}
-	writeErr(w, apierr.New("invalid_token", "the access token is invalid"))
+	unauthorized("the access token is invalid")
 }
 
 func (h HTTP) tokenExchange(w http.ResponseWriter, r *http.Request) {
@@ -1042,7 +1091,8 @@ func writeOAuthErr(w http.ResponseWriter, err error) {
 	var publicErr *apierr.Error
 	if errors.As(err, &publicErr) {
 		if publicErr.Code == "invalid_client" {
-			w.Header().Set("WWW-Authenticate", `Basic realm="oauth/token"`)
+			writeStandardOAuthError(w, publicErr)
+			return
 		}
 		writeErr(w, publicErr)
 		return
@@ -1050,20 +1100,74 @@ func writeOAuthErr(w http.ResponseWriter, err error) {
 	writeErr(w, apierr.New("temporarily_unavailable", "OAuth token exchange is unavailable"))
 }
 
-func oauthClientCredentials(r *http.Request) (string, string, error) {
-	formID := strings.TrimSpace(r.Form.Get("client_id"))
-	formSecret := r.Form.Get("client_secret")
-	basicID, basicSecret, basicOK := r.BasicAuth()
-	if basicOK {
-		if formID != "" && formID != basicID {
-			return "", "", apierr.New("invalid_client", "OAuth client authentication failed")
+func writeStandardOAuthError(w http.ResponseWriter, err error) {
+	writeOAuthEndpointError(w, err, "oauth/token")
+}
+
+func writeOAuthEndpointError(w http.ResponseWriter, err error, realm string) {
+	var public *apierr.Error
+	if !errors.As(err, &public) {
+		public = apierr.New("temporarily_unavailable", "OAuth operation is unavailable")
+	}
+	if public.Code == "invalid_client" {
+		w.Header().Set("WWW-Authenticate", `Basic realm="`+realm+`"`)
+	}
+	writeJSON(w, apierr.Status(public.Code), map[string]string{"error": public.Code, "error_description": public.Message})
+}
+
+func parseOAuthForm(r *http.Request) error {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/x-www-form-urlencoded" || r.URL.RawQuery != "" || r.URL.ForceQuery {
+		return apierr.New("invalid_request", "OAuth parameters must be sent in the form body")
+	}
+	if err := r.ParseForm(); err != nil {
+		return apierr.New("invalid_request", "form body is invalid")
+	}
+	for _, values := range r.PostForm {
+		if len(values) != 1 {
+			return apierr.New("invalid_request", "OAuth parameters must occur once")
 		}
-		return strings.TrimSpace(basicID), basicSecret, nil
 	}
-	if formID == "" {
-		return "", "", apierr.New("invalid_request", "client_id is required")
+	return nil
+}
+
+type clientCredentials struct {
+	id, method string
+	secret     secret.String
+}
+
+func oauthClientCredentials(r *http.Request, required bool) (clientCredentials, error) {
+	formID := r.PostForm.Get("client_id")
+	if headers := r.Header.Values("Authorization"); len(headers) > 0 {
+		id, password, ok := r.BasicAuth()
+		id, idErr := url.QueryUnescape(id)
+		password, passwordErr := url.QueryUnescape(password)
+		if len(headers) != 1 || !ok || id == "" || idErr != nil || passwordErr != nil || r.PostForm.Has("client_secret") || (r.PostForm.Has("client_id") && id != formID) {
+			return clientCredentials{}, apierr.New("invalid_client", "supply one client authentication method")
+		}
+		return clientCredentials{id: id, secret: secret.New(password), method: "client_secret_basic"}, nil
 	}
-	return formID, formSecret, nil
+	if formID == "" && (required || r.PostForm.Has("client_secret") || r.PostForm.Has("client_id")) {
+		return clientCredentials{}, apierr.New("invalid_client", "OAuth client authentication failed")
+	}
+	if r.PostForm.Has("client_secret") {
+		return clientCredentials{id: formID, secret: secret.New(r.PostForm.Get("client_secret")), method: "client_secret_post"}, nil
+	}
+	return clientCredentials{id: formID, method: "none"}, nil
+}
+
+func parseAuthorizationScopes(raw string) []string {
+	var scopes []string
+	for scope := range strings.SplitSeq(raw, " ") {
+		// RFC 6749 section 3.3 excludes double quotes and backslashes from the printable ASCII token.
+		if scope == "" || strings.ContainsFunc(scope, func(c rune) bool {
+			return c < '!' || c > '~' || c == '"' || c == '\\'
+		}) {
+			return nil
+		}
+		scopes = append(scopes, scope)
+	}
+	return uniqueScopes(scopes)
 }
 
 func uniqueScopes(scopes []string) []string {

@@ -17,12 +17,20 @@ import (
 )
 
 func TestApplicationManagementHTTPRechecksIdentityAfterWaitingForLocks(t *testing.T) {
-	for _, operation := range []string{"register", "update", "key_list", "key_create", "key_grants", "key_rotate", "key_revoke", "install", "approve", "suspend", "resume", "uninstall"} {
+	for _, operation := range []string{"register", "update", "oauth_secret_rotate", "key_list", "key_create", "key_grants", "key_rotate", "key_revoke", "install", "approve", "suspend", "resume", "uninstall"} {
 		for _, change := range []string{"binding", "account", "owner"} {
 			t.Run(operation+"/"+change, func(t *testing.T) {
 				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 				defer cancel()
 				st, authz, apps, ownerID, spaceID, sessions, handler, appID := installationFixture(t, []string{"auth.authz:check", "auth.tokens:introspect"})
+				if operation == "oauth_secret_rotate" {
+					client, err := apps.Register(ctx, ownerID, application.RegisterInput{SpaceID: spaceID, Name: "Confidential",
+						RedirectURIs: []string{"https://rp.example.test/login"}, ManifestPermissions: []string{"auth.authz:check", "auth.tokens:introspect"}, TokenEndpointAuthMethod: "client_secret_basic"})
+					if err != nil {
+						t.Fatal(err)
+					}
+					appID = client.ID
+				}
 				key, _, err := apps.CreateManagedKey(ctx, ownerID, appID, application.CreateManagedKeyInput{
 					Name: "Original server", Grants: []string{"auth.authz:check", "auth.tokens:introspect"}, ExpiresAt: time.Now().Add(time.Hour),
 				})
@@ -77,6 +85,9 @@ func TestApplicationManagementHTTPRechecksIdentityAfterWaitingForLocks(t *testin
 					proof("applications.register", map[string]any{"space_id": spaceID, "name": "Forbidden publisher", "manifest_permissions": manifest, "redirect_uris": []string(nil)})
 				case "update":
 					method, body = http.MethodPatch, map[string]any{"name": "Forbidden publisher"}
+				case "oauth_secret_rotate":
+					path, body = path+"/oauth-client-secret/rotate", map[string]any{"grace_period_seconds": 0}
+					proof(application.RotateOAuthSecretOperation, map[string]any{"application_id": appID, "grace_period_seconds": 0})
 				case "key_list":
 					method, path = http.MethodGet, path+"/api-keys"
 				case "key_create":
@@ -103,7 +114,8 @@ func TestApplicationManagementHTTPRechecksIdentityAfterWaitingForLocks(t *testin
 					t.Helper()
 					var out string
 					if err := st.Pool.QueryRow(ctx, `SELECT jsonb_build_object(
-						'applications', (SELECT jsonb_agg(jsonb_build_object('id', id, 'name', name, 'manifest', manifest_permissions) ORDER BY id) FROM applications),
+						'applications', (SELECT jsonb_agg(jsonb_build_object('id', id, 'name', name, 'manifest', manifest_permissions,
+							'oauth_digest', oauth_client_secret_hash, 'previous_digest', oauth_previous_secret_hash, 'expires', oauth_previous_secret_expires_at) ORDER BY id) FROM applications),
 						'keys', (SELECT jsonb_agg(jsonb_build_object('id', id, 'scopes', scopes, 'hash', encode(secret_hash, 'hex'), 'revoked_at', revoked_at) ORDER BY id) FROM api_keys),
 						'grace', (SELECT jsonb_agg(to_jsonb(g) ORDER BY key_id, secret_hash) FROM api_key_grace_secrets g),
 						'installations', (SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM application_installations i),

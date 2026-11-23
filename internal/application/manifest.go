@@ -96,6 +96,9 @@ func (s *Service) Update(ctx context.Context, actorMemberID, applicationID strin
 			}
 		}
 		name, redirects, manifest := row.Name, oldRedirects, oldManifest
+		if row.TokenEndpointAuthMethod == "client_secret_basic" && in.RedirectURIs != nil && len(*in.RedirectURIs) == 0 {
+			return apierr.New("VALIDATION_FAILED", "confidential clients require a registered redirect URI")
+		}
 		pending, reviewStatus := oldPending, row.ReviewStatus
 		humanOIDC := row.HumanOidcEnabled
 		if in.HumanOIDCEnabled != nil {

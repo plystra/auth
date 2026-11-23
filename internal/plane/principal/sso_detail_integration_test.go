@@ -55,7 +55,7 @@ func TestSSOConnectionDetailScopesAndProtectsConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := sessions.VerifyAccess(human.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), human.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestSSOConnectionDetailScopesAndProtectsConfiguration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		otherClaims, err := sessions.VerifyAccess(otherSession.AccessToken)
+		otherClaims, err := sessions.VerifyAccess(t.Context(), otherSession.AccessToken)
 		if err != nil {
 			t.Fatal(err)
 		}

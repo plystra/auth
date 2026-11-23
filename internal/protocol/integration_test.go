@@ -263,6 +263,34 @@ func TestOAuthUserinfoReturnsUserAndAgentSubjects(t *testing.T) {
 	if status, body := request("not-a-token"); status != http.StatusUnauthorized || body["error"].(map[string]any)["code"] != "invalid_token" {
 		t.Fatalf("invalid userinfo status=%d body=%v", status, body)
 	}
+	t.Run("profile store unavailable", func(t *testing.T) {
+		profileStore, err := store.Open(ctx, database.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		profileStore.Close()
+		var outageMux http.ServeMux
+		(HTTP{Accounts: &account.Service{Store: profileStore}, Sessions: sessions}).Register(&outageMux)
+		req := httptest.NewRequest(http.MethodGet, "/oauth/userinfo", nil)
+		req.Header.Set("Authorization", "Bearer "+userTokens.AccessToken)
+		res := httptest.NewRecorder()
+		outageMux.ServeHTTP(res, req)
+		if res.Code != http.StatusServiceUnavailable {
+			t.Fatalf("userinfo status = %d, want 503", res.Code)
+		}
+		if len(res.Header().Values("WWW-Authenticate")) != 0 {
+			t.Fatal("userinfo challenged a valid session during a profile store outage")
+		}
+		var body struct {
+			Error struct{ Code string }
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil || body.Error.Code != "temporarily_unavailable" {
+			t.Fatalf("unexpected userinfo error code %q, parse error %v", body.Error.Code, err)
+		}
+		if strings.Contains(res.Body.String(), "userinfo@example.test") || strings.Contains(res.Body.String(), userTokens.AccessToken) {
+			t.Fatal("userinfo error disclosed a user email or access token")
+		}
+	})
 }
 
 func TestOAuthAuthorizationCodeUsesPKCEAndCreatesBoundAgent(t *testing.T) {

@@ -54,7 +54,7 @@ func TestSSOConnectionListProtectsSpaceProjectionAndRollsBackProof(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims, err := sessions.VerifyAccess(human.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), human.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -49,16 +49,21 @@ func (s tokenService) agentKey(ctx context.Context, raw secret.String, resource 
 
 func (s tokenService) delegated(ctx context.Context, subject, actor secret.String, requested []string, resource string) (session.Tokens, string, error) {
 	resource = strings.TrimSpace(resource)
-	verified, err := s.sessions.Signer.Verify(subject.Value(), time.Now().UTC(), security.DefaultApplicationAudience)
-	if err != nil && resource != "" && resource != security.DefaultApplicationAudience {
-		verified, err = s.sessions.Signer.Verify(subject.Value(), time.Now().UTC(), resource)
-	}
-	if err != nil || verified.Type != "agent" {
-		return session.Tokens{}, "", apierr.New("invalid_grant", "subject token is invalid")
-	}
 	var tokens session.Tokens
 	var scope string
-	err = s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+	err := s.agents.Store.InTx(ctx, func(q *db.Queries) error {
+		signer, err := s.sessions.CurrentSigner(ctx, q)
+		if err != nil {
+			return err
+		}
+		now := time.Now().UTC()
+		verified, err := signer.Verify(subject.Value(), now, security.DefaultApplicationAudience)
+		if err != nil && resource != "" && resource != security.DefaultApplicationAudience {
+			verified, err = signer.Verify(subject.Value(), now, resource)
+		}
+		if err != nil || verified.Type != "agent" {
+			return apierr.New("invalid_grant", "subject token is invalid")
+		}
 		var client application.OAuthClient
 		if verified.Audience != security.DefaultApplicationAudience {
 			if s.applications == nil {
@@ -195,66 +200,6 @@ func (s tokenService) oauthScopesTx(ctx context.Context, q *db.Queries, parent s
 	return allowed, nil
 }
 
-func (s tokenService) revokeOAuthAccess(ctx context.Context, raw secret.String) error {
-	parts := strings.Split(raw.Value(), ".")
-	if len(parts) != 3 {
-		return nil
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		return nil
-	}
-	var hint struct {
-		Subject string `json:"sub"`
-	}
-	if json.Unmarshal(payload, &hint) != nil || hint.Subject == "" {
-		return nil
-	}
-	return s.agents.Store.InTx(ctx, func(q *db.Queries) error {
-		// The untrusted subject selects only a lookup and lock. Authority comes
-		// from full verification against this Agent's stored client below.
-		if err := member.LockChainsTx(ctx, q, hint.Subject); err != nil {
-			return err
-		}
-		root, err := q.GetAgentMember(ctx, db.GetAgentMemberParams{MemberID: hint.Subject})
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if root.Source.String != "oauth" {
-			return nil
-		}
-		audience := root.OauthClientID.String
-		if audience == "" {
-			audience = security.DefaultApplicationAudience
-		}
-		claims, active, err := s.sessions.IntrospectTx(ctx, q, raw.Value(), audience)
-		if err != nil {
-			return err
-		}
-		if !active && audience != security.DefaultApplicationAudience {
-			claims, active, err = s.sessions.IntrospectTx(ctx, q, raw.Value(), security.DefaultApplicationAudience)
-			if err != nil {
-				return err
-			}
-		}
-		if !active || claims.Type != "agent" || claims.Subject != root.ID {
-			return nil
-		}
-		caller := audit.Caller{CredentialType: "agent_access_token"}
-		if root.OauthClientID.Valid {
-			client, err := q.GetApplicationByClientID(ctx, db.GetApplicationByClientIDParams{ClientID: root.OauthClientID.String})
-			if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-				return err
-			}
-			caller.ApplicationID = client.ID
-		}
-		return s.agents.RevokeOAuthTx(audit.WithCaller(ctx, caller), q, root.ID)
-	})
-}
-
 func exchangeCredentialError(err error) error {
 	var public *apierr.Error
 	if errors.As(err, &public) && public.Code == "UNAUTHENTICATED" {
@@ -264,15 +209,16 @@ func exchangeCredentialError(err error) error {
 }
 
 type codeExchangeInput struct {
-	clientID, redirectURI, resource string
-	clientSecret, code, verifier    secret.String
+	client                clientCredentials
+	redirectURI, resource string
+	code, verifier        secret.String
 }
 
 func (s tokenService) authorizationCode(ctx context.Context, in codeExchangeInput) (session.Tokens, string, error) {
 	var tokens session.Tokens
 	var scope string
 	err := s.applications.Store.InTx(ctx, func(q *db.Queries) error {
-		client, err := s.applications.AuthenticateOAuthClientTx(ctx, q, in.clientID, in.clientSecret.Value())
+		client, err := s.applications.AuthenticateOAuthClientMethodTx(ctx, q, in.client.id, in.client.secret.Value(), in.client.method)
 		if err != nil {
 			return err
 		}
@@ -330,12 +276,12 @@ func (s tokenService) authorizationCode(ctx context.Context, in codeExchangeInpu
 	return tokens, scope, nil
 }
 
-func (s tokenService) refresh(ctx context.Context, clientID string, clientSecret, raw secret.String, resource, scope string) (session.Tokens, string, error) {
+func (s tokenService) refresh(ctx context.Context, credentials clientCredentials, raw secret.String, resource, scope string) (session.Tokens, string, error) {
 	var tokens session.Tokens
 	var issuedScope string
 	var replayed bool
 	err := s.applications.Store.InTx(ctx, func(q *db.Queries) error {
-		client, err := s.applications.AuthenticateOAuthClientTx(ctx, q, clientID, clientSecret.Value())
+		client, err := s.applications.AuthenticateOAuthClientMethodTx(ctx, q, credentials.id, credentials.secret.Value(), credentials.method)
 		if err != nil {
 			return err
 		}

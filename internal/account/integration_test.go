@@ -591,7 +591,7 @@ func TestTOTPSignInRequiresSecondStepAndPreservesAMROnRefresh(t *testing.T) {
 	if err != nil || result.Tokens == nil {
 		t.Fatalf("TOTP completion did not issue a session: %v", err)
 	}
-	claims, err := sessions.VerifyAccess(result.Tokens.AccessToken)
+	claims, err := sessions.VerifyAccess(t.Context(), result.Tokens.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -602,7 +602,7 @@ func TestTOTPSignInRequiresSecondStepAndPreservesAMROnRefresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refreshedClaims, err := sessions.VerifyAccess(refreshed.AccessToken)
+	refreshedClaims, err := sessions.VerifyAccess(t.Context(), refreshed.AccessToken)
 	if err != nil {
 		t.Fatal(err)
 	}

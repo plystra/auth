@@ -161,10 +161,12 @@ func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) (Cre
 
 const createApplication = `-- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled)
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled,
+                          token_endpoint_auth_method, oauth_client_secret_hash)
 VALUES ($1, $2, $3, COALESCE($4, '[]'::jsonb),
         COALESCE($5, '[]'::jsonb), $6, $7,
-        $8, $9, $10, $11, $12)
+        $8, $9, $10, $11, $12,
+        $13, $14)
 RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
           manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
 `
@@ -182,6 +184,8 @@ type CreateApplicationParams struct {
 	ReviewStatus               string      `json:"review_status"`
 	PendingManifestPermissions []byte      `json:"pending_manifest_permissions"`
 	HumanOidcEnabled           bool        `json:"human_oidc_enabled"`
+	TokenEndpointAuthMethod    string      `json:"token_endpoint_auth_method"`
+	OauthClientSecretHash      []byte      `json:"oauth_client_secret_hash"`
 }
 
 type CreateApplicationRow struct {
@@ -215,6 +219,8 @@ func (q *Queries) CreateApplication(ctx context.Context, arg CreateApplicationPa
 		arg.ReviewStatus,
 		arg.PendingManifestPermissions,
 		arg.HumanOidcEnabled,
+		arg.TokenEndpointAuthMethod,
+		arg.OauthClientSecretHash,
 	)
 	var i CreateApplicationRow
 	err := row.Scan(
@@ -525,7 +531,7 @@ func (q *Queries) GetActiveInstallationForKeyRestriction(ctx context.Context, ar
 
 const getApplicationByClientID = `-- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, human_oidc_enabled, status, created_at
+       token_endpoint_auth_method, visibility, review_status, human_oidc_enabled, human_oidc_generation, status, created_at
 FROM applications
 WHERE client_id = $1
 LIMIT 1
@@ -536,18 +542,20 @@ type GetApplicationByClientIDParams struct {
 }
 
 type GetApplicationByClientIDRow struct {
-	ID               string             `json:"id"`
-	SpaceID          string             `json:"space_id"`
-	Name             string             `json:"name"`
-	RedirectUris     []byte             `json:"redirect_uris"`
-	AllowedScopes    []byte             `json:"allowed_scopes"`
-	ClientID         string             `json:"client_id"`
-	ClientSecretHash []byte             `json:"client_secret_hash"`
-	Visibility       string             `json:"visibility"`
-	ReviewStatus     string             `json:"review_status"`
-	HumanOidcEnabled bool               `json:"human_oidc_enabled"`
-	Status           string             `json:"status"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	RedirectUris            []byte             `json:"redirect_uris"`
+	AllowedScopes           []byte             `json:"allowed_scopes"`
+	ClientID                string             `json:"client_id"`
+	ClientSecretHash        []byte             `json:"client_secret_hash"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
+	Visibility              string             `json:"visibility"`
+	ReviewStatus            string             `json:"review_status"`
+	HumanOidcEnabled        bool               `json:"human_oidc_enabled"`
+	HumanOidcGeneration     int64              `json:"human_oidc_generation"`
+	Status                  string             `json:"status"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicationByClientIDParams) (GetApplicationByClientIDRow, error) {
@@ -561,9 +569,11 @@ func (q *Queries) GetApplicationByClientID(ctx context.Context, arg GetApplicati
 		&i.AllowedScopes,
 		&i.ClientID,
 		&i.ClientSecretHash,
+		&i.TokenEndpointAuthMethod,
 		&i.Visibility,
 		&i.ReviewStatus,
 		&i.HumanOidcEnabled,
+		&i.HumanOidcGeneration,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -689,7 +699,7 @@ func (q *Queries) GetInstallationTarget(ctx context.Context, arg GetInstallation
 
 const getOAuthClientByID = `-- name: GetOAuthClientByID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, human_oidc_enabled, status, created_at
+       token_endpoint_auth_method, visibility, review_status, human_oidc_enabled, human_oidc_generation, status, created_at
 FROM applications
 WHERE id = $1
 FOR UPDATE
@@ -700,18 +710,20 @@ type GetOAuthClientByIDParams struct {
 }
 
 type GetOAuthClientByIDRow struct {
-	ID               string             `json:"id"`
-	SpaceID          string             `json:"space_id"`
-	Name             string             `json:"name"`
-	RedirectUris     []byte             `json:"redirect_uris"`
-	AllowedScopes    []byte             `json:"allowed_scopes"`
-	ClientID         string             `json:"client_id"`
-	ClientSecretHash []byte             `json:"client_secret_hash"`
-	Visibility       string             `json:"visibility"`
-	ReviewStatus     string             `json:"review_status"`
-	HumanOidcEnabled bool               `json:"human_oidc_enabled"`
-	Status           string             `json:"status"`
-	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	RedirectUris            []byte             `json:"redirect_uris"`
+	AllowedScopes           []byte             `json:"allowed_scopes"`
+	ClientID                string             `json:"client_id"`
+	ClientSecretHash        []byte             `json:"client_secret_hash"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
+	Visibility              string             `json:"visibility"`
+	ReviewStatus            string             `json:"review_status"`
+	HumanOidcEnabled        bool               `json:"human_oidc_enabled"`
+	HumanOidcGeneration     int64              `json:"human_oidc_generation"`
+	Status                  string             `json:"status"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
 }
 
 func (q *Queries) GetOAuthClientByID(ctx context.Context, arg GetOAuthClientByIDParams) (GetOAuthClientByIDRow, error) {
@@ -725,12 +737,37 @@ func (q *Queries) GetOAuthClientByID(ctx context.Context, arg GetOAuthClientByID
 		&i.AllowedScopes,
 		&i.ClientID,
 		&i.ClientSecretHash,
+		&i.TokenEndpointAuthMethod,
 		&i.Visibility,
 		&i.ReviewStatus,
 		&i.HumanOidcEnabled,
+		&i.HumanOidcGeneration,
 		&i.Status,
 		&i.CreatedAt,
 	)
+	return i, err
+}
+
+const getPublisherOAuthSecret = `-- name: GetPublisherOAuthSecret :one
+SELECT oauth_client_secret_hash, oauth_previous_secret_hash,
+       COALESCE(oauth_previous_secret_expires_at > clock_timestamp(), false)::boolean AS previous_valid
+FROM applications WHERE id = $1 AND token_endpoint_auth_method = 'client_secret_basic'
+`
+
+type GetPublisherOAuthSecretParams struct {
+	ApplicationID string `json:"application_id"`
+}
+
+type GetPublisherOAuthSecretRow struct {
+	OauthClientSecretHash   []byte `json:"oauth_client_secret_hash"`
+	OauthPreviousSecretHash []byte `json:"oauth_previous_secret_hash"`
+	PreviousValid           bool   `json:"previous_valid"`
+}
+
+func (q *Queries) GetPublisherOAuthSecret(ctx context.Context, arg GetPublisherOAuthSecretParams) (GetPublisherOAuthSecretRow, error) {
+	row := q.db.QueryRow(ctx, getPublisherOAuthSecret, arg.ApplicationID)
+	var i GetPublisherOAuthSecretRow
+	err := row.Scan(&i.OauthClientSecretHash, &i.OauthPreviousSecretHash, &i.PreviousValid)
 	return i, err
 }
 
@@ -1294,7 +1331,7 @@ func (q *Queries) LockActiveApplicationInstallationForSpace(ctx context.Context,
 
 const lockApplicationForUpdate = `-- name: LockApplicationForUpdate :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, token_endpoint_auth_method, status, created_at
 FROM applications WHERE id = $1
 FOR UPDATE
 `
@@ -1314,6 +1351,7 @@ type LockApplicationForUpdateRow struct {
 	ReviewStatus               string             `json:"review_status"`
 	PendingManifestPermissions []byte             `json:"pending_manifest_permissions"`
 	HumanOidcEnabled           bool               `json:"human_oidc_enabled"`
+	TokenEndpointAuthMethod    string             `json:"token_endpoint_auth_method"`
 	Status                     string             `json:"status"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 }
@@ -1332,6 +1370,7 @@ func (q *Queries) LockApplicationForUpdate(ctx context.Context, arg LockApplicat
 		&i.ReviewStatus,
 		&i.PendingManifestPermissions,
 		&i.HumanOidcEnabled,
+		&i.TokenEndpointAuthMethod,
 		&i.Status,
 		&i.CreatedAt,
 	)
@@ -1690,6 +1729,29 @@ func (q *Queries) RevokeManagedAPIKey(ctx context.Context, arg RevokeManagedAPIK
 		&i.AllowSubjectAssertion,
 	)
 	return i, err
+}
+
+const rotatePublisherOAuthSecret = `-- name: RotatePublisherOAuthSecret :one
+UPDATE applications SET
+    oauth_previous_secret_hash = CASE WHEN $1::integer > 0 THEN oauth_client_secret_hash END,
+    oauth_previous_secret_expires_at = CASE WHEN $1::integer > 0 THEN clock_timestamp() + $1::integer * interval '1 second' END,
+    oauth_client_secret_hash = $2
+WHERE id = $3 AND token_endpoint_auth_method = 'client_secret_basic'
+    AND oauth_client_secret_hash IS NOT NULL AND status = 'active'
+RETURNING oauth_previous_secret_expires_at
+`
+
+type RotatePublisherOAuthSecretParams struct {
+	GraceSeconds  int32  `json:"grace_seconds"`
+	NewHash       []byte `json:"new_hash"`
+	ApplicationID string `json:"application_id"`
+}
+
+func (q *Queries) RotatePublisherOAuthSecret(ctx context.Context, arg RotatePublisherOAuthSecretParams) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, rotatePublisherOAuthSecret, arg.GraceSeconds, arg.NewHash, arg.ApplicationID)
+	var oauth_previous_secret_expires_at pgtype.Timestamptz
+	err := row.Scan(&oauth_previous_secret_expires_at)
+	return oauth_previous_secret_expires_at, err
 }
 
 const setInstallationApprovedPermissions = `-- name: SetInstallationApprovedPermissions :execrows

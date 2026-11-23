@@ -38,6 +38,11 @@ type redemptionFixture struct {
 
 func newRedemptionFixture(t *testing.T) redemptionFixture {
 	t.Helper()
+	return redemptionFixtureWithSecret(t, "")
+}
+
+func redemptionFixtureWithSecret(t *testing.T, managedSecret string) redemptionFixture {
+	t.Helper()
 	ctx := context.Background()
 	database, err := protocolDB.Clone(ctx)
 	if err != nil {
@@ -58,10 +63,16 @@ func newRedemptionFixture(t *testing.T) redemptionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	method := "none"
+	var hash []byte
+	clientKey := []byte(strings.Repeat("c", 32))
+	if managedSecret != "" {
+		method, hash = "client_secret_basic", application.HMACClientSecretHash(clientKey, managedSecret)
+	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO applications
-		(id, space_id, name, client_id, redirect_uris, allowed_scopes, manifest_permissions)
+		(id, space_id, name, client_id, redirect_uris, allowed_scopes, manifest_permissions, token_endpoint_auth_method, oauth_client_secret_hash)
 		VALUES ('app_redemption', $1, 'Redemption', 'app_redemption', '["https://client.test/callback"]',
-		'["auth.members:read"]', '["auth.members:read"]')`, owner.SpaceID); err != nil {
+		'["auth.members:read"]', '["auth.members:read"]', $2, $3)`, owner.SpaceID, method, hash); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.Pool.Exec(ctx, `INSERT INTO members (id, space_id, name, type, binding_policy, status)
@@ -88,7 +99,7 @@ func newRedemptionFixture(t *testing.T) redemptionFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(strings.Repeat("c", 32))}}
+	apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{clientKey}}
 	code, verifier := "test-authorization-code-with-sufficient-entropy", strings.Repeat("v", 43)
 	signer, err := security.GenerateSigner("https://auth.test")
 	if err != nil {

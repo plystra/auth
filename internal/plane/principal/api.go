@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/account"
@@ -428,7 +427,7 @@ func principalStepUpOperation(operation string) bool {
 		"domains.list", "domains.create", "domains.verify", "domains.delete",
 		"directories.list", "directories.create", "directories.update", "directories.delete":
 		return true
-	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete", "approvals.approve", "approvals.reject", "applications.register", "applications.update", "applications.keys.create", "applications.keys.rotate", "installations.create", "invitations.create":
+	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete", "approvals.approve", "approvals.reject", "applications.register", "applications.update", "applications.oauth_client_secret.rotate", "applications.keys.create", "applications.keys.rotate", "installations.create", "invitations.create":
 		return true
 	default:
 		return false
@@ -758,9 +757,12 @@ func (a *API) userClaims(ctx context.Context, authorization string) (security.Cl
 		return security.Claims{}, apierr.New("UNAUTHENTICATED", "A bearer access token is required.")
 	}
 	if a.Sessions == nil {
-		claims, err := bearer(a.Signer, authorization)
+		if a.Signer == nil {
+			return security.Claims{}, apierr.New("UNAVAILABLE", "authentication is unavailable")
+		}
+		claims, err := (&session.Service{Signer: a.Signer}).VerifyAccess(ctx, parts[1])
 		if err != nil {
-			return security.Claims{}, err
+			return security.Claims{}, apierr.New("unauthorized", "access token is invalid")
 		}
 		if claims.Type != "user" {
 			return security.Claims{}, apierr.New("USER_ACCOUNT_REQUIRED", "this operation requires a user account")
@@ -779,20 +781,6 @@ func (a *API) userClaims(ctx context.Context, authorization string) (security.Cl
 	}
 	return claims, nil
 }
-func bearer(s *security.Signer, value string) (security.Claims, error) {
-	parts := strings.Fields(value)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return security.Claims{}, apierr.New("unauthorized", "bearer token is required")
-	}
-	c, e := s.Verify(parts[1], nowUTC(), security.DefaultApplicationAudience)
-	if e != nil {
-		return security.Claims{}, apierr.New("unauthorized", "access token is invalid")
-	}
-	return c, nil
-}
-
-var nowUTC = func() time.Time { return time.Now().UTC() }
-
 func (a *API) verifyEmail(ctx context.Context, in *VerifyEmailInput) (*GenericOutput, error) {
 	if strings.TrimSpace(in.Body.Token) == "" {
 		return nil, apierr.New("invalid_request", "token is required")

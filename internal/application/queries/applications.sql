@@ -31,10 +31,12 @@ WHERE id = sqlc.arg(id) AND secret_hash = sqlc.arg(previous_hash)
 
 -- name: CreateApplication :one
 INSERT INTO applications (id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled)
+                          manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled,
+                          token_endpoint_auth_method, oauth_client_secret_hash)
 VALUES (sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), COALESCE(sqlc.narg(redirect_uris), '[]'::jsonb),
         COALESCE(sqlc.narg(allowed_scopes), '[]'::jsonb), sqlc.arg(client_id), sqlc.narg(client_secret_hash),
-        sqlc.arg(manifest_permissions), sqlc.arg(visibility), sqlc.arg(review_status), sqlc.narg(pending_manifest_permissions), sqlc.arg(human_oidc_enabled))
+        sqlc.arg(manifest_permissions), sqlc.arg(visibility), sqlc.arg(review_status), sqlc.narg(pending_manifest_permissions), sqlc.arg(human_oidc_enabled),
+        sqlc.arg(token_endpoint_auth_method), sqlc.narg(oauth_client_secret_hash))
 RETURNING id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
           manifest_permissions, visibility, review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at;
 
@@ -47,7 +49,7 @@ ORDER BY created_at, id;
 
 -- name: LockApplicationForUpdate :one
 SELECT id, space_id, name, client_id, redirect_uris, manifest_permissions, visibility,
-       review_status, pending_manifest_permissions, human_oidc_enabled, status, created_at
+       review_status, pending_manifest_permissions, human_oidc_enabled, token_endpoint_auth_method, status, created_at
 FROM applications WHERE id = sqlc.arg(application_id)
 FOR UPDATE;
 
@@ -272,17 +274,31 @@ SELECT id FROM ancestors;
 
 -- name: GetApplicationByClientID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, human_oidc_enabled, status, created_at
+       token_endpoint_auth_method, visibility, review_status, human_oidc_enabled, human_oidc_generation, status, created_at
 FROM applications
 WHERE client_id = sqlc.arg(client_id)
 LIMIT 1;
 
 -- name: GetOAuthClientByID :one
 SELECT id, space_id, name, redirect_uris, allowed_scopes, client_id, client_secret_hash,
-       visibility, review_status, human_oidc_enabled, status, created_at
+       token_endpoint_auth_method, visibility, review_status, human_oidc_enabled, human_oidc_generation, status, created_at
 FROM applications
 WHERE id = sqlc.arg(id)
 FOR UPDATE;
+
+-- name: GetPublisherOAuthSecret :one
+SELECT oauth_client_secret_hash, oauth_previous_secret_hash,
+       COALESCE(oauth_previous_secret_expires_at > clock_timestamp(), false)::boolean AS previous_valid
+FROM applications WHERE id = sqlc.arg(application_id) AND token_endpoint_auth_method = 'client_secret_basic';
+
+-- name: RotatePublisherOAuthSecret :one
+UPDATE applications SET
+    oauth_previous_secret_hash = CASE WHEN sqlc.arg(grace_seconds)::integer > 0 THEN oauth_client_secret_hash END,
+    oauth_previous_secret_expires_at = CASE WHEN sqlc.arg(grace_seconds)::integer > 0 THEN clock_timestamp() + sqlc.arg(grace_seconds)::integer * interval '1 second' END,
+    oauth_client_secret_hash = sqlc.arg(new_hash)
+WHERE id = sqlc.arg(application_id) AND token_endpoint_auth_method = 'client_secret_basic'
+    AND oauth_client_secret_hash IS NOT NULL AND status = 'active'
+RETURNING oauth_previous_secret_expires_at;
 
 -- name: CreateAuthorizationCode :exec
 INSERT INTO authorization_codes (

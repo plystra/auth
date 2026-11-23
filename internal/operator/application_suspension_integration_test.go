@@ -74,7 +74,7 @@ func newApplicationSuspensionFixture(t *testing.T) *applicationSuspensionFixture
 			t.Fatal(err)
 		}
 	}
-	f.application, err = f.applications.Register(ctx, f.owners[0].ID, application.RegisterInput{
+	registered, err := f.applications.Register(ctx, f.owners[0].ID, application.RegisterInput{
 		SpaceID: f.owners[0].SpaceID, Name: "Global stop client", Visibility: "public",
 		RedirectURIs:        []string{"https://saas.example.test/callback"},
 		ManifestPermissions: []string{"auth.agents:create", "auth.authz:check", "auth.tokens:introspect"},
@@ -82,6 +82,7 @@ func newApplicationSuspensionFixture(t *testing.T) *applicationSuspensionFixture
 	if err != nil {
 		t.Fatal(err)
 	}
+	f.application = registered.PublishedApplication
 	f.application.ClientID = "https://client.example.test/metadata.json"
 	if _, err := st.Pool.Exec(ctx, `UPDATE applications SET review_status = 'approved',
 		manifest_permissions = pending_manifest_permissions, allowed_scopes = pending_manifest_permissions,

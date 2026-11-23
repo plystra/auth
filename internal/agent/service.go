@@ -689,25 +689,40 @@ func (s *Service) RevokeOAuthRefreshToken(ctx context.Context, raw string) (bool
 	}
 	found := false
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
-		row, err := s.lockOAuthRefreshCredentialTx(ctx, q, raw)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		found = true
-		if row.FamilyID.Valid {
-			if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: row.FamilyID}); err != nil {
-				return err
-			}
-		}
-		return s.RevokeOAuthTx(ctx, q, row.MemberID)
+		var err error
+		found, err = s.RevokeOAuthRefreshTokenTx(ctx, q, raw, nil)
+		return err
 	})
 	return found, err
 }
 
-func (s *Service) lockOAuthRefreshCredentialTx(ctx context.Context, q *db.Queries, raw string) (db.LockOAuthRefreshCredentialByHashRow, error) {
+// RevokeOAuthRefreshTokenTx checks the client again after locking the credential and its member.
+func (s *Service) RevokeOAuthRefreshTokenTx(ctx context.Context, q *db.Queries, raw string, expectedClient *string) (bool, error) {
+	row, err := s.lockOAuthRefreshCredentialTx(ctx, q, raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if expectedClient != nil && row.OauthClientID.String != *expectedClient {
+		return false, nil
+	}
+	if row.FamilyID.Valid {
+		if err := q.RevokeAgentCredentialFamily(ctx, db.RevokeAgentCredentialFamilyParams{FamilyID: row.FamilyID}); err != nil {
+			return false, err
+		}
+	}
+	return true, s.RevokeOAuthTx(ctx, q, row.MemberID)
+}
+
+// OAuthRefreshMemberTx identifies the client row to lock before the member and credential.
+func (s *Service) OAuthRefreshMemberTx(ctx context.Context, q *db.Queries, raw string) (string, error) {
+	memberID, _, err := s.oauthRefreshMemberHash(ctx, q, raw)
+	return memberID, err
+}
+
+func (s *Service) oauthRefreshMemberHash(ctx context.Context, q *db.Queries, raw string) (string, []byte, error) {
 	for _, key := range s.credentialHMACKeys() {
 		mac := hmac.New(sha256.New, key)
 		_, _ = mac.Write([]byte(raw))
@@ -717,15 +732,22 @@ func (s *Service) lockOAuthRefreshCredentialTx(ctx context.Context, q *db.Querie
 			continue
 		}
 		if err != nil {
-			return db.LockOAuthRefreshCredentialByHashRow{}, err
+			return "", nil, err
 		}
-		// Match creation and subtree revocation: members precede credentials.
-		if err := member.LockChainsTx(ctx, q, memberID); err != nil {
-			return db.LockOAuthRefreshCredentialByHashRow{}, err
-		}
-		return q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: hash})
+		return memberID, hash, nil
 	}
-	return db.LockOAuthRefreshCredentialByHashRow{}, pgx.ErrNoRows
+	return "", nil, pgx.ErrNoRows
+}
+
+func (s *Service) lockOAuthRefreshCredentialTx(ctx context.Context, q *db.Queries, raw string) (db.LockOAuthRefreshCredentialByHashRow, error) {
+	memberID, hash, err := s.oauthRefreshMemberHash(ctx, q, raw)
+	if err != nil {
+		return db.LockOAuthRefreshCredentialByHashRow{}, err
+	}
+	if err := member.LockChainsTx(ctx, q, memberID); err != nil {
+		return db.LockOAuthRefreshCredentialByHashRow{}, err
+	}
+	return q.LockOAuthRefreshCredentialByHash(ctx, db.LockOAuthRefreshCredentialByHashParams{SecretHash: hash})
 }
 
 // RevokeOAuth stops an OAuth Agent and every delegated descendant in one

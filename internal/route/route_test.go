@@ -327,6 +327,47 @@ func TestCredentialValidationRunsBeforeEveryRoute(t *testing.T) {
 	}
 }
 
+func TestProtocolCredentialsAreRoutedOnlyToTheirOwnEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		plane          Plane
+		method, path   string
+		basic, handled bool
+	}{
+		{Principal, "GET", "/oauth/userinfo", false, true},
+		{Principal, "POST", "/oauth/token", true, true},
+		{Principal, "POST", "/oauth/userinfo", false, false},
+		{Principal, "GET", "/oauth/userinfo/", false, false},
+		{Principal, "POST", "/oauth/token", false, false},
+		{Principal, "GET", "/oauth/userinfo", true, false},
+		{Principal, "GET", "/v1/me", false, false},
+		{Principal, "POST", "/oauth/authorize", true, false},
+		{Server, "GET", "/oauth/userinfo", false, false},
+		{Ops, "POST", "/oauth/token", true, false},
+	} {
+		t.Run(string(tc.plane)+tc.method+tc.path, func(t *testing.T) {
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			validate := func(context.Context, string, string) error {
+				return apierr.New("UNAUTHENTICATED", "a session is required")
+			}
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			if tc.basic {
+				r.SetBasicAuth("test-client", "test-secret")
+			} else {
+				r.Header.Set("Authorization", "Bearer oui_test")
+			}
+			w := httptest.NewRecorder()
+			MiddlewareWithIdempotency(tc.plane, next, nil, validate).ServeHTTP(w, r)
+			want := http.StatusUnauthorized
+			if tc.handled {
+				want = http.StatusNoContent
+			}
+			if w.Code != want {
+				t.Fatalf("status=%d, want %d", w.Code, want)
+			}
+		})
+	}
+}
+
 func TestCredentialMismatchIsAuditedWithoutSecret(t *testing.T) {
 	var gotPlane Plane
 	var gotType, gotCode string

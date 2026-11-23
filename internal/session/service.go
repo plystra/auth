@@ -29,6 +29,7 @@ type Settings struct{ AccessTTL, RefreshTTL, RefreshIdleTTL time.Duration }
 type Service struct {
 	Store             *store.Store
 	Signer            *security.Signer
+	LoadSigner        func(context.Context, *db.Queries) (*security.Signer, error)
 	Factors           *factor.Service
 	HMACKeys          [][]byte
 	Settings          func(context.Context) (Settings, error)
@@ -133,7 +134,7 @@ func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	if st.AccessTTL <= 0 || st.RefreshTTL <= 0 {
 		return Tokens{}, errors.New("invalid session settings")
 	}
-	if s.Signer == nil || len(s.HMACKeys) == 0 {
+	if len(s.HMACKeys) == 0 {
 		return Tokens{}, errors.New("session credentials are unavailable")
 	}
 	methods = append([]string(nil), methods...)
@@ -199,8 +200,8 @@ func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	if err != nil {
 		return Tokens{}, err
 	}
-	jwt, err := s.Signer.Sign(security.Claims{
-		Issuer: s.Signer.Issuer(), Subject: userID, MemberID: memberID, SpaceID: spaceID,
+	jwt, err := s.signAccess(ctx, q, security.Claims{
+		Subject: userID, MemberID: memberID, SpaceID: spaceID,
 		Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(),
 		JWTID: accessID, SessionID: row.ID, Assurance: assurance, AMR: methods, Type: "user",
 	})
@@ -218,7 +219,7 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 	if err != nil {
 		return Tokens{}, err
 	}
-	if st.AccessTTL <= 0 || st.RefreshTTL <= 0 || s.Signer == nil || len(s.HMACKeys) == 0 {
+	if st.AccessTTL <= 0 || st.RefreshTTL <= 0 || len(s.HMACKeys) == 0 {
 		return Tokens{}, errors.New("session issuance is unavailable")
 	}
 	next, err := randomToken("ply_rt_")
@@ -328,8 +329,8 @@ func (s *Service) RefreshForMember(ctx context.Context, raw, requestedMemberID s
 		if err != nil {
 			return err
 		}
-		jwt, err := s.Signer.Sign(security.Claims{
-			Issuer: s.Signer.Issuer(), Subject: sess.UserID, MemberID: memberID, SpaceID: spaceID,
+		jwt, err := s.signAccess(ctx, q, security.Claims{
+			Subject: sess.UserID, MemberID: memberID, SpaceID: spaceID,
 			Audience: security.DefaultApplicationAudience, ExpiresAt: now.Add(st.AccessTTL).Unix(), IssuedAt: now.Unix(),
 			JWTID: jti, SessionID: sess.ID, Assurance: int(sess.AssuranceLevel), AMR: sess.AuthMethods, Type: "user",
 		})
@@ -505,7 +506,7 @@ func (s *Service) agentAccessTx(ctx context.Context, q *db.Queries, memberID, sp
 	if expiresAt.Unix() <= now.Unix() {
 		return Tokens{}, apierr.New("invalid_grant", "delegated token would already be expired")
 	}
-	jwt, err := s.Signer.Sign(security.Claims{Issuer: s.Signer.Issuer(), Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: ownerChain, Scopes: scopes, Type: "agent", AgentTokenEpoch: agent.TokenEpoch})
+	jwt, err := s.signAccess(ctx, q, security.Claims{Subject: memberID, MemberID: memberID, SpaceID: spaceID, Audience: audience, ExpiresAt: expiresAt.Unix(), IssuedAt: now.Unix(), JWTID: jti, Assurance: 1, AMR: []string{"agent_key"}, Actor: ownerChain, Scopes: scopes, Type: "agent", AgentTokenEpoch: agent.TokenEpoch})
 	if err != nil {
 		return Tokens{}, err
 	}
@@ -620,8 +621,49 @@ func (s *Service) RevokeAllUserSessions(ctx context.Context, userID string) erro
 		return q.RevokeUserRefreshTokens(ctx, db.RevokeUserRefreshTokensParams{UserID: userID})
 	})
 }
-func (s *Service) VerifyAccess(token string) (security.Claims, error) {
-	return s.Signer.Verify(token, time.Now().UTC(), security.DefaultApplicationAudience)
+
+// CurrentSigner resolves the ring for this operation. The local signer is used
+// only in deployments explicitly configured for ephemeral development keys.
+func (s *Service) CurrentSigner(ctx context.Context, q *db.Queries) (*security.Signer, error) {
+	if s.LoadSigner != nil {
+		if q == nil {
+			q = s.Store.RequestQueries(ctx)
+		}
+		signer, err := s.LoadSigner(ctx, q)
+		if err != nil || signer == nil {
+			return nil, apierr.New("temporarily_unavailable", "signing keys are unavailable")
+		}
+		return signer, nil
+	}
+	if s.Signer == nil {
+		return nil, apierr.New("temporarily_unavailable", "signing keys are unavailable")
+	}
+	return s.Signer, nil
+}
+
+func (s *Service) signAccess(ctx context.Context, q *db.Queries, claims security.Claims) (string, error) {
+	signer, err := s.CurrentSigner(ctx, q)
+	if err != nil {
+		return "", err
+	}
+	claims.Issuer = signer.Issuer()
+	return signer.Sign(claims)
+}
+
+func (s *Service) JWKS(ctx context.Context) (map[string]any, error) {
+	signer, err := s.CurrentSigner(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	return signer.JWKS()
+}
+
+func (s *Service) VerifyAccess(ctx context.Context, token string) (security.Claims, error) {
+	signer, err := s.CurrentSigner(ctx, nil)
+	if err != nil {
+		return security.Claims{}, err
+	}
+	return signer.Verify(token, time.Now().UTC(), security.DefaultApplicationAudience)
 }
 
 // Introspect verifies the token cryptographically and then checks the current
@@ -629,11 +671,11 @@ func (s *Service) VerifyAccess(token string) (security.Claims, error) {
 // access tokens are intentionally short lived but session revocation is meant
 // to take effect immediately for online callers.
 func (s *Service) Introspect(ctx context.Context, token, audience string) (security.Claims, bool, error) {
-	return s.IntrospectTx(ctx, s.Store.Queries(), token, audience)
+	return s.IntrospectTx(ctx, s.Store.RequestQueries(ctx), token, audience)
 }
 
 func (s *Service) IntrospectForSpace(ctx context.Context, token, audience, targetSpaceID string) (security.Claims, bool, error) {
-	return s.IntrospectForSpaceTx(ctx, s.Store.Queries(), token, audience, targetSpaceID)
+	return s.IntrospectForSpaceTx(ctx, s.Store.RequestQueries(ctx), token, audience, targetSpaceID)
 }
 
 // IntrospectTx reads live identity through the supplied queries. Mutations must
@@ -645,7 +687,11 @@ func (s *Service) IntrospectTx(ctx context.Context, q *db.Queries, token, audien
 // IntrospectForSpaceTx also checks user session admission to the resource Space,
 // including when a user has no selected member or acts across a Space hierarchy.
 func (s *Service) IntrospectForSpaceTx(ctx context.Context, q *db.Queries, token, audience string, targetSpaceIDs ...string) (security.Claims, bool, error) {
-	claims, err := s.Signer.Verify(token, time.Now().UTC(), audience)
+	signer, err := s.CurrentSigner(ctx, q)
+	if err != nil {
+		return security.Claims{}, false, err
+	}
+	claims, err := signer.Verify(token, time.Now().UTC(), audience)
 	if err != nil || (claims.Type != "user" && claims.Type != "access" && claims.Type != "agent") {
 		return security.Claims{}, false, nil
 	}

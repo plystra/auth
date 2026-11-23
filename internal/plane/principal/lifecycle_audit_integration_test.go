@@ -192,7 +192,7 @@ func TestAgentCredentialHTTPAuditFailureRollsBackMutationAndStepUp(t *testing.T)
 			if err != nil {
 				t.Fatal(err)
 			}
-			claims, err := f.sessions.VerifyAccess(f.token)
+			claims, err := f.sessions.VerifyAccess(t.Context(), f.token)
 			if err != nil {
 				t.Fatal(err)
 			}

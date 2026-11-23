@@ -96,10 +96,23 @@ func NewSigner(pemFile, issuer string, encryptionKey []byte) (*Signer, error) {
 	if block == nil || block.Type != encryptedSigningKeyPEMType {
 		return nil, errors.New("signing key must be an encrypted PEM")
 	}
-	plain, err := decryptSigningKey(block.Bytes, encryptionKey)
+	plain, err := decryptSigningKey(block.Bytes, encryptionKey, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt signing key: %w", err)
 	}
+	defer clear(plain)
+	key, err := parseSigningKey(plain)
+	if err != nil {
+		return nil, err
+	}
+	kid, err := signingKeyID(&key.PublicKey)
+	if err != nil {
+		return nil, err
+	}
+	return newSigner(key, issuer, kid), nil
+}
+
+func parseSigningKey(plain []byte) (*ecdsa.PrivateKey, error) {
 	var key *ecdsa.PrivateKey
 	if k, e := x509.ParsePKCS8PrivateKey(plain); e == nil {
 		key, _ = k.(*ecdsa.PrivateKey)
@@ -115,12 +128,16 @@ func NewSigner(pemFile, issuer string, encryptionKey []byte) (*Signer, error) {
 	if key.Curve != elliptic.P256() {
 		return nil, errors.New("signing key must be P-256")
 	}
-	publicBytes, err := key.PublicKey.Bytes()
+	return key, nil
+}
+
+func signingKeyID(publicKey *ecdsa.PublicKey) (string, error) {
+	publicBytes, err := publicKey.Bytes()
 	if err != nil {
-		return nil, fmt.Errorf("encode signing public key: %w", err)
+		return "", fmt.Errorf("encode signing public key: %w", err)
 	}
 	sum := sha256.Sum256(publicBytes)
-	return newSigner(key, issuer, fmt.Sprintf("%x", sum[:8])), nil
+	return fmt.Sprintf("%x", sum[:8]), nil
 }
 
 // EncryptSigningKeyPEM serializes an ES256 private key into the encrypted PEM
@@ -137,14 +154,15 @@ func EncryptSigningKeyPEM(key *ecdsa.PrivateKey, encryptionKey []byte) ([]byte, 
 	if err != nil {
 		return nil, fmt.Errorf("marshal signing key: %w", err)
 	}
-	ciphertext, err := encryptSigningKey(plain, encryptionKey)
+	defer clear(plain)
+	ciphertext, err := encryptSigningKey(plain, encryptionKey, nil)
 	if err != nil {
 		return nil, err
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: encryptedSigningKeyPEMType, Bytes: ciphertext}), nil
 }
 
-func encryptSigningKey(plain, key []byte) ([]byte, error) {
+func encryptSigningKey(plain, key, scope []byte) ([]byte, error) {
 	aead, err := signingKeyAEAD(key)
 	if err != nil {
 		return nil, err
@@ -153,10 +171,10 @@ func encryptSigningKey(plain, key []byte) ([]byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, fmt.Errorf("generate signing key nonce: %w", err)
 	}
-	return aead.Seal(nonce, nonce, plain, nil), nil
+	return aead.Seal(nonce, nonce, plain, scope), nil
 }
 
-func decryptSigningKey(ciphertext, key []byte) ([]byte, error) {
+func decryptSigningKey(ciphertext, key, scope []byte) ([]byte, error) {
 	aead, err := signingKeyAEAD(key)
 	if err != nil {
 		return nil, err
@@ -165,7 +183,7 @@ func decryptSigningKey(ciphertext, key []byte) ([]byte, error) {
 		return nil, errors.New("encrypted signing key is truncated")
 	}
 	nonce, payload := ciphertext[:aead.NonceSize()], ciphertext[aead.NonceSize():]
-	plain, err := aead.Open(nil, nonce, payload, nil)
+	plain, err := aead.Open(nil, nonce, payload, scope)
 	if err != nil {
 		return nil, errors.New("encrypted signing key authentication failed")
 	}
@@ -188,12 +206,11 @@ func GenerateSigner(issuer string) (*Signer, error) {
 	if e != nil {
 		return nil, e
 	}
-	publicBytes, err := key.PublicKey.Bytes()
+	kid, err := signingKeyID(&key.PublicKey)
 	if err != nil {
-		return nil, fmt.Errorf("encode signing public key: %w", err)
+		return nil, err
 	}
-	sum := sha256.Sum256(publicBytes)
-	return newSigner(key, issuer, fmt.Sprintf("%x", sum[:8])), nil
+	return newSigner(key, issuer, kid), nil
 }
 
 func newSigner(key *ecdsa.PrivateKey, issuer, keyID string) *Signer {
@@ -207,12 +224,10 @@ func (s *Signer) StageNext() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	publicBytes, err := key.PublicKey.Bytes()
+	kid, err := signingKeyID(&key.PublicKey)
 	if err != nil {
-		return "", fmt.Errorf("encode signing public key: %w", err)
+		return "", err
 	}
-	sum := sha256.Sum256(publicBytes)
-	kid := fmt.Sprintf("%x", sum[:8])
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, exists := s.keys[kid]; exists {

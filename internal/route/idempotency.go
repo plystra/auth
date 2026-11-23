@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -18,6 +19,40 @@ import (
 )
 
 const maxIdempotencyBody = 1 << 20
+
+// One-time publisher credentials must never enter the replay store, including
+// when a caller reuses a key previously reserved by a different operation.
+func checkOAuthSecretIdempotency(r *http.Request, plane Plane) error {
+	if plane != Principal || r.Method != http.MethodPost || len(r.Header.Values("Idempotency-Key")) == 0 {
+		return nil
+	}
+	path := r.URL.Path
+	denied := apierr.New("VALIDATION_FAILED", "Idempotency-Key is not supported for one-time OAuth client secrets")
+	if strings.HasPrefix(path, "/v1/applications/") && strings.HasSuffix(path, "/oauth-client-secret/rotate") {
+		return denied
+	}
+	if !strings.HasPrefix(path, "/v1/spaces/") || !strings.HasSuffix(path, "/applications") {
+		return nil
+	}
+	body, err := readRequestBody(r)
+	if err != nil {
+		return apierr.New("REQUEST_BODY_TOO_LARGE", "request body exceeds the idempotency limit")
+	}
+	if r.Body != nil {
+		_ = r.Body.Close()
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	var registration struct {
+		Method string `json:"token_endpoint_auth_method"`
+	}
+	if json.Unmarshal(body, &registration) != nil {
+		return apierr.New("VALIDATION_FAILED", "invalid application registration")
+	}
+	if registration.Method == "client_secret_basic" {
+		return denied
+	}
+	return nil
+}
 
 type idempotencyResponseWriter struct {
 	header http.Header
