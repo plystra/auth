@@ -118,8 +118,8 @@ func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshToken
 }
 
 const createSession = `-- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, sso_member_id, sso_connection_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, COALESCE($10, now()), COALESCE($11, 1), $12)
+INSERT INTO sessions (id, user_id, member_id, sso_member_id, sso_connection_id, sso_auth_time, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, now()), COALESCE($12, 1), $13)
 RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods
 `
 
@@ -129,6 +129,7 @@ type CreateSessionParams struct {
 	MemberID        pgtype.Text        `json:"member_id"`
 	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
 	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
+	SsoAuthTime     pgtype.Timestamptz `json:"sso_auth_time"`
 	TokenHash       []byte             `json:"token_hash"`
 	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 	Ip              pgtype.Text        `json:"ip"`
@@ -161,6 +162,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (C
 		arg.MemberID,
 		arg.SsoMemberID,
 		arg.SsoConnectionID,
+		arg.SsoAuthTime,
 		arg.TokenHash,
 		arg.ExpiresAt,
 		arg.Ip,

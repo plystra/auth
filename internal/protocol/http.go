@@ -75,6 +75,7 @@ func (h HTTP) metadata(w http.ResponseWriter, r *http.Request) {
 		document["subject_types_supported"] = []string{"public"}
 		document["id_token_signing_alg_values_supported"] = []string{"ES256"}
 		document["scopes_supported"] = []string{"openid", "email", "profile"}
+		document["claims_supported"] = []string{"iss", "sub", "aud", "exp", "iat", "nonce", "auth_time", "email", "email_verified", "name", "picture"}
 	}
 	writeJSON(w, http.StatusOK, document)
 }

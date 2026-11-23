@@ -647,6 +647,7 @@ type Session struct {
 	StepUpMethod    pgtype.Text        `json:"step_up_method"`
 	SsoMemberID     pgtype.Text        `json:"sso_member_id"`
 	SsoConnectionID pgtype.Text        `json:"sso_connection_id"`
+	SsoAuthTime     pgtype.Timestamptz `json:"sso_auth_time"`
 }
 
 type SignInAttempt struct {

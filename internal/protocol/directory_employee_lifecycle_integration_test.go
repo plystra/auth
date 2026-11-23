@@ -220,7 +220,7 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 			return err
 		}
 		var err error
-		wrongConnection, err = sessions.CreateForSSOTx(ctx, q, settings, employeeUserID, initialClaims.MemberID, otherConnection.ID, "oidc")
+		wrongConnection, err = sessions.CreateForSSOTx(ctx, q, settings, employeeUserID, initialClaims.MemberID, otherConnection.ID, "oidc", time.Time{})
 		return err
 	}); err != nil {
 		t.Fatal(err)

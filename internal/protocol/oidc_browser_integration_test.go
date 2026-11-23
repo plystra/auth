@@ -173,6 +173,12 @@ func TestOIDCBrowserInteractionCompletesAtIndependentHTTPSCallback(t *testing.T)
 	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
 	path, _ := browser.begin(t, verifier, state, nonce)
 	browser.signIn(t, path, true)
+	var originalAuthTime time.Time
+	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT s.auth_time FROM sessions s
+		JOIN oidc_login_requests i ON i.browser_session_id=s.id WHERE i.id=$1`,
+		strings.TrimPrefix(path, route.OIDCInteractionsPath+"/")).Scan(&originalAuthTime); err != nil {
+		t.Fatal(err)
+	}
 	reopened, _ := browser.request(t, http.MethodGet, path, nil, "", "", http.StatusOK)
 	if reopened.NextStep != "consent" || reopened.Email != "rp@example.test" {
 		t.Fatal("browser could not reopen its authenticated interaction")
@@ -204,6 +210,12 @@ func TestOIDCBrowserInteractionCompletesAtIndependentHTTPSCallback(t *testing.T)
 	idToken, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(ctx, raw)
 	if err != nil || idToken.Nonce != nonce || idToken.Subject != "usr_human_rp" || token.RefreshToken != "" {
 		t.Fatal("relying party did not receive the expected signed account identity")
+	}
+	var claims struct {
+		AuthTime int64 `json:"auth_time"`
+	}
+	if err := idToken.Claims(&claims); err != nil || claims.AuthTime != originalAuthTime.Unix() {
+		t.Fatal("the signed ID Token did not preserve the completed local authentication time")
 	}
 	user, err := rp.provider.UserInfo(ctx, oauth2.StaticTokenSource(token))
 	if err != nil || user.Subject != idToken.Subject || user.Email != "rp@example.test" || !user.EmailVerified {

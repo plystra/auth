@@ -120,6 +120,7 @@ func (s tokenService) humanLoginCode(ctx context.Context, in codeExchangeInput) 
 		}
 		idToken, err := signer.SignHumanIDToken(security.HumanIDToken{
 			UserID: ids.UserID(code.UserID), ClientID: client.ClientID, Nonce: secret.New(code.Nonce), IssuedAt: now, ExpiresAt: expiry,
+			AuthTime: code.AuthenticationTime.Time,
 		})
 		if err != nil {
 			return err

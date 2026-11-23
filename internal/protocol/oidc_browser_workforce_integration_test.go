@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/plystra/auth/internal/authorization"
@@ -44,7 +45,7 @@ func workforceBrowser(t *testing.T) (*humanRP, oidcBrowser, *oidcTestProvider, e
 	return rp, newOIDCBrowser(t, rp), upstream, connection
 }
 
-func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTestProvider, connection enterprise.Connection, path string) map[string]string {
+func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTestProvider, connection enterprise.Connection, path string, extra map[string]any) map[string]string {
 	t.Helper()
 	identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": "password"}, browser.rp.host.URL, "", http.StatusOK)
 	if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
@@ -62,7 +63,7 @@ func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTest
 	code := oauth2.GenerateVerifier()
 	upstream.addCode(code, oidcTestCode{
 		nonce: query.Get("nonce"), subject: "stable-employee", email: browserEmployee, emailVerified: true,
-		challenge: query.Get("code_challenge"), redirectURI: query.Get("redirect_uri"),
+		challenge: query.Get("code_challenge"), redirectURI: query.Get("redirect_uri"), extra: extra,
 	})
 	return map[string]string{"state": query.Get("state"), "code": code}
 }
@@ -78,7 +79,8 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	}
 	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
 	path, _ := browser.begin(t, verifier, state, nonce)
-	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path)
+	authenticatedAt := time.Now().Add(-time.Hour).Unix()
+	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path, map[string]any{"auth_time": authenticatedAt})
 	read, _ := browser.request(t, http.MethodGet, path, nil, "", "", http.StatusOK)
 	if read.NextStep != "sso" || read.SSOConnectionID != connection.ID || read.AuthorizationURL != "" {
 		t.Fatal("the interaction did not retain the pending upstream step")
@@ -91,7 +93,7 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	}
 	other := newOIDCBrowser(t, rp)
 	otherPath, _ := other.begin(t, oauth2.GenerateVerifier(), "other-state", "other-nonce")
-	_ = startWorkforceBrowser(t, other, upstream, connection, otherPath)
+	_ = startWorkforceBrowser(t, other, upstream, connection, otherPath, nil)
 	ordinary := "/v1/sso/" + connection.ID
 	ordinaryState, _ := browser.request(t, http.MethodGet, ordinary+"/start", nil, "", "", http.StatusOK)
 	ordinaryURL, err := url.Parse(ordinaryState.AuthorizationURL)
@@ -132,6 +134,12 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	if err != nil || identity.Nonce != nonce {
 		t.Fatal("the relying party could not verify the Auth ID Token")
 	}
+	var claims struct {
+		AuthTime int64 `json:"auth_time"`
+	}
+	if err := identity.Claims(&claims); err != nil || claims.AuthTime != authenticatedAt || claims.AuthTime >= identity.IssuedAt.Unix() {
+		t.Fatal("the signed ID Token did not preserve the actual upstream authentication time")
+	}
 	info, err := rp.provider.UserInfo(ctx, oauth2.StaticTokenSource(tokens))
 	if err != nil || info.Subject != identity.Subject || info.Email != browserEmployee || !info.EmailVerified {
 		t.Fatal("the relying party received the wrong workforce identity")
@@ -143,10 +151,51 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	}
 }
 
+func TestOIDCBrowserWorkforceOmitsUnverifiedAuthenticationTime(t *testing.T) {
+	rp, browser, upstream, connection := workforceBrowser(t)
+	for _, tc := range []struct {
+		name  string
+		extra map[string]any
+	}{
+		{name: "absent"},
+		{name: "malformed", extra: map[string]any{"auth_time": "untrusted"}},
+		{name: "future", extra: map[string]any{"auth_time": time.Now().Add(time.Hour).Unix()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			verifier := oauth2.GenerateVerifier()
+			path, _ := browser.begin(t, verifier, oauth2.GenerateVerifier(), oauth2.GenerateVerifier())
+			callback := startWorkforceBrowser(t, browser, upstream, connection, path, tc.extra)
+			browser.request(t, http.MethodPost, path+"/sso/complete", callback, rp.host.URL, "", http.StatusOK)
+			decision, _ := browser.request(t, http.MethodPost, path+"/decision", map[string]string{"decision": "approve"}, rp.host.URL, "", http.StatusOK)
+			redirect, err := url.Parse(decision.RedirectTo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := oidc.ClientContext(t.Context(), rp.host.Client())
+			tokens, err := rp.config.Exchange(ctx, redirect.Query().Get("code"), oauth2.VerifierOption(verifier))
+			if err != nil {
+				t.Fatal("the relying party could not redeem the code")
+			}
+			raw, _ := tokens.Extra("id_token").(string)
+			identity, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(ctx, raw)
+			if err != nil {
+				t.Fatal("the relying party could not verify the Auth ID Token")
+			}
+			var claims map[string]any
+			if err := identity.Claims(&claims); err != nil {
+				t.Fatal(err)
+			}
+			if _, exists := claims["auth_time"]; exists {
+				t.Fatal("the signed ID Token carried authentication time without valid upstream evidence")
+			}
+		})
+	}
+}
+
 func TestOIDCBrowserWorkforceRollsBackWhenInteractionBindingFails(t *testing.T) {
 	rp, browser, upstream, connection := workforceBrowser(t)
 	path, _ := browser.begin(t, oauth2.GenerateVerifier(), "rollback-state", "rollback-nonce")
-	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path)
+	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path, nil)
 	ctx := t.Context()
 	if _, err := rp.st.Pool.Exec(ctx, `
 		CREATE FUNCTION reject_workforce_browser_binding() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -175,7 +224,7 @@ func TestOIDCBrowserWorkforceRollsBackWhenInteractionBindingFails(t *testing.T) 
 	}
 	browser.request(t, http.MethodPost, path+"/sso/complete", upstreamCallback, rp.host.URL, "", http.StatusBadRequest)
 	newPath, _ := browser.begin(t, oauth2.GenerateVerifier(), "retry-state", "retry-nonce")
-	fresh := startWorkforceBrowser(t, browser, upstream, connection, newPath)
+	fresh := startWorkforceBrowser(t, browser, upstream, connection, newPath, nil)
 	result, _ := browser.request(t, http.MethodPost, newPath+"/sso/complete", fresh, rp.host.URL, "", http.StatusOK)
 	if result.NextStep != "consent" || result.Email != browserEmployee {
 		t.Fatal("a fresh upstream login could not resume consent after rollback")

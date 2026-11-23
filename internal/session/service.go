@@ -116,18 +116,18 @@ func (s *Service) CreateForMemberWithMethods(ctx context.Context, userID, member
 // CreateForMemberWithMethodsTx signs and persists the session in the caller's transaction.
 // Read the settings before opening the transaction and return the tokens only after commit.
 func (s *Service) CreateForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string) (Tokens, error) {
-	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, ip, userAgent, assurance, methods, "")
+	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, ip, userAgent, assurance, methods, "", time.Time{})
 }
 
 // CreateForSSOTx records the verified provider connection on a new enterprise session.
-func (s *Service) CreateForSSOTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID, connectionID, provider string) (Tokens, error) {
+func (s *Service) CreateForSSOTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID, connectionID, provider string, authenticationTime time.Time) (Tokens, error) {
 	if connectionID == "" || (provider != "oidc" && provider != "saml") {
 		return Tokens{}, errors.New("invalid enterprise session origin")
 	}
-	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, nil, "", 1, []string{provider}, connectionID)
+	return s.createForMemberWithMethodsTx(ctx, q, st, userID, memberID, nil, "", 1, []string{provider}, connectionID, authenticationTime)
 }
 
-func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string, ssoConnectionID string) (Tokens, error) {
+func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Queries, st Settings, userID, memberID string, ip net.IP, userAgent string, assurance int, methods []string, ssoConnectionID string, ssoAuthTime time.Time) (Tokens, error) {
 	if assurance < 1 || assurance > 3 || len(methods) == 0 {
 		return Tokens{}, errors.New("invalid session authentication methods or assurance")
 	}
@@ -187,8 +187,8 @@ func (s *Service) createForMemberWithMethodsTx(ctx context.Context, q *db.Querie
 	refreshHash := s.hashToken(refresh)
 	row, err := q.CreateSession(ctx, db.CreateSessionParams{
 		ID: string(sid), UserID: userID, MemberID: persistedMember, SsoMemberID: ssoMember,
-		SsoConnectionID: nullable(ssoConnectionID),
-		TokenHash:       refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
+		SsoConnectionID: nullable(ssoConnectionID), SsoAuthTime: pgtype.Timestamptz{Time: ssoAuthTime, Valid: !ssoAuthTime.IsZero()},
+		TokenHash: refreshHash, ExpiresAt: pgTime(exp), Ip: nullable(ipString(ip)), UserAgent: nullable(userAgent),
 		AuthTime: pgTime(now), AssuranceLevel: nullableInt(int32(assurance)), AuthMethods: methods,
 	})
 	if err != nil {

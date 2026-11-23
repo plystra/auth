@@ -148,6 +148,7 @@ type samlConnectionDetails struct {
 
 type idTokenClaims struct {
 	samlProof      *samlLoginProof
+	authTime       time.Time
 	Subject        string                     `json:"sub"`
 	Email          string                     `json:"email"`
 	EmailVerified  bool                       `json:"email_verified"`
@@ -1012,6 +1013,12 @@ func (s *Service) callback(ctx context.Context, in CallbackInput, browser *OIDCB
 	if claims.Nonce == "" || !equalDigest(state.NonceHash, claims.Nonce) || claims.Subject == "" || len(claims.Subject) > maxExternalSubjectLen || claims.Email == "" || !claims.EmailVerified {
 		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC identity is not valid for this connection")
 	}
+	var upstreamAuthTime int64
+	if err := json.Unmarshal(claims.VerifiedClaims["auth_time"], &upstreamAuthTime); err == nil && upstreamAuthTime > 0 {
+		if candidate := time.Unix(upstreamAuthTime, 0).UTC(); !candidate.After(time.Now()) {
+			claims.authTime = candidate
+		}
+	}
 	result, err := s.finishCallback(ctx, row, state, claims, browser)
 	if err != nil {
 		return account.AuthResult{}, err
@@ -1067,6 +1074,9 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 		samlProof: &samlLoginProof{provider: provider, response: in.SAMLResponse, keyHintMissing: keyHintMissing},
 		Subject:   info.NameID, Email: email, EmailVerified: true,
 		Name: firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
+	}
+	if instant := info.AuthnInstant; instant != nil && instant.Unix() > 0 && !instant.After(time.Now()) {
+		claims.authTime = instant.UTC()
 	}
 	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
 	if len(info.Assertions) != 1 {
@@ -1284,7 +1294,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if err != nil {
 			return err
 		}
-		tokens, err = s.Sessions.CreateForSSOTx(ctx, q, sessionSettings, userID, memberID, connection.ID, connection.Provider)
+		tokens, err = s.Sessions.CreateForSSOTx(ctx, q, sessionSettings, userID, memberID, connection.ID, connection.Provider, claims.authTime)
 		if err != nil {
 			return err
 		}

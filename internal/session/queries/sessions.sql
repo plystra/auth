@@ -1,6 +1,6 @@
 -- name: CreateSession :one
-INSERT INTO sessions (id, user_id, member_id, sso_member_id, sso_connection_id, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
-VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.narg(member_id), sqlc.narg(sso_member_id), sqlc.narg(sso_connection_id), sqlc.arg(token_hash), sqlc.arg(expires_at), sqlc.narg(ip), sqlc.narg(user_agent), COALESCE(sqlc.narg(auth_time), now()), COALESCE(sqlc.narg(assurance_level), 1), sqlc.arg(auth_methods))
+INSERT INTO sessions (id, user_id, member_id, sso_member_id, sso_connection_id, sso_auth_time, token_hash, expires_at, ip, user_agent, auth_time, assurance_level, auth_methods)
+VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.narg(member_id), sqlc.narg(sso_member_id), sqlc.narg(sso_connection_id), sqlc.narg(sso_auth_time), sqlc.arg(token_hash), sqlc.arg(expires_at), sqlc.narg(ip), sqlc.narg(user_agent), COALESCE(sqlc.narg(auth_time), now()), COALESCE(sqlc.narg(assurance_level), 1), sqlc.arg(auth_methods))
 RETURNING id, user_id, member_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent, auth_time, assurance_level, auth_methods;
 
 -- name: GetSession :one

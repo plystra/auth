@@ -13,14 +13,19 @@ import (
 
 const consumeOIDCLoginCode = `-- name: ConsumeOIDCLoginCode :one
 UPDATE oidc_login_codes c SET consumed_at = statement_timestamp()
-FROM applications a, oidc_active_login_sessions s
+FROM applications a, oidc_active_login_sessions s JOIN sessions source ON source.id = s.session_id
 WHERE c.id = $1 AND c.consumed_at IS NULL AND c.expires_at > statement_timestamp()
   AND c.code_challenge = $2
   AND a.id = c.application_id AND a.human_oidc_enabled AND a.status = 'active'
   AND (a.visibility <> 'public' OR a.review_status = 'approved')
   AND c.application_generation = a.human_oidc_generation
   AND s.session_id = c.session_id AND s.user_id = c.user_id
-RETURNING c.id, c.user_id, c.nonce, c.scope, c.expires_at, s.expires_at::timestamptz AS session_expires_at
+RETURNING c.id, c.user_id, c.nonce, c.scope, c.expires_at, s.expires_at::timestamptz AS session_expires_at,
+  (CASE
+    WHEN source.sso_connection_id IS NOT NULL THEN source.sso_auth_time
+    WHEN source.auth_methods && ARRAY['oidc', 'saml']::text[] THEN NULL
+    WHEN source.auth_methods && ARRAY['pwd', 'webauthn']::text[] THEN source.auth_time
+  END)::timestamptz AS authentication_time
 `
 
 type ConsumeOIDCLoginCodeParams struct {
@@ -29,12 +34,13 @@ type ConsumeOIDCLoginCodeParams struct {
 }
 
 type ConsumeOIDCLoginCodeRow struct {
-	ID               string             `json:"id"`
-	UserID           string             `json:"user_id"`
-	Nonce            string             `json:"nonce"`
-	Scope            string             `json:"scope"`
-	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
-	SessionExpiresAt pgtype.Timestamptz `json:"session_expires_at"`
+	ID                 string             `json:"id"`
+	UserID             string             `json:"user_id"`
+	Nonce              string             `json:"nonce"`
+	Scope              string             `json:"scope"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	SessionExpiresAt   pgtype.Timestamptz `json:"session_expires_at"`
+	AuthenticationTime pgtype.Timestamptz `json:"authentication_time"`
 }
 
 func (q *Queries) ConsumeOIDCLoginCode(ctx context.Context, arg ConsumeOIDCLoginCodeParams) (ConsumeOIDCLoginCodeRow, error) {
@@ -47,6 +53,7 @@ func (q *Queries) ConsumeOIDCLoginCode(ctx context.Context, arg ConsumeOIDCLogin
 		&i.Scope,
 		&i.ExpiresAt,
 		&i.SessionExpiresAt,
+		&i.AuthenticationTime,
 	)
 	return i, err
 }

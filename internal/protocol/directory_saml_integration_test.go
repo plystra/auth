@@ -58,8 +58,13 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 		}
 		if want == http.StatusOK {
 			var result struct{ Data account.AuthResult }
-			if err := json.NewDecoder(response.Body).Decode(&result); err != nil || result.Data.User.ID != f.userID || result.Data.User.Email != "directory-user@example.test" {
+			if err := json.NewDecoder(response.Body).Decode(&result); err != nil || result.Data.User.ID != f.userID || result.Data.User.Email != "directory-user@example.test" || result.Data.Tokens == nil {
 				t.Fatalf("SAML did not reuse the directory identity: %v", err)
+			}
+			var authenticatedAt time.Time
+			if err := f.st.Pool.QueryRow(ctx, "SELECT sso_auth_time FROM sessions WHERE id=$1", result.Data.Tokens.SessionID).Scan(&authenticatedAt); err != nil ||
+				authenticatedAt.UTC().Format(time.RFC3339) != samlTestAuthenticationTime {
+				t.Fatalf("session authentication time = %v, want %s: %v", authenticatedAt, samlTestAuthenticationTime, err)
 			}
 		} else {
 			var result struct{ Error struct{ Code string } }
@@ -403,6 +408,8 @@ type samlTestAttribute struct {
 	name, friendlyName, value string
 }
 
+const samlTestAuthenticationTime = "2025-01-01T00:00:00Z"
+
 func signedSAMLTestResponse(t *testing.T, signing *dsig.SigningContext, connection enterprise.Connection, requestID, subject string, attributes []samlTestAttribute, tamper bool) string {
 	t.Helper()
 	now := time.Now().UTC()
@@ -414,11 +421,14 @@ func signedSAMLTestResponse(t *testing.T, signing *dsig.SigningContext, connecti
 		<saml:NameID></saml:NameID><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
 		<saml:SubjectConfirmationData Recipient="%s" InResponseTo="%s" NotOnOrAfter="%s"/></saml:SubjectConfirmation></saml:Subject>
 		<saml:Conditions NotBefore="%s" NotOnOrAfter="%s"><saml:AudienceRestriction><saml:Audience>%s</saml:Audience></saml:AudienceRestriction></saml:Conditions>
+		<saml:AuthnStatement AuthnInstant="%s"><saml:AuthnContext>
+		<saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef>
+		</saml:AuthnContext></saml:AuthnStatement>
 		<saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>different-saml-email@example.test</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>
 		</saml:Assertion></samlp:Response>`,
 		now.Format(time.RFC3339), connection.RedirectURI, requestID, now.Format(time.RFC3339), connection.RedirectURI, requestID,
 		now.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339), now.Add(time.Minute).Format(time.RFC3339),
-		"https://auth.test/saml/"+connection.ID)
+		"https://auth.test/saml/"+connection.ID, samlTestAuthenticationTime)
 	doc := etree.NewDocument()
 	if err := doc.ReadFromString(xml); err != nil {
 		t.Fatal(err)
