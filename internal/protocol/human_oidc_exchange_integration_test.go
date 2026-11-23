@@ -21,6 +21,7 @@ import (
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/route"
@@ -40,6 +41,7 @@ type humanRP struct {
 	signer        *security.Signer
 	applicationID string
 	factorSecret  secret.String
+	workforce     *enterprise.Service
 }
 
 func newHumanRP(t *testing.T) *humanRP {
@@ -48,6 +50,11 @@ func newHumanRP(t *testing.T) *humanRP {
 }
 
 func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
+	t.Helper()
+	return newConfiguredHumanRP(t, managed, nil)
+}
+
+func newConfiguredHumanRP(t *testing.T, managed bool, upstream *oidcTestProvider) *humanRP {
 	t.Helper()
 	ctx := t.Context()
 	database, err := protocolDB.Clone(ctx)
@@ -100,9 +107,14 @@ func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
 		authz.StepUp, apps.Authorization, apps.StepUp = sessions, authz, sessions
 	}
 	accounts := &account.Service{Store: st, Sessions: sessions, Passwords: security.DefaultPasswordHasher(), Authorization: authz}
-	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors}
+	var workforce *enterprise.Service
+	if upstream != nil {
+		workforce = &enterprise.Service{Store: st, Authorization: authz, Sessions: sessions, DataKey: secret.New(strings.Repeat("d", 32)), Passwords: accounts.Passwords, HTTPClient: upstream.server.Client(), Issuer: issuer}
+		accounts.SignInPolicy, sessions.SpaceSignInPolicy = workforce, workforce
+	}
+	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors, Enterprise: workforce}
 	api.Register(humago.New(&mux, route.HumaConfig("RP publisher", "1")))
-	(HTTP{Issuer: issuer, Applications: apps, Sessions: sessions}).Register(&mux)
+	(HTTP{Issuer: issuer, Applications: apps, Sessions: sessions, Enterprise: workforce}).Register(&mux)
 	mux.HandleFunc("GET /.well-known/jwks.json", func(w http.ResponseWriter, _ *http.Request) {
 		keys, err := sessions.Signer.JWKS()
 		if err != nil {
@@ -128,7 +140,7 @@ func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
 	}
 	config := oauth2.Config{ClientID: client, ClientSecret: password, RedirectURL: callback, Endpoint: provider.Endpoint()}
 	config.Endpoint.AuthStyle = oauth2.AuthStyleInHeader
-	rp := &humanRP{st: st, host: host, provider: provider, config: config, session: tokens, signer: sessions.Signer}
+	rp := &humanRP{st: st, host: host, provider: provider, config: config, session: tokens, signer: sessions.Signer, workforce: workforce}
 	if managed {
 		if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants (id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
 			VALUES ('grt_rp_publisher',$1,'["auth.applications:manage"]',$2,'space',$1,$2)`, space.ID, publisher.ID); err != nil {

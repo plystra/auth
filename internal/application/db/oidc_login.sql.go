@@ -147,11 +147,13 @@ func (q *Queries) FinishOIDCLoginRequest(ctx context.Context, arg FinishOIDCLogi
 const getPendingOIDCBrowserInteraction = `-- name: GetPendingOIDCBrowserInteraction :one
 SELECT r.id, r.application_id, a.name AS client_name, a.client_id, r.scope, r.expires_at,
     r.browser_attempt_id, r.browser_session_id,
+    COALESCE(sso.connection_id, '')::text AS sso_connection_id,
     COALESCE(attempt.method, '')::text AS sign_in_method,
     (attempt.password_verified_at IS NOT NULL)::boolean AS needs_totp
 FROM oidc_login_requests r
 JOIN applications a ON a.id = r.application_id
 LEFT JOIN sign_in_attempts attempt ON attempt.id = r.browser_attempt_id
+LEFT JOIN sso_states sso ON sso.id = r.browser_sso_state_id
 WHERE r.id = $1 AND r.request_hash = $2
     AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
     AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
@@ -172,6 +174,7 @@ type GetPendingOIDCBrowserInteractionRow struct {
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
 	BrowserAttemptID pgtype.Text        `json:"browser_attempt_id"`
 	BrowserSessionID pgtype.Text        `json:"browser_session_id"`
+	SsoConnectionID  string             `json:"sso_connection_id"`
 	SignInMethod     string             `json:"sign_in_method"`
 	NeedsTotp        bool               `json:"needs_totp"`
 }
@@ -188,6 +191,7 @@ func (q *Queries) GetPendingOIDCBrowserInteraction(ctx context.Context, arg GetP
 		&i.ExpiresAt,
 		&i.BrowserAttemptID,
 		&i.BrowserSessionID,
+		&i.SsoConnectionID,
 		&i.SignInMethod,
 		&i.NeedsTotp,
 	)
@@ -233,7 +237,7 @@ UPDATE oidc_login_requests r SET browser_attempt_id = $1::text
 FROM applications a
 WHERE r.id = $2 AND r.request_hash = $3
     AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
-    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL
+    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL AND r.browser_sso_state_id IS NULL
     AND a.id = r.application_id AND a.human_oidc_generation = r.application_generation
 `
 

@@ -29,6 +29,36 @@ func (q *Queries) AssociateExternalDirectoryUser(ctx context.Context, arg Associ
 	return id, err
 }
 
+const bindOIDCBrowserSSOSession = `-- name: BindOIDCBrowserSSOSession :execrows
+UPDATE oidc_login_requests r SET browser_session_id = $1::text
+FROM applications a
+WHERE r.id = $2 AND r.request_hash = $3
+    AND r.browser_sso_state_id = $4::text AND r.browser_session_id IS NULL
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND a.id = r.application_id AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+    AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved')
+`
+
+type BindOIDCBrowserSSOSessionParams struct {
+	SessionID     string `json:"session_id"`
+	InteractionID string `json:"interaction_id"`
+	RequestHash   []byte `json:"request_hash"`
+	StateID       string `json:"state_id"`
+}
+
+func (q *Queries) BindOIDCBrowserSSOSession(ctx context.Context, arg BindOIDCBrowserSSOSessionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, bindOIDCBrowserSSOSession,
+		arg.SessionID,
+		arg.InteractionID,
+		arg.RequestHash,
+		arg.StateID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const consumeSSOState = `-- name: ConsumeSSOState :exec
 UPDATE sso_states SET consumed_at = now()
 WHERE id = $1 AND consumed_at IS NULL
@@ -173,15 +203,15 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 const createSSOState = `-- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, request_id
+    redirect_uri, expires_at, request_id, browser_bound
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
-    $8
+    $8, $9
 )
 RETURNING id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
 `
 
 type CreateSSOStateParams struct {
@@ -193,6 +223,7 @@ type CreateSSOStateParams struct {
 	RedirectUri            string             `json:"redirect_uri"`
 	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
 	RequestID              pgtype.Text        `json:"request_id"`
+	BrowserBound           bool               `json:"browser_bound"`
 }
 
 func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) (SsoState, error) {
@@ -205,6 +236,7 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		arg.RedirectUri,
 		arg.ExpiresAt,
 		arg.RequestID,
+		arg.BrowserBound,
 	)
 	var i SsoState
 	err := row.Scan(
@@ -218,6 +250,7 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		&i.ConsumedAt,
 		&i.CreatedAt,
 		&i.RequestID,
+		&i.BrowserBound,
 	)
 	return i, err
 }
@@ -377,6 +410,30 @@ func (q *Queries) GetSSOMembershipForUser(ctx context.Context, arg GetSSOMembers
 	return i, err
 }
 
+const hasPendingOIDCBrowserSSO = `-- name: HasPendingOIDCBrowserSSO :one
+SELECT EXISTS (
+    SELECT FROM oidc_login_requests r JOIN applications a ON a.id = r.application_id
+    WHERE r.id = $1 AND r.request_hash = $2
+        AND r.browser_sso_state_id = $3::text AND r.browser_session_id IS NULL
+        AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+        AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+        AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved')
+)::boolean
+`
+
+type HasPendingOIDCBrowserSSOParams struct {
+	InteractionID string `json:"interaction_id"`
+	RequestHash   []byte `json:"request_hash"`
+	StateID       string `json:"state_id"`
+}
+
+func (q *Queries) HasPendingOIDCBrowserSSO(ctx context.Context, arg HasPendingOIDCBrowserSSOParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasPendingOIDCBrowserSSO, arg.InteractionID, arg.RequestHash, arg.StateID)
+	var column_1 bool
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, covers_subtree, created_at, updated_at
@@ -480,7 +537,7 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 
 const lockSSOStateByHash = `-- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
 FROM sso_states WHERE state_hash = $1 FOR UPDATE
 `
 
@@ -502,6 +559,7 @@ func (q *Queries) LockSSOStateByHash(ctx context.Context, arg LockSSOStateByHash
 		&i.ConsumedAt,
 		&i.CreatedAt,
 		&i.RequestID,
+		&i.BrowserBound,
 	)
 	return i, err
 }
@@ -518,4 +576,28 @@ type MarkExternalUserVerifiedParams struct {
 func (q *Queries) MarkExternalUserVerified(ctx context.Context, arg MarkExternalUserVerifiedParams) error {
 	_, err := q.db.Exec(ctx, markExternalUserVerified, arg.ID)
 	return err
+}
+
+const reserveOIDCBrowserSSO = `-- name: ReserveOIDCBrowserSSO :execrows
+UPDATE oidc_login_requests r SET browser_sso_state_id = $1::text
+FROM applications a
+WHERE r.id = $2 AND r.request_hash = $3
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL AND r.browser_sso_state_id IS NULL
+    AND a.id = r.application_id AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+    AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved')
+`
+
+type ReserveOIDCBrowserSSOParams struct {
+	StateID       string `json:"state_id"`
+	InteractionID string `json:"interaction_id"`
+	RequestHash   []byte `json:"request_hash"`
+}
+
+func (q *Queries) ReserveOIDCBrowserSSO(ctx context.Context, arg ReserveOIDCBrowserSSOParams) (int64, error) {
+	result, err := q.db.Exec(ctx, reserveOIDCBrowserSSO, arg.StateID, arg.InteractionID, arg.RequestHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

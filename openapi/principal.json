@@ -2514,6 +2514,26 @@
         ],
         "type": "object"
       },
+      "OidcBrowserSSOInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "type": "string"
+          },
+          "state": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "code"
+        ],
+        "type": "object"
+      },
       "OidcBrowserStartInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -2575,6 +2595,9 @@
       "OidcBrowserState": {
         "additionalProperties": false,
         "properties": {
+          "authorization_url": {
+            "type": "string"
+          },
           "client_name": {
             "type": "string"
           },
@@ -4517,6 +4540,68 @@
           }
         },
         "summary": "oidc.interactions.identify"
+      }
+    },
+    "/v1/auth/oidc-interactions/{id}/sso/complete": {
+      "post": {
+        "operationId": "oidc.interactions.sso.complete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Origin",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "__Host-plystra-oidc",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OidcBrowserSSOInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputOidcBrowserStateBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "oidc.interactions.sso.complete"
       }
     },
     "/v1/auth/password/forgot": {

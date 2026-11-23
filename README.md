@@ -63,6 +63,11 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
    The employee's `externalId` must exactly match the selected IdP claim.
 3. Start the employee's login at `GET /v1/sso/{connection_id}/start` and submit the IdP
    response to the matching callback. The account can renew its session at `/v1/auth/refresh`.
+   A hosted OIDC interaction can use an enterprise OIDC connection registered with the HTTPS
+   issuer origin and the `/oidc/upstream` callback path. The same-origin page submits the IdP
+   code and state to `/v1/auth/oidc-interactions/{id}/sso/complete` with the original interaction
+   cookie. Auth returns the next consent step and signed-in account. The built-in hosted pages
+   are still under development.
 4. On departure, use SCIM to set `active=false` with the current resource `If-Match` value.
    Related sessions and refresh credentials lose online access on commit, including sessions
    established through that binding before switching members. Reprovisioned employees sign in again.

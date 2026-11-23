@@ -480,6 +480,7 @@ type OidcLoginRequest struct {
 	BrowserBound          bool               `json:"browser_bound"`
 	BrowserAttemptID      pgtype.Text        `json:"browser_attempt_id"`
 	BrowserSessionID      pgtype.Text        `json:"browser_session_id"`
+	BrowserSsoStateID     pgtype.Text        `json:"browser_sso_state_id"`
 }
 
 type OidcUserinfoToken struct {
@@ -740,6 +741,7 @@ type SsoState struct {
 	ConsumedAt             pgtype.Timestamptz `json:"consumed_at"`
 	CreatedAt              pgtype.Timestamptz `json:"created_at"`
 	RequestID              pgtype.Text        `json:"request_id"`
+	BrowserBound           bool               `json:"browser_bound"`
 }
 
 type User struct {

@@ -35,11 +35,13 @@ WHERE r.id = sqlc.arg(request_id) AND r.status = 'approved' AND r.expires_at > c
 -- name: GetPendingOIDCBrowserInteraction :one
 SELECT r.id, r.application_id, a.name AS client_name, a.client_id, r.scope, r.expires_at,
     r.browser_attempt_id, r.browser_session_id,
+    COALESCE(sso.connection_id, '')::text AS sso_connection_id,
     COALESCE(attempt.method, '')::text AS sign_in_method,
     (attempt.password_verified_at IS NOT NULL)::boolean AS needs_totp
 FROM oidc_login_requests r
 JOIN applications a ON a.id = r.application_id
 LEFT JOIN sign_in_attempts attempt ON attempt.id = r.browser_attempt_id
+LEFT JOIN sso_states sso ON sso.id = r.browser_sso_state_id
 WHERE r.id = sqlc.arg(id) AND r.request_hash = sqlc.arg(request_hash)
     AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
     AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
@@ -50,7 +52,7 @@ UPDATE oidc_login_requests r SET browser_attempt_id = sqlc.arg(attempt_id)::text
 FROM applications a
 WHERE r.id = sqlc.arg(id) AND r.request_hash = sqlc.arg(request_hash)
     AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
-    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL
+    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL AND r.browser_sso_state_id IS NULL
     AND a.id = r.application_id AND a.human_oidc_generation = r.application_generation;
 
 -- name: BindOIDCBrowserSession :execrows

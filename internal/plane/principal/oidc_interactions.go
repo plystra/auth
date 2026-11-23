@@ -16,6 +16,7 @@ import (
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/requestinfo"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
@@ -68,15 +69,24 @@ type oidcBrowserDecisionInput struct {
 	}
 }
 
+type oidcBrowserSSOInput struct {
+	OIDCBrowserInput
+	Body struct {
+		State secret.String `json:"state" minLength:"1" maxLength:"1024"`
+		Code  secret.String `json:"code" minLength:"1" maxLength:"4096"`
+	}
+}
+
 type oidcBrowserState struct {
-	ID              string                        `json:"id"`
-	ClientName      string                        `json:"client_name"`
-	Scopes          []string                      `json:"scopes"`
-	ExpiresAt       time.Time                     `json:"expires_at"`
-	NextStep        string                        `json:"next_step"`
-	SignedInEmail   string                        `json:"signed_in_email,omitempty"`
-	SSOConnectionID string                        `json:"sso_connection_id,omitempty"`
-	PasskeyOptions  *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
+	ID               string                        `json:"id"`
+	ClientName       string                        `json:"client_name"`
+	Scopes           []string                      `json:"scopes"`
+	ExpiresAt        time.Time                     `json:"expires_at"`
+	NextStep         string                        `json:"next_step"`
+	SignedInEmail    string                        `json:"signed_in_email,omitempty"`
+	SSOConnectionID  string                        `json:"sso_connection_id,omitempty"`
+	AuthorizationURL string                        `json:"authorization_url,omitempty"`
+	PasskeyOptions   *protocol.CredentialAssertion `json:"passkey_options,omitempty"`
 }
 
 type oidcBrowserCookieOutput[T any] struct {
@@ -97,6 +107,7 @@ func (a *API) registerOIDCBrowserRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("oidc.interactions.read", http.MethodGet, path+"/{id}", route.Principal, "", subjects), a.readOIDCBrowserInteraction)
 	route.Register(api, route.NewSpec("oidc.interactions.identify", http.MethodPost, path+"/{id}/identify", route.Principal, "", subjects), a.identifyOIDCBrowserUser)
 	route.Register(api, route.NewSpec("oidc.interactions.authenticate", http.MethodPost, path+"/{id}/authenticate", route.Principal, "", subjects), a.authenticateOIDCBrowserUser)
+	route.Register(api, route.NewSpec("oidc.interactions.sso.complete", http.MethodPost, path+"/{id}/sso/complete", route.Principal, "", subjects), a.completeOIDCBrowserSSO)
 	route.Register(api, route.NewSpec("oidc.interactions.decision", http.MethodPost, path+"/{id}/decision", route.Principal, "", subjects), a.decideOIDCBrowserInteraction)
 }
 
@@ -164,7 +175,7 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 	if err != nil {
 		return nil, err
 	}
-	if interaction.BrowserAttemptID.Valid || interaction.BrowserSessionID.Valid {
+	if interaction.BrowserAttemptID.Valid || interaction.BrowserSessionID.Valid || interaction.SsoConnectionID != "" {
 		return nil, apierr.New("CONFLICT", "the interaction already has an authentication attempt")
 	}
 	state := oidcInteractionState(interaction)
@@ -174,7 +185,14 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 			return nil, err
 		}
 		if connection != "" {
+			start, err := a.Enterprise.StartOIDCBrowser(ctx, connection, a.HostedOrigin+"/oidc/upstream", enterprise.OIDCBrowserBinding{
+				ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie)), ExpiresAt: interaction.ExpiresAt.Time,
+			})
+			if err != nil {
+				return nil, err
+			}
 			state.NextStep, state.SSOConnectionID = "sso", connection
+			state.AuthorizationURL = start.AuthorizationURL
 			return oidcStateOutput(state), nil
 		}
 	}
@@ -199,6 +217,26 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 		return nil, apierr.New("CONFLICT", "the authentication interaction changed")
 	}
 	state.NextStep, state.PasskeyOptions = challenge.NextStep, challenge.PasskeyOptions
+	return oidcStateOutput(state), nil
+}
+
+func (a *API) completeOIDCBrowserSSO(ctx context.Context, in *oidcBrowserSSOInput) (*authorizationDataOutput[oidcBrowserState], error) {
+	interaction, err := a.oidcBrowserInteraction(ctx, in.OIDCBrowserInput, true)
+	if err != nil {
+		return nil, err
+	}
+	if a.Enterprise == nil || interaction.SsoConnectionID == "" || interaction.BrowserSessionID.Valid {
+		return nil, apierr.New("invalid_grant", "the authentication interaction has no pending single sign-on")
+	}
+	user, err := a.Enterprise.CompleteOIDCBrowser(ctx, enterprise.CallbackInput{
+		ConnectionID: interaction.SsoConnectionID, RedirectURI: a.HostedOrigin + "/oidc/upstream",
+		State: in.Body.State.Value(), Code: in.Body.Code.Value(),
+	}, enterprise.OIDCBrowserBinding{ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie))})
+	if err != nil {
+		return nil, err
+	}
+	state := oidcInteractionState(interaction)
+	state.NextStep, state.SignedInEmail = "consent", user.Email
 	return oidcStateOutput(state), nil
 }
 
@@ -289,6 +327,8 @@ func oidcInteractionState(interaction db.GetPendingOIDCBrowserInteractionRow) oi
 	switch {
 	case interaction.BrowserSessionID.Valid:
 		step = "consent"
+	case interaction.SsoConnectionID != "":
+		step = "sso"
 	case interaction.NeedsTotp:
 		step = "totp"
 	case interaction.BrowserAttemptID.Valid:
@@ -296,7 +336,7 @@ func oidcInteractionState(interaction db.GetPendingOIDCBrowserInteractionRow) oi
 	}
 	return oidcBrowserState{
 		ID: interaction.ID, ClientName: interaction.ClientName, Scopes: strings.Split(interaction.Scope, " "),
-		ExpiresAt: interaction.ExpiresAt.Time, NextStep: step,
+		ExpiresAt: interaction.ExpiresAt.Time, NextStep: step, SSOConnectionID: interaction.SsoConnectionID,
 	}
 }
 

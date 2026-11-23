@@ -34,6 +34,8 @@ type oidcTestCode struct {
 	emailVerified bool
 	groups        []string
 	extra         map[string]any
+	challenge     string
+	redirectURI   string
 }
 
 type oidcTestProvider struct {
@@ -72,7 +74,15 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 				return
 			}
 			provider.mu.Lock()
-			code, ok := provider.codes[r.Form.Get("code")]
+			codeValue := r.Form.Get("code")
+			code, ok := provider.codes[codeValue]
+			if ok && code.challenge != "" {
+				challenge := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
+				ok = base64.RawURLEncoding.EncodeToString(challenge[:]) == code.challenge && r.Form.Get("redirect_uri") == code.redirectURI
+				if ok {
+					delete(provider.codes, codeValue)
+				}
+			}
 			provider.mu.Unlock()
 			if !ok || r.Form.Get("code_verifier") == "" {
 				http.Error(w, "invalid code", http.StatusBadRequest)

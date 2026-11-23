@@ -22,10 +22,12 @@ import (
 const browserFixturePassword = "synthetic-browser-sign-in-password"
 
 type interactionResponse struct {
-	ID         string `json:"id"`
-	NextStep   string `json:"next_step"`
-	Email      string `json:"signed_in_email"`
-	RedirectTo string `json:"redirect_to"`
+	ID               string `json:"id"`
+	NextStep         string `json:"next_step"`
+	Email            string `json:"signed_in_email"`
+	RedirectTo       string `json:"redirect_to"`
+	SSOConnectionID  string `json:"sso_connection_id"`
+	AuthorizationURL string `json:"authorization_url"`
 }
 
 type oidcBrowser struct {

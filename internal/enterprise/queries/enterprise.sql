@@ -47,20 +47,48 @@ WHERE id = sqlc.arg(id) AND status <> 'disabled';
 -- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, request_id
+    redirect_uri, expires_at, request_id, browser_bound
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(connection_id), sqlc.arg(state_hash), sqlc.arg(nonce_hash),
     sqlc.arg(pkce_verifier_ciphertext), sqlc.arg(redirect_uri), sqlc.arg(expires_at),
-    sqlc.narg(request_id)
+    sqlc.narg(request_id), sqlc.arg(browser_bound)
 )
 RETURNING id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id;
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound;
 
 -- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
 FROM sso_states WHERE state_hash = sqlc.arg(state_hash) FOR UPDATE;
+
+-- name: ReserveOIDCBrowserSSO :execrows
+UPDATE oidc_login_requests r SET browser_sso_state_id = sqlc.arg(state_id)::text
+FROM applications a
+WHERE r.id = sqlc.arg(interaction_id) AND r.request_hash = sqlc.arg(request_hash)
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND r.browser_attempt_id IS NULL AND r.browser_session_id IS NULL AND r.browser_sso_state_id IS NULL
+    AND a.id = r.application_id AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+    AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved');
+
+-- name: HasPendingOIDCBrowserSSO :one
+SELECT EXISTS (
+    SELECT FROM oidc_login_requests r JOIN applications a ON a.id = r.application_id
+    WHERE r.id = sqlc.arg(interaction_id) AND r.request_hash = sqlc.arg(request_hash)
+        AND r.browser_sso_state_id = sqlc.arg(state_id)::text AND r.browser_session_id IS NULL
+        AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+        AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+        AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved')
+)::boolean;
+
+-- name: BindOIDCBrowserSSOSession :execrows
+UPDATE oidc_login_requests r SET browser_session_id = sqlc.arg(session_id)::text
+FROM applications a
+WHERE r.id = sqlc.arg(interaction_id) AND r.request_hash = sqlc.arg(request_hash)
+    AND r.browser_sso_state_id = sqlc.arg(state_id)::text AND r.browser_session_id IS NULL
+    AND r.browser_bound AND r.status = 'pending' AND r.expires_at > clock_timestamp()
+    AND a.id = r.application_id AND a.human_oidc_enabled AND a.human_oidc_generation = r.application_generation
+    AND a.status = 'active' AND (a.visibility <> 'public' OR a.review_status = 'approved');
 
 -- name: ConsumeSSOState :exec
 UPDATE sso_states SET consumed_at = now()
