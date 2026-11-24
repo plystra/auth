@@ -1197,6 +1197,9 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 		if lockedConnection.Status != "active" {
 			return apierr.New("forbidden", "SSO connection is disabled")
 		}
+		if connection.Provider == "oidc" && !bytes.Equal(lockedConnection.ClientSecretCiphertext, connection.ClientSecretCiphertext) {
+			return apierr.New("conflict", "OIDC client credentials changed; restart sign-in")
+		}
 		if lockedConnection.ConfiguredByMemberID != connection.ConfiguredByMemberID || lockedConnection.ConfiguredByUserID != connection.ConfiguredByUserID ||
 			lockedConnection.GroupsClaim != connection.GroupsClaim || !bytes.Equal(lockedConnection.RoleMappings, connection.RoleMappings) {
 			return apierr.New("conflict", "SSO mapping changed; restart sign-in")

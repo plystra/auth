@@ -66,6 +66,14 @@ WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
     role_mappings, status, covers_subtree, created_at, updated_at;
 
+-- name: ReplaceOIDCClientSecret :one
+UPDATE sso_connections
+SET client_secret_ciphertext = sqlc.arg(client_secret_ciphertext),
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at;
+
 -- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,

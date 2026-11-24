@@ -3618,18 +3618,18 @@
         ],
         "type": "object"
       },
-      "UpdateSAMLMetadataInputBody": {
+      "UpdateSSOConnectionInputBody": {
         "additionalProperties": false,
         "properties": {
+          "client_secret": {
+            "type": "string"
+          },
           "saml_metadata": {
             "maxLength": 1048576,
             "minLength": 1,
             "type": "string"
           }
         },
-        "required": [
-          "saml_metadata"
-        ],
         "type": "object"
       },
       "User": {
@@ -8652,7 +8652,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateSAMLMetadataInputBody"
+                "$ref": "#/components/schemas/UpdateSSOConnectionInputBody"
               }
             }
           },

@@ -36,6 +36,7 @@ type oidcTestCode struct {
 	extra         map[string]any
 	challenge     string
 	redirectURI   string
+	afterExchange func(context.Context)
 }
 
 type oidcTestProvider struct {
@@ -45,6 +46,7 @@ type oidcTestProvider struct {
 	key               *rsa.PrivateKey
 	mu                sync.Mutex
 	codes             map[string]oidcTestCode
+	clientSecret      string
 }
 
 func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
@@ -73,7 +75,17 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
 			}
+			audience, password := r.Form.Get("client_id"), r.Form.Get("client_secret")
+			if basicID, basicPassword, ok := r.BasicAuth(); ok {
+				audience, _ = url.QueryUnescape(basicID)
+				password, _ = url.QueryUnescape(basicPassword)
+			}
 			provider.mu.Lock()
+			if provider.clientSecret != "" && password != provider.clientSecret {
+				provider.mu.Unlock()
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			codeValue := r.Form.Get("code")
 			code, ok := provider.codes[codeValue]
 			if ok && code.challenge != "" {
@@ -88,9 +100,8 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 				http.Error(w, "invalid code", http.StatusBadRequest)
 				return
 			}
-			audience := r.Form.Get("client_id")
-			if basicID, _, basicOK := r.BasicAuth(); basicOK {
-				audience = basicID
+			if code.afterExchange != nil {
+				code.afterExchange(r.Context())
 			}
 			idToken := signOIDCTestToken(t, provider.key, provider.issuer, audience, code)
 			writeOIDCTestJSON(w, map[string]any{"access_token": "oidc-access-token", "token_type": "Bearer", "expires_in": 300, "id_token": idToken})
@@ -104,6 +115,12 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 	provider.issuer = "http://localhost:" + strings.TrimPrefix(server.URL, "http://127.0.0.1:")
 	t.Cleanup(server.Close)
 	return provider
+}
+
+func (p *oidcTestProvider) useClientSecret(value string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.clientSecret = value
 }
 
 func (p *oidcTestProvider) addCode(code string, value oidcTestCode) {

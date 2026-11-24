@@ -46,14 +46,15 @@ type ssoConnectionPathInput struct {
 	ConnectionID  string `path:"conn_id"`
 }
 
-type updateSAMLMetadataInput struct {
+type updateSSOConnectionInput struct {
 	Authorization string `header:"Authorization"`
 	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	ConnectionID  string `path:"conn_id"`
 	IfMatch       string `header:"If-Match"`
 	Body          struct {
-		SAMLMetadata string `json:"saml_metadata" minLength:"1" maxLength:"1048576"`
+		SAMLMetadata *string        `json:"saml_metadata,omitempty" minLength:"1" maxLength:"1048576"`
+		ClientSecret *secret.String `json:"client_secret,omitempty"`
 	}
 }
 
@@ -158,7 +159,7 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("sso_connections.list", "GET", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listSSOConnections)
 	route.Register(api, route.NewSpec("sso_connections.get", "GET", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.getSSOConnection)
 	route.Register(api, route.NewSpec("sso_connections.create", "POST", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createSSOConnection)
-	route.Register(api, route.NewSpec(enterprise.SAMLMetadataUpdateOperation, "PATCH", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(2<<20)), a.updateSAMLMetadata)
+	route.Register(api, route.NewSpec(enterprise.SSOConnectionUpdateOperation, "PATCH", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck(), route.WithMaxBodyBytes(2<<20)), a.updateSSOConnection)
 	route.Register(api, route.NewSpec("sso_connections.delete", "DELETE", "/v1/spaces/{id}/sso-connections/{conn_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteSSOConnection)
 }
 
@@ -375,7 +376,7 @@ func (a *API) deleteDomain(ctx context.Context, in *domainPathInput) (*authoriza
 	return acceptedResponse(), nil
 }
 
-func (a *API) updateSAMLMetadata(ctx context.Context, in *updateSAMLMetadataInput) (*ssoConnectionOutput, error) {
+func (a *API) updateSSOConnection(ctx context.Context, in *updateSSOConnectionInput) (*ssoConnectionOutput, error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
 	}
@@ -383,8 +384,17 @@ func (a *API) updateSAMLMetadata(ctx context.Context, in *updateSAMLMetadataInpu
 	if ifMatch == "" {
 		return nil, apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
 	}
-	const operation = enterprise.SAMLMetadataUpdateOperation
-	request := enterprise.SAMLMetadataUpdateRequest(in.ID, in.ConnectionID, ifMatch, in.Body.SAMLMetadata)
+	saml, oidc := in.Body.SAMLMetadata, in.Body.ClientSecret
+	if (saml == nil) == (oidc == nil) {
+		return nil, apierr.New("validation_failed", "provide exactly one of saml_metadata or client_secret")
+	}
+	const operation = enterprise.SSOConnectionUpdateOperation
+	var request map[string]string
+	if oidc != nil {
+		request = enterprise.OIDCClientSecretUpdateRequest(in.ID, in.ConnectionID, ifMatch, *oidc)
+	} else {
+		request = enterprise.SAMLMetadataUpdateRequest(in.ID, in.ConnectionID, ifMatch, *saml)
+	}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
 	if err != nil {
 		return nil, err
@@ -393,7 +403,12 @@ func (a *API) updateSAMLMetadata(ctx context.Context, in *updateSAMLMetadataInpu
 	if err != nil {
 		return nil, err
 	}
-	connection, err := a.Enterprise.ReplaceSAMLSigningCertificates(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, in.Body.SAMLMetadata)
+	var connection enterprise.Connection
+	if oidc != nil {
+		connection, err = a.Enterprise.ReplaceOIDCClientSecret(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, *oidc)
+	} else {
+		connection, err = a.Enterprise.ReplaceSAMLSigningCertificates(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, *saml)
+	}
 	if err != nil {
 		return nil, err
 	}

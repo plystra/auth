@@ -658,6 +658,58 @@ func (q *Queries) MarkExternalUserVerified(ctx context.Context, arg MarkExternal
 	return err
 }
 
+const replaceOIDCClientSecret = `-- name: ReplaceOIDCClientSecret :one
+UPDATE sso_connections
+SET client_secret_ciphertext = $1,
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = $2 AND space_id = $3
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at
+`
+
+type ReplaceOIDCClientSecretParams struct {
+	ClientSecretCiphertext []byte `json:"client_secret_ciphertext"`
+	ID                     string `json:"id"`
+	SpaceID                string `json:"space_id"`
+}
+
+type ReplaceOIDCClientSecretRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ReplaceOIDCClientSecret(ctx context.Context, arg ReplaceOIDCClientSecretParams) (ReplaceOIDCClientSecretRow, error) {
+	row := q.db.QueryRow(ctx, replaceOIDCClientSecret, arg.ClientSecretCiphertext, arg.ID, arg.SpaceID)
+	var i ReplaceOIDCClientSecretRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Provider,
+		&i.Issuer,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.GroupsClaim,
+		&i.RoleMappings,
+		&i.Status,
+		&i.CoversSubtree,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const replaceSAMLSigningCertificates = `-- name: ReplaceSAMLSigningCertificates :one
 UPDATE sso_connections
 SET saml_idp_certificate = $1,

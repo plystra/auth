@@ -115,7 +115,7 @@ func TestSAMLSigningMetadataUpdatesOnlineAndPreservesIdentity(t *testing.T) {
 	if oldTag != connection.ETag() || oldTag == "" {
 		t.Fatal("management GET did not return the current ETag")
 	}
-	const op = enterprise.SAMLMetadataUpdateOperation
+	const op = enterprise.SSOConnectionUpdateOperation
 	bind := func(tag, xml string) {
 		prove(op, enterprise.SAMLMetadataUpdateRequest(space.ID, connection.ID, tag, xml))
 	}

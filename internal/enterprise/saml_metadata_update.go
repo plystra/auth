@@ -16,7 +16,7 @@ import (
 	"github.com/plystra/auth/internal/db"
 )
 
-const SAMLMetadataUpdateOperation = "sso_connections.update"
+const SSOConnectionUpdateOperation = "sso_connections.update"
 
 func (c Connection) ETag() string { return connectionETag(c.ID, c.UpdatedAt) }
 
@@ -26,7 +26,7 @@ func connectionETag(id string, updatedAt time.Time) string {
 
 func SAMLMetadataUpdateRequest(spaceID, connectionID, ifMatch, metadata string) map[string]string {
 	return map[string]string{
-		"operation": SAMLMetadataUpdateOperation, "space_id": spaceID, "connection_id": connectionID,
+		"operation": SSOConnectionUpdateOperation, "space_id": spaceID, "connection_id": connectionID,
 		"if_match": ifMatch, "saml_metadata_digest": sha256Hex(metadata),
 	}
 }
@@ -42,18 +42,9 @@ func (s *Service) ReplaceSAMLSigningCertificates(ctx context.Context, actorMembe
 	request := SAMLMetadataUpdateRequest(spaceID, connectionID, ifMatch, metadata)
 	var out Connection
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
-		if err := s.authorizeSettingsTx(ctx, q, actorMemberID, request); err != nil {
-			return err
-		}
-		current, err := q.LockSSOConnectionInSpace(ctx, db.LockSSOConnectionInSpaceParams{ID: connectionID, SpaceID: spaceID})
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && current.Status != "active" {
-			return apierr.New("not_found", "active SSO connection was not found")
-		}
+		current, err := s.lockConnectionUpdateTx(ctx, q, actorMemberID, request)
 		if err != nil {
 			return err
-		}
-		if ifMatch != connectionETag(current.ID, current.UpdatedAt.Time) {
-			return apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
 		}
 		if current.Provider != "saml" {
 			return apierr.New("validation_failed", "signing metadata updates require a SAML connection")
@@ -90,6 +81,23 @@ func (s *Service) ReplaceSAMLSigningCertificates(ctx context.Context, actorMembe
 		return Connection{}, normalizeConnectionError(err)
 	}
 	return out, nil
+}
+
+func (s *Service) lockConnectionUpdateTx(ctx context.Context, q *db.Queries, actorMemberID string, request map[string]string) (db.LockSSOConnectionInSpaceRow, error) {
+	if err := s.authorizeSettingsTx(ctx, q, actorMemberID, request); err != nil {
+		return db.LockSSOConnectionInSpaceRow{}, err
+	}
+	current, err := q.LockSSOConnectionInSpace(ctx, db.LockSSOConnectionInSpaceParams{ID: request["connection_id"], SpaceID: request["space_id"]})
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && current.Status != "active" {
+		return db.LockSSOConnectionInSpaceRow{}, apierr.New("not_found", "active SSO connection was not found")
+	}
+	if err != nil {
+		return db.LockSSOConnectionInSpaceRow{}, err
+	}
+	if request["if_match"] != connectionETag(current.ID, current.UpdatedAt.Time) {
+		return db.LockSSOConnectionInSpaceRow{}, apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
+	}
+	return current, nil
 }
 
 func sha256Hex(value string) string {
