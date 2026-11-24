@@ -9,6 +9,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,9 @@ import (
 )
 
 const workforceUpstreamHost = "idp.workforce.test"
+
+const workforceFixtureUpstreamHeader = "X-Auth-Fixture-Upstream"
+const workforceDiscoveryPath = "/.well-known/openid-configuration"
 
 type workforceProcessProxy struct {
 	front  *httptest.Server
@@ -91,7 +95,7 @@ func (p *workforceProcessProxy) start(t *testing.T, rp *humanRP, idp keycloakIns
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := func() (testcontainers.Container, *httputil.ReverseProxy) {
+	start := func() (testcontainers.Container, string) {
 		t.Helper()
 		process, err := testcontainers.Run(ctx, "alpine:3.22",
 			testcontainers.WithImagePlatform("linux/"+runtime.GOARCH),
@@ -116,7 +120,7 @@ func (p *workforceProcessProxy) start(t *testing.T, rp *humanRP, idp keycloakIns
 				cfg.PortBindings = network.PortMap{network.MustParsePort("8080/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "0"}}}
 			}),
 			testcontainers.WithExposedPorts("8080/tcp"),
-			testcontainers.WithWaitStrategy(wait.ForHTTP("/.well-known/openid-configuration").WithPort("8080/tcp")),
+			testcontainers.WithWaitStrategy(wait.ForHTTP(workforceDiscoveryPath).WithPort("8080/tcp")),
 		)
 		if process != nil {
 			t.Cleanup(func() { _ = process.Terminate(context.Background()) })
@@ -124,19 +128,16 @@ func (p *workforceProcessProxy) start(t *testing.T, rp *humanRP, idp keycloakIns
 		if err != nil {
 			t.Fatal("start independent Auth service", err)
 		}
-		endpoint, err := process.PortEndpoint(ctx, "8080/tcp", "http")
+		address, err := process.ContainerIP(ctx)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatal("resolve Auth service on the disposable network", err)
 		}
-		target, err := url.Parse(endpoint)
-		if err != nil {
-			t.Fatal(err)
-		}
-		return process, httputil.NewSingleHostReverseProxy(target)
+		return process, net.JoinHostPort(address, "8080")
 	}
 	primary, first := start()
 	_, peer := start()
-	p.active.Store(first)
+	p.active.Store(httputil.NewSingleHostReverseProxy(startWorkforceLoadBalancer(t, first, peer)))
+	p.waitForUpstream(t, first)
 	rp.provider, err = oidc.NewProvider(oidc.ClientContext(ctx, p.front.Client()), p.front.URL)
 	if err != nil {
 		t.Fatal("discover the public process issuer", err)
@@ -145,9 +146,7 @@ func (p *workforceProcessProxy) start(t *testing.T, rp *humanRP, idp keycloakIns
 	rp.config.Endpoint.AuthStyle = oauth2.AuthStyleInHeader
 	return func() {
 		t.Helper()
-		if p.active.Load() != first {
-			t.Fatal("the pending upstream callback must have started at the primary")
-		}
+		p.waitForUpstream(t, first)
 		timeout := time.Duration(0)
 		if err := primary.Stop(ctx, &timeout); err != nil {
 			t.Fatal("stop the primary Auth process", err)
@@ -156,6 +155,78 @@ func (p *workforceProcessProxy) start(t *testing.T, rp *humanRP, idp keycloakIns
 		if err != nil || state.Running || state.Status != "exited" {
 			t.Fatal("the primary Auth process did not exit", err)
 		}
-		p.active.Store(peer)
+		p.waitForUpstream(t, peer)
+	}
+}
+
+func startWorkforceLoadBalancer(t *testing.T, primary, backup string) *url.URL {
+	t.Helper()
+	// Keep the HTTPS issuer stable. Caddy selects the ready backend without the
+	// callback client replaying its request or the test modifying proxy state.
+	config := fmt.Sprintf(`{
+	admin off
+}
+:8080 {
+	reverse_proxy %s %s {
+		lb_policy first
+		health_uri /readyz
+		health_port 8090
+		health_interval 200ms
+		health_timeout 1s
+		header_down %s {http.reverse_proxy.upstream.hostport}
+	}
+}
+`, primary, backup, workforceFixtureUpstreamHeader)
+	ctx := t.Context()
+	balancer, err := testcontainers.Run(ctx, "caddy:2.10.2-alpine",
+		testcontainers.WithFiles(testcontainers.ContainerFile{
+			Reader: strings.NewReader(config), ContainerFilePath: "/etc/caddy/Caddyfile", FileMode: 0444,
+		}),
+		testcontainers.WithHostConfigModifier(func(cfg *container.HostConfig) {
+			cfg.PortBindings = network.PortMap{network.MustParsePort("8080/tcp"): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "0"}}}
+		}),
+		testcontainers.WithExposedPorts("8080/tcp"),
+		testcontainers.WithWaitStrategy(wait.ForHTTP(workforceDiscoveryPath).WithPort("8080/tcp")),
+	)
+	if balancer != nil {
+		t.Cleanup(func() { _ = balancer.Terminate(context.Background()) })
+	}
+	if err != nil {
+		t.Fatal("start the ready-checked load balancer", err)
+	}
+	endpoint, err := balancer.PortEndpoint(ctx, "8080/tcp", "http")
+	if err != nil {
+		t.Fatal("resolve the mapped load balancer port", err)
+	}
+	target, err := url.Parse(endpoint)
+	if err != nil {
+		t.Fatal("parse the load balancer endpoint", err)
+	}
+	return target
+}
+
+func (p *workforceProcessProxy) waitForUpstream(t *testing.T, expected string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, p.front.URL+workforceDiscoveryPath, nil)
+		if err != nil {
+			t.Fatal("create a readiness probe", err)
+		}
+		res, err := p.front.Client().Do(request)
+		if err == nil {
+			_ = res.Body.Close()
+			if res.StatusCode == http.StatusOK && res.Header.Get(workforceFixtureUpstreamHeader) == expected {
+				return
+			}
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("the load balancer did not route readiness to the expected Auth service")
+		case <-ticker.C:
+		}
 	}
 }
