@@ -122,6 +122,80 @@ func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testi
 	}
 }
 
+func TestIdPInitiatedSAMLLoginConsumesAssertionOnlyOnCommit(t *testing.T) {
+	f := newDirectorySSOFixture(t, "sub")
+	ctx := t.Context()
+	metadata, signing := newSAMLTestIssuer(t)
+	f.svc.Issuer = "https://auth.test"
+	actor := authorization.WithHumanActor(ctx, f.owner.ID, "usr_sso_http_owner")
+	connection, err := f.svc.CreateConnection(actor, f.owner.ID, f.spaceID, enterprise.ConnectionInput{
+		Name: "Directory SAML", Provider: "saml", SAMLMetadata: metadata, RedirectURI: "https://auth.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := "employee_id"
+	if _, err := f.svc.UpdateDirectory(actor, f.owner.ID, f.spaceID, f.directory.ID,
+		enterprise.DirectoryUpdate{SSOConnectionID: &connection.ID, SSOIdentityClaim: &claim}, 1); err != nil {
+		t.Fatal(err)
+	}
+	payload := signedSAMLTestResponse(t, signing, connection, "", "fixture-employee", []samlTestAttribute{{name: claim, value: "Stable-Object-1"}}, false)
+	path := "/v1/sso/" + connection.ID + "/callback"
+	submit := func() *httptest.ResponseRecorder {
+		form := url.Values{"SAMLResponse": {payload}}
+		request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response := httptest.NewRecorder()
+		f.mux.ServeHTTP(response, request)
+		return response
+	}
+	if _, err := f.st.Pool.Exec(ctx, `
+		CREATE FUNCTION reject_idp_initiated_login_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action='auth.sso.login' THEN RAISE EXCEPTION 'fixture audit failure'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER reject_idp_initiated_login_audit BEFORE INSERT ON audit_logs
+		FOR EACH ROW EXECUTE FUNCTION reject_idp_initiated_login_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	if failed := submit(); failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("audit rollback returned HTTP %d", failed.Code)
+	}
+	if _, err := f.st.Pool.Exec(ctx, "DROP TRIGGER reject_idp_initiated_login_audit ON audit_logs"); err != nil {
+		t.Fatal(err)
+	}
+	concurrent := make(chan *httptest.ResponseRecorder, 1)
+	go func() { concurrent <- submit() }()
+	first, second := submit(), <-concurrent
+	if first.Code != http.StatusOK {
+		first, second = second, first
+	}
+	requireSAMLLogin(t, first)
+	if second.Code != http.StatusBadRequest {
+		t.Fatalf("duplicate delivery returned HTTP %d", second.Code)
+	}
+	var rejection struct{ Error struct{ Code string } }
+	if err := json.Unmarshal(second.Body.Bytes(), &rejection); err != nil || rejection.Error.Code != "invalid_grant" {
+		t.Fatalf("duplicate delivery did not return invalid_grant: %v", err)
+	}
+	var uses, sessions, audited int
+	if err := f.st.Pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM saml_assertion_uses WHERE connection_id=$1),
+		(SELECT count(*) FROM sessions WHERE sso_connection_id=$1),
+		(SELECT count(*) FROM audit_logs WHERE action='auth.sso.login')`, connection.ID).
+		Scan(&uses, &sessions, &audited); err != nil || uses != 1 || sessions != 1 || audited != 1 {
+		t.Fatalf("expected one committed assertion, session and successful audit, got %d/%d/%d: %v", uses, sessions, audited, err)
+	}
+	if _, err := f.st.Pool.Exec(ctx, `INSERT INTO saml_assertion_uses (connection_id, assertion_id_hash, expires_at)
+		VALUES ($1, sha256('expired-fixture-assertion'::bytea), clock_timestamp()-interval '1 minute')`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.svc.ExpireSAMLArtifacts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.st.Pool.QueryRow(ctx, `SELECT count(*) FROM saml_assertion_uses WHERE connection_id=$1`, connection.ID).Scan(&uses); err != nil || uses != 1 {
+		t.Fatalf("expiry did not preserve the live assertion receipt: count=%d err=%v", uses, err)
+	}
+}
+
 func TestSAMLCallbackRollsBackWhenSigningCertificateExpiresDuringLogin(t *testing.T) {
 	t.Run("single certificate", func(t *testing.T) { checkSAMLExpiryDuringLogin(t, false, false) })
 	t.Run("implicit signer expires with same-key renewal", func(t *testing.T) { checkSAMLExpiryDuringLogin(t, true, false) })

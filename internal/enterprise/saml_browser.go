@@ -103,7 +103,11 @@ func invalidSAMLBrowserResponse() error {
 	return apierr.New("invalid_grant", "the SAML browser response is invalid or expired")
 }
 
-func (s *Service) ExpireSAMLBrowserResponses(ctx context.Context) error {
-	_, err := s.Store.Queries().DeleteExpiredSAMLBrowserResponses(ctx)
+func (s *Service) ExpireSAMLArtifacts(ctx context.Context) error {
+	queries := s.Store.Queries()
+	if _, err := queries.DeleteExpiredSAMLBrowserResponses(ctx); err != nil {
+		return err
+	}
+	_, err := queries.DeleteExpiredSAMLAssertionUses(ctx)
 	return err
 }

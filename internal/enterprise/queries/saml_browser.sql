@@ -45,3 +45,17 @@ WHERE state_id IN (
     WHERE expires_at <= statement_timestamp() ORDER BY expires_at LIMIT 1000
     FOR UPDATE SKIP LOCKED
 );
+
+-- name: ConsumeSAMLAssertion :execrows
+INSERT INTO saml_assertion_uses (connection_id, assertion_id_hash, expires_at)
+SELECT sqlc.arg(connection_id), sqlc.arg(assertion_id_hash), sqlc.arg(expires_at)::timestamptz
+WHERE sqlc.arg(expires_at)::timestamptz > clock_timestamp()
+ON CONFLICT (connection_id, assertion_id_hash) DO NOTHING;
+
+-- name: DeleteExpiredSAMLAssertionUses :execrows
+DELETE FROM saml_assertion_uses
+WHERE (connection_id, assertion_id_hash) IN (
+    SELECT connection_id, assertion_id_hash FROM saml_assertion_uses
+    WHERE expires_at <= statement_timestamp() ORDER BY expires_at LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+);

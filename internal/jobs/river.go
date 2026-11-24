@@ -56,7 +56,7 @@ func (w *AgentExpiryWorker) Work(ctx context.Context, _ *river.Job[AgentExpiryAr
 }
 
 type SAMLBrowserExpiryService interface {
-	ExpireSAMLBrowserResponses(context.Context) error
+	ExpireSAMLArtifacts(context.Context) error
 }
 
 type SAMLBrowserExpiryArgs struct{}
@@ -69,7 +69,7 @@ type SAMLBrowserExpiryWorker struct {
 }
 
 func (w *SAMLBrowserExpiryWorker) Work(ctx context.Context, _ *river.Job[SAMLBrowserExpiryArgs]) error {
-	return w.Service.ExpireSAMLBrowserResponses(ctx)
+	return w.Service.ExpireSAMLArtifacts(ctx)
 }
 
 // Client is the process-local River producer. Workers are added by the

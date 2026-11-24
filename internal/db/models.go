@@ -627,6 +627,12 @@ type RolePermission struct {
 	PermissionID string `json:"permission_id"`
 }
 
+type SamlAssertionUse struct {
+	ConnectionID    string             `json:"connection_id"`
+	AssertionIDHash []byte             `json:"assertion_id_hash"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
 type SamlBrowserResponse struct {
 	StateID    string             `json:"state_id"`
 	Ciphertext []byte             `json:"ciphertext"`

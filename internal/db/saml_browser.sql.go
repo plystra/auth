@@ -11,6 +11,44 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const consumeSAMLAssertion = `-- name: ConsumeSAMLAssertion :execrows
+INSERT INTO saml_assertion_uses (connection_id, assertion_id_hash, expires_at)
+SELECT $1, $2, $3::timestamptz
+WHERE $3::timestamptz > clock_timestamp()
+ON CONFLICT (connection_id, assertion_id_hash) DO NOTHING
+`
+
+type ConsumeSAMLAssertionParams struct {
+	ConnectionID    string             `json:"connection_id"`
+	AssertionIDHash []byte             `json:"assertion_id_hash"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
+func (q *Queries) ConsumeSAMLAssertion(ctx context.Context, arg ConsumeSAMLAssertionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, consumeSAMLAssertion, arg.ConnectionID, arg.AssertionIDHash, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteExpiredSAMLAssertionUses = `-- name: DeleteExpiredSAMLAssertionUses :execrows
+DELETE FROM saml_assertion_uses
+WHERE (connection_id, assertion_id_hash) IN (
+    SELECT connection_id, assertion_id_hash FROM saml_assertion_uses
+    WHERE expires_at <= statement_timestamp() ORDER BY expires_at LIMIT 1000
+    FOR UPDATE SKIP LOCKED
+)
+`
+
+func (q *Queries) DeleteExpiredSAMLAssertionUses(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteExpiredSAMLAssertionUses)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredSAMLBrowserResponses = `-- name: DeleteExpiredSAMLBrowserResponses :execrows
 DELETE FROM saml_browser_responses
 WHERE state_id IN (

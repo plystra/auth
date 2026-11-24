@@ -148,9 +148,11 @@ func (p *samlLoginProvider) verify(ctx context.Context, response string, keyHint
 }
 
 type samlLoginProof struct {
-	provider       *samlLoginProvider
-	response       string
-	keyHintMissing bool
+	provider        *samlLoginProvider
+	response        string
+	keyHintMissing  bool
+	assertionIDHash []byte
+	assertionExpiry time.Time
 }
 
 func (p *samlLoginProvider) trustValidAt(now time.Time) bool {

@@ -247,7 +247,7 @@ func TestSAMLWorkforceBrowserPreservesStagedResponseOnRollbackAndExpiresIt(t *te
 		t.Fatal(err)
 	}
 	browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", http.StatusBadRequest)
-	if err := rp.workforce.ExpireSAMLBrowserResponses(ctx); err != nil {
+	if err := rp.workforce.ExpireSAMLArtifacts(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var pending int

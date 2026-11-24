@@ -1071,7 +1071,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 			if state.BrowserBound || state.LinkSessionID.Valid || state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
 				return apierr.New("invalid_grant", "SAML state is invalid or expired")
 			}
-			if state.RequestID.Valid && inResponseTo != state.RequestID.String {
+			if !state.RequestID.Valid || state.RequestID.String == "" || inResponseTo != state.RequestID.String {
 				return apierr.New("invalid_grant", "the SAML response does not match the authorization request")
 			}
 			return nil
@@ -1082,14 +1082,14 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 	} else if inResponseTo != "" {
 		return account.AuthResult{}, apierr.New("invalid_grant", "an unsolicited SAML response cannot contain InResponseTo")
 	}
-	claims, err := s.verifiedSAMLLogin(ctx, row, in.SAMLResponse, keyHintMissing, "", time.Now())
+	claims, err := s.verifiedSAMLLogin(ctx, row, in.SAMLResponse, keyHintMissing, inResponseTo, time.Now())
 	if err != nil {
 		return account.AuthResult{}, err
 	}
 	return s.finishCallback(ctx, row, state, claims, nil)
 }
 
-func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, response string, keyHintMissing bool, browserRequestID string, receivedAt time.Time) (idTokenClaims, error) {
+func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, response string, keyHintMissing bool, requestID string, receivedAt time.Time) (idTokenClaims, error) {
 	provider, err := s.samlProvider(row)
 	if err != nil {
 		return idTokenClaims{}, err
@@ -1101,12 +1101,23 @@ func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, r
 	if len(info.Assertions) != 1 {
 		return idTokenClaims{}, directoryIdentityUnavailable()
 	}
-	if browserRequestID != "" {
-		subject := info.Assertions[0].Subject
-		if subject == nil || subject.SubjectConfirmation == nil || subject.SubjectConfirmation.SubjectConfirmationData == nil ||
-			subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo != browserRequestID {
-			return idTokenClaims{}, invalidSAMLBrowserResponse()
+	assertion := info.Assertions[0]
+	subject := assertion.Subject
+	if subject == nil || subject.SubjectConfirmation == nil || subject.SubjectConfirmation.SubjectConfirmationData == nil ||
+		subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo != requestID {
+		return idTokenClaims{}, apierr.New("invalid_grant", "the SAML subject confirmation does not match the sign-in request")
+	}
+	proof := &samlLoginProof{provider: provider, response: response, keyHintMissing: keyHintMissing}
+	if requestID == "" {
+		if assertion.ID == "" || assertion.Conditions == nil {
+			return idTokenClaims{}, apierr.New("invalid_grant", "the SAML assertion has no single-use identity or expiration")
 		}
+		expiry, err := time.Parse(time.RFC3339, assertion.Conditions.NotOnOrAfter)
+		if err != nil || !expiry.After(receivedAt) {
+			return idTokenClaims{}, apierr.New("invalid_grant", "the SAML assertion expired")
+		}
+		proof.assertionIDHash = digest(assertion.ID)
+		proof.assertionExpiry = expiry
 	}
 	email := firstSAMLValue(info.Values, "email", "Email", "mail", "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress")
 	if email == "" && strings.Contains(info.NameID, "@") {
@@ -1116,7 +1127,7 @@ func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, r
 		return idTokenClaims{}, apierr.New("invalid_grant", "the SAML identity is not valid for this connection")
 	}
 	claims := idTokenClaims{
-		samlProof: &samlLoginProof{provider: provider, response: response, keyHintMissing: keyHintMissing},
+		samlProof: proof,
 		Subject:   info.NameID, Email: email, EmailVerified: true,
 		Name: firstSAMLValue(info.Values, "displayName", "DisplayName", "name", "Name"),
 	}
@@ -1124,7 +1135,7 @@ func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, r
 		claims.authTime = instant.UTC()
 	}
 	claims.SAMLAttributes = make(map[string][]string, len(info.Values))
-	if statement := info.Assertions[0].AttributeStatement; statement != nil {
+	if statement := assertion.AttributeStatement; statement != nil {
 		for _, attribute := range statement.Attributes {
 			for _, value := range attribute.Values {
 				claims.SAMLAttributes[attribute.Name] = append(claims.SAMLAttributes[attribute.Name], value.Value)
@@ -1263,6 +1274,18 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			}
 			if err := q.ConsumeSSOState(ctx, db.ConsumeSSOStateParams{ID: lockedState.ID}); err != nil {
 				return err
+			}
+		}
+		if proof := claims.samlProof; proof != nil && proof.assertionIDHash != nil {
+			changed, err := q.ConsumeSAMLAssertion(ctx, db.ConsumeSAMLAssertionParams{
+				ConnectionID: connection.ID, AssertionIDHash: proof.assertionIDHash,
+				ExpiresAt: pgtype.Timestamptz{Time: proof.assertionExpiry, Valid: true},
+			})
+			if err != nil {
+				return err
+			}
+			if changed != 1 {
+				return apierr.New("invalid_grant", "the SAML assertion was already used or expired")
 			}
 		}
 		newMembership := false
@@ -1405,7 +1428,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			if err := claims.samlProof.recheck(ctx); err != nil {
 				return err
 			}
-			if browser != nil {
+			if browser != nil || claims.samlProof.assertionIDHash != nil {
 				_, err := claims.samlProof.provider.verify(ctx, claims.samlProof.response, claims.samlProof.keyHintMissing)
 				return err
 			}
