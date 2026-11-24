@@ -32,6 +32,7 @@ import (
 	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/security"
+	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
 	"github.com/plystra/auth/internal/testdb"
 	"github.com/pquerna/otp/totp"
@@ -45,7 +46,7 @@ const rpTestIssuer = "https://auth.example.com"
 
 // Run two independent serve processes behind a single HTTPS issuer. Switch
 // between them at explicit points rather than depending on request scheduling.
-func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmacKey string, wrappingKey []byte) (*httptest.Server, func(), []string) {
+func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmacKey string, wrappingKey []byte) (*httptest.Server, func(), []string, func(*testing.T)) {
 	t.Helper()
 	ctx := t.Context()
 	fixture := t.TempDir()
@@ -66,7 +67,7 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 	}
 	var dataKey [32]byte
 	_, _ = rand.Read(dataKey[:])
-	startProcess := func(name string) (*httputil.ReverseProxy, string) {
+	startProcess := func(name string) (*httputil.ReverseProxy, string, testcontainers.Container) {
 		t.Helper()
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -117,25 +118,41 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 		if err != nil {
 			t.Fatal(err)
 		}
-		return httputil.NewSingleHostReverseProxy(target), health + "/readyz"
+		return httputil.NewSingleHostReverseProxy(target), health + "/readyz", process
 	}
 	// Independently provisioned files may seed a pristine database. Once
 	// initialized, both processes must use the same persisted issuer key.
-	primary, primaryReady := startProcess("primary")
-	peer, peerReady := startProcess("peer")
+	primary, primaryReady, primaryProcess := startProcess("primary")
+	peer, peerReady, _ := startProcess("peer")
 	var active atomic.Pointer[httputil.ReverseProxy]
 	active.Store(primary)
 	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		active.Load().ServeHTTP(w, r)
 	}))
 	t.Cleanup(issuer.Close)
-	return issuer, func() {
+	switchBackend := func() {
 		if active.Load() == primary {
 			active.Store(peer)
 		} else {
 			active.Store(primary)
 		}
-	}, []string{primaryReady, peerReady}
+	}
+	losePrimary := func(t *testing.T) {
+		t.Helper()
+		if active.Load() != primary {
+			t.Fatal("failover must begin on the primary")
+		}
+		stopTimeout := time.Duration(0)
+		if err := primaryProcess.Stop(t.Context(), &stopTimeout); err != nil {
+			t.Fatal("stop the primary issuer process", err)
+		}
+		state, err := primaryProcess.State(t.Context())
+		if err != nil || state.Status != "exited" || state.Running {
+			t.Fatal("the primary issuer process did not exit", err)
+		}
+		active.Store(peer)
+	}
+	return issuer, switchBackend, []string{primaryReady, peerReady}, losePrimary
 }
 
 func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
@@ -173,7 +190,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 	}
 	var wrappingKey [32]byte
 	_, _ = rand.Read(wrappingKey[:])
-	issuer, switchBackend, readyURLs := startOIDCTestIssuer(t, database, net.JoinHostPort(host, strconv.Itoa(port)), hmacKey, wrappingKey[:])
+	issuer, switchBackend, readyURLs, losePrimary := startOIDCTestIssuer(t, database, net.JoinHostPort(host, strconv.Itoa(port)), hmacKey, wrappingKey[:])
 	client := issuer.Client()
 	ctx = oidc.ClientContext(ctx, client)
 	provider, err := oidc.NewProvider(ctx, rpTestIssuer)
@@ -264,17 +281,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		return pending.Handle
 	}
 	handle := startConsent(t, config, state, nonce, verifier)
-	var attempt struct {
-		Data struct {
-			ID   string `json:"attempt_id"`
-			Next string `json:"next_step"`
-		} `json:"data"`
-	}
-	request(t, http.MethodPost, rpTestIssuer+"/v1/auth/sign-in", "", map[string]string{"email": email}, &attempt)
-	if attempt.Data.Next != "password" || attempt.Data.ID == "" {
-		t.Fatal("issuer did not start password authentication")
-	}
-	var signedIn struct {
+	type accountSignIn struct {
 		Data struct {
 			Tokens struct {
 				Access  string `json:"access_token"`
@@ -282,7 +289,26 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			} `json:"tokens"`
 		} `json:"data"`
 	}
-	request(t, http.MethodPost, rpTestIssuer+"/v1/auth/sign-in/"+attempt.Data.ID, "", map[string]string{"password": password}, &signedIn)
+	passwordSignIn := func(t *testing.T) accountSignIn {
+		t.Helper()
+		var attempt struct {
+			Data struct {
+				ID   string `json:"attempt_id"`
+				Next string `json:"next_step"`
+			} `json:"data"`
+		}
+		request(t, http.MethodPost, rpTestIssuer+"/v1/auth/sign-in", "", map[string]string{"email": email}, &attempt)
+		if attempt.Data.Next != "password" || attempt.Data.ID == "" {
+			t.Fatal("issuer did not start password authentication")
+		}
+		var signedIn accountSignIn
+		request(t, http.MethodPost, rpTestIssuer+"/v1/auth/sign-in/"+attempt.Data.ID, "", map[string]string{"password": password}, &signedIn)
+		if signedIn.Data.Tokens.Access == "" || signedIn.Data.Tokens.Refresh == "" {
+			t.Fatal("issuer did not return account session credentials")
+		}
+		return signedIn
+	}
+	signedIn := passwordSignIn(t)
 	approve := func(t *testing.T, handle, state string) *url.URL {
 		t.Helper()
 		var consent struct {
@@ -1140,6 +1166,37 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		var expired *oidc.TokenExpiredError
 		if !errors.As(err, &expired) || !expired.Expiry.Equal(claims.Expiry) {
 			t.Fatal("RP did not reject the ID Token at the end of its validity period")
+		}
+	})
+
+	t.Run("pending login survives primary process exit", func(t *testing.T) {
+		signedIn = passwordSignIn(t)
+		pendingState, pendingNonce, pendingVerifier := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+		pending := startConsent(t, config, pendingState, pendingNonce, pendingVerifier)
+		previousAccess, previousRefresh := signedIn.Data.Tokens.Access, signedIn.Data.Tokens.Refresh
+		losePrimary(t)
+		if status := request(t, http.MethodGet, rpTestIssuer+"/v1/me/sessions", previousAccess, nil, nil); status != http.StatusOK {
+			t.Fatalf("the surviving issuer rejected the original session: status=%d", status)
+		}
+		var refreshed struct{ Data session.Tokens }
+		request(t, http.MethodPost, rpTestIssuer+"/v1/auth/refresh", "", map[string]string{"refresh_token": previousRefresh}, &refreshed)
+		if refreshed.Data.AccessToken == "" || refreshed.Data.RefreshToken == "" || refreshed.Data.RefreshToken == previousRefresh {
+			t.Fatal("the surviving issuer did not rotate the original session refresh credential")
+		}
+		signedIn.Data.Tokens.Access = refreshed.Data.AccessToken
+		callback := approve(t, pending, pendingState)
+		credentials, err := config.Exchange(ctx, callback.Query().Get("code"), oauth2.VerifierOption(pendingVerifier))
+		if err != nil {
+			t.Fatal("the relying party could not redeem the consent code after failover")
+		}
+		raw, _ := credentials.Extra("id_token").(string)
+		identity, err := provider.Verifier(&verification).Verify(ctx, raw)
+		if err != nil || identity.Subject != subject || identity.Nonce != pendingNonce {
+			t.Fatal("the relying party could not verify the user identity after failover")
+		}
+		info, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(credentials))
+		if err != nil || info.Subject != subject || info.Email != email || !info.EmailVerified {
+			t.Fatal("the relying party could not read current permitted user claims after failover")
 		}
 	})
 }
