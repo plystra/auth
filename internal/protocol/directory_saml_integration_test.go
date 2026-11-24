@@ -140,6 +140,15 @@ func TestIdPInitiatedSAMLLoginConsumesAssertionOnlyOnCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 	payload := signedSAMLTestResponse(t, signing, connection, "", "fixture-employee", []samlTestAttribute{{name: claim, value: "Stable-Object-1"}}, false)
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := etree.NewDocument()
+	if err := document.ReadFromBytes(decoded); err != nil {
+		t.Fatal(err)
+	}
+	bearerExpiry := document.FindElement("//SubjectConfirmationData").SelectAttrValue("NotOnOrAfter", "")
 	path := "/v1/sso/" + connection.ID + "/callback"
 	submit := func() *httptest.ResponseRecorder {
 		form := url.Values{"SAMLResponse": {payload}}
@@ -183,6 +192,10 @@ func TestIdPInitiatedSAMLLoginConsumesAssertionOnlyOnCommit(t *testing.T) {
 		(SELECT count(*) FROM audit_logs WHERE action='auth.sso.login')`, connection.ID).
 		Scan(&uses, &sessions, &audited); err != nil || uses != 1 || sessions != 1 || audited != 1 {
 		t.Fatalf("expected one committed assertion, session and successful audit, got %d/%d/%d: %v", uses, sessions, audited, err)
+	}
+	var expiry time.Time
+	if err := f.st.Pool.QueryRow(ctx, `SELECT expires_at FROM saml_assertion_uses WHERE connection_id=$1`, connection.ID).Scan(&expiry); err != nil || expiry.UTC().Format(time.RFC3339) != bearerExpiry {
+		t.Fatalf("assertion receipt did not use its signed bearer expiration: %v", err)
 	}
 	if _, err := f.st.Pool.Exec(ctx, `INSERT INTO saml_assertion_uses (connection_id, assertion_id_hash, expires_at)
 		VALUES ($1, sha256('expired-fixture-assertion'::bytea), clock_timestamp()-interval '1 minute')`, connection.ID); err != nil {
@@ -536,7 +549,7 @@ func signedSAMLTestResponseForAudience(t *testing.T, signing *dsig.SigningContex
 		<saml:AttributeStatement><saml:Attribute Name="email"><saml:AttributeValue>different-saml-email@example.test</saml:AttributeValue></saml:Attribute></saml:AttributeStatement>
 		</saml:Assertion></samlp:Response>`,
 		now.Format(time.RFC3339), recipient, requestID, now.Format(time.RFC3339), recipient, requestID,
-		now.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339), now.Add(time.Minute).Format(time.RFC3339),
+		now.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339), now.Add(2*time.Minute).Format(time.RFC3339),
 		audience, samlTestAuthenticationTime)
 	doc := etree.NewDocument()
 	if err := doc.ReadFromString(xml); err != nil {

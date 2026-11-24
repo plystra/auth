@@ -1103,16 +1103,19 @@ func (s *Service) verifiedSAMLLogin(ctx context.Context, row db.SsoConnection, r
 	}
 	assertion := info.Assertions[0]
 	subject := assertion.Subject
-	if subject == nil || subject.SubjectConfirmation == nil || subject.SubjectConfirmation.SubjectConfirmationData == nil ||
-		subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo != requestID {
+	if subject == nil || subject.SubjectConfirmation == nil || subject.SubjectConfirmation.SubjectConfirmationData == nil {
+		return idTokenClaims{}, apierr.New("invalid_grant", "the SAML subject confirmation is missing")
+	}
+	confirmation := subject.SubjectConfirmation.SubjectConfirmationData
+	if confirmation.InResponseTo != requestID {
 		return idTokenClaims{}, apierr.New("invalid_grant", "the SAML subject confirmation does not match the sign-in request")
 	}
 	proof := &samlLoginProof{provider: provider, response: response, keyHintMissing: keyHintMissing}
 	if requestID == "" {
-		if assertion.ID == "" || assertion.Conditions == nil {
-			return idTokenClaims{}, apierr.New("invalid_grant", "the SAML assertion has no single-use identity or expiration")
+		if assertion.ID == "" {
+			return idTokenClaims{}, apierr.New("invalid_grant", "the SAML assertion has no single-use identity")
 		}
-		expiry, err := time.Parse(time.RFC3339, assertion.Conditions.NotOnOrAfter)
+		expiry, err := time.Parse(time.RFC3339, confirmation.NotOnOrAfter)
 		if err != nil || !expiry.After(receivedAt) {
 			return idTokenClaims{}, apierr.New("invalid_grant", "the SAML assertion expired")
 		}
