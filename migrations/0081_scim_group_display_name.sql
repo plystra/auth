@@ -4,4 +4,4 @@ CREATE INDEX directory_groups_active_name_idx
     WHERE deleted_at IS NULL;
 
 -- +goose Down
-DROP INDEX directory_groups_active_name_idx;
+-- Forward-only migrations: add a compensating migration if removal is required.
