@@ -1368,6 +1368,18 @@
         ],
         "type": "object"
       },
+      "DataStruct5": {
+        "additionalProperties": false,
+        "properties": {
+          "linked": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "linked"
+        ],
+        "type": "object"
+      },
       "DeviceSession": {
         "additionalProperties": false,
         "properties": {
@@ -3451,6 +3463,76 @@
         },
         "required": [
           "data"
+        ],
+        "type": "object"
+      },
+      "SsoIdentityLinkCompleteInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "code"
+        ],
+        "type": "object"
+      },
+      "SsoIdentityLinkCompleteOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/DataStruct5"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "SsoIdentityLinkStartOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/StartResult"
+          }
+        },
+        "required": [
+          "data"
+        ],
+        "type": "object"
+      },
+      "StartResult": {
+        "additionalProperties": false,
+        "properties": {
+          "authorization_method": {
+            "type": "string"
+          },
+          "authorization_url": {
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "relay_state": {
+            "type": "string"
+          },
+          "saml_request": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_url",
+          "state",
+          "expires_at"
         ],
         "type": "object"
       },
@@ -5841,6 +5923,113 @@
           }
         },
         "summary": "auth.sessions.revoke"
+      }
+    },
+    "/v1/me/sso-links/{connection_id}/complete": {
+      "post": {
+        "operationId": "me.sso_links.complete",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SsoIdentityLinkCompleteInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoIdentityLinkCompleteOutputBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "me.sso_links.complete"
+      }
+    },
+    "/v1/me/sso-links/{connection_id}/start": {
+      "post": {
+        "operationId": "me.sso_links.start",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SsoIdentityLinkStartOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "me.sso_links.start"
       }
     },
     "/v1/spaces": {

@@ -203,27 +203,33 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 const createSSOState = `-- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, request_id, browser_bound
+    redirect_uri, expires_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at
 )
 VALUES (
     $1, $2, $3, $4,
     $5, $6, $7,
-    $8, $9
+    $8, $9,
+    $10, $11, $12
 )
 RETURNING id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at
 `
 
 type CreateSSOStateParams struct {
-	ID                     string             `json:"id"`
-	ConnectionID           string             `json:"connection_id"`
-	StateHash              []byte             `json:"state_hash"`
-	NonceHash              []byte             `json:"nonce_hash"`
-	PkceVerifierCiphertext []byte             `json:"pkce_verifier_ciphertext"`
-	RedirectUri            string             `json:"redirect_uri"`
-	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
-	RequestID              pgtype.Text        `json:"request_id"`
-	BrowserBound           bool               `json:"browser_bound"`
+	ID                      string             `json:"id"`
+	ConnectionID            string             `json:"connection_id"`
+	StateHash               []byte             `json:"state_hash"`
+	NonceHash               []byte             `json:"nonce_hash"`
+	PkceVerifierCiphertext  []byte             `json:"pkce_verifier_ciphertext"`
+	RedirectUri             string             `json:"redirect_uri"`
+	ExpiresAt               pgtype.Timestamptz `json:"expires_at"`
+	RequestID               pgtype.Text        `json:"request_id"`
+	BrowserBound            bool               `json:"browser_bound"`
+	LinkSessionID           pgtype.Text        `json:"link_session_id"`
+	LinkMemberID            pgtype.Text        `json:"link_member_id"`
+	LinkConnectionUpdatedAt pgtype.Timestamptz `json:"link_connection_updated_at"`
 }
 
 func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) (SsoState, error) {
@@ -237,6 +243,9 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		arg.ExpiresAt,
 		arg.RequestID,
 		arg.BrowserBound,
+		arg.LinkSessionID,
+		arg.LinkMemberID,
+		arg.LinkConnectionUpdatedAt,
 	)
 	var i SsoState
 	err := row.Scan(
@@ -251,6 +260,9 @@ func (q *Queries) CreateSSOState(ctx context.Context, arg CreateSSOStateParams) 
 		&i.CreatedAt,
 		&i.RequestID,
 		&i.BrowserBound,
+		&i.LinkSessionID,
+		&i.LinkMemberID,
+		&i.LinkConnectionUpdatedAt,
 	)
 	return i, err
 }
@@ -433,6 +445,32 @@ func (q *Queries) HasPendingOIDCBrowserSSO(ctx context.Context, arg HasPendingOI
 	var column_1 bool
 	err := row.Scan(&column_1)
 	return column_1, err
+}
+
+const linkUnclaimedExternalIdentity = `-- name: LinkUnclaimedExternalIdentity :one
+INSERT INTO external_identities (id, user_id, issuer, subject)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (issuer, subject) DO NOTHING
+RETURNING id
+`
+
+type LinkUnclaimedExternalIdentityParams struct {
+	ID      string `json:"id"`
+	UserID  string `json:"user_id"`
+	Issuer  string `json:"issuer"`
+	Subject string `json:"subject"`
+}
+
+func (q *Queries) LinkUnclaimedExternalIdentity(ctx context.Context, arg LinkUnclaimedExternalIdentityParams) (string, error) {
+	row := q.db.QueryRow(ctx, linkUnclaimedExternalIdentity,
+		arg.ID,
+		arg.UserID,
+		arg.Issuer,
+		arg.Subject,
+	)
+	var id string
+	err := row.Scan(&id)
+	return id, err
 }
 
 const listSAMLSigningTrust = `-- name: ListSAMLSigningTrust :many
@@ -619,7 +657,8 @@ func (q *Queries) LockSSOConnectionInSpace(ctx context.Context, arg LockSSOConne
 
 const lockSSOStateByHash = `-- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at
 FROM sso_states WHERE state_hash = $1 FOR UPDATE
 `
 
@@ -642,6 +681,9 @@ func (q *Queries) LockSSOStateByHash(ctx context.Context, arg LockSSOStateByHash
 		&i.CreatedAt,
 		&i.RequestID,
 		&i.BrowserBound,
+		&i.LinkSessionID,
+		&i.LinkMemberID,
+		&i.LinkConnectionUpdatedAt,
 	)
 	return i, err
 }

@@ -788,21 +788,32 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI,
 	if row.Provider == "saml" {
 		return s.startSAML(ctx, row, redirectURI, browser)
 	}
-	provider, err := s.discovery(ctx, row.Issuer)
+	result, state, err := s.prepareOIDCRequest(ctx, row, redirectURI, browser)
 	if err != nil {
 		return StartResult{}, err
+	}
+	if err := s.createSSOState(ctx, state, browser); err != nil {
+		return StartResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) prepareOIDCRequest(ctx context.Context, row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, db.CreateSSOStateParams, error) {
+	provider, err := s.discovery(ctx, row.Issuer)
+	if err != nil {
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	state, err := randomOpaque("sso_state_")
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	nonce, err := randomOpaque("sso_nonce_")
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	verifier, err := randomOpaque("")
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	challenge := sha256.Sum256([]byte(verifier))
 	expiresAt := time.Now().UTC().Add(stateLifetime)
@@ -811,15 +822,13 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI,
 	}
 	verifierCiphertext, err := s.seal([]byte(verifier), pkceVerifierAAD)
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
-	if err := s.createSSOState(ctx, db.CreateSSOStateParams{
+	stateRecord := db.CreateSSOStateParams{
 		ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
 		StateHash: digest(state), NonceHash: digest(nonce),
 		PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
 		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
-	}, browser); err != nil {
-		return StartResult{}, err
 	}
 	query := url.Values{}
 	query.Set("response_type", "code")
@@ -830,7 +839,7 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI,
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
-	return StartResult{AuthorizationURL: provider.Endpoint().AuthURL + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, nil
+	return StartResult{AuthorizationURL: provider.Endpoint().AuthURL + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, stateRecord, nil
 }
 
 func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, error) {
@@ -965,7 +974,7 @@ func (s *Service) callback(ctx context.Context, in CallbackInput, browser *OIDCB
 		if err != nil {
 			return err
 		}
-		if state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) || state.BrowserBound != (browser != nil) {
+		if state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) || state.BrowserBound != (browser != nil) || state.LinkSessionID.Valid {
 			return apierr.New("invalid_grant", "SSO state is invalid or expired")
 		}
 		if in.RedirectURI != "" && in.RedirectURI != state.RedirectUri {
@@ -987,34 +996,42 @@ func (s *Service) callback(ctx context.Context, in CallbackInput, browser *OIDCB
 	if err != nil {
 		return account.AuthResult{}, err
 	}
-	verifier, err := s.open(state.PkceVerifierCiphertext, pkceVerifierAAD)
-	if err != nil {
-		return account.AuthResult{}, apierr.New("temporarily_unavailable", "SSO state is unavailable")
-	}
-	provider, err := s.discovery(ctx, row.Issuer)
+	claims, err := s.exchangeOIDCCode(ctx, row, state, in.Code)
 	if err != nil {
 		return account.AuthResult{}, err
 	}
+	return s.finishCallback(ctx, row, state, claims, browser)
+}
+
+func (s *Service) exchangeOIDCCode(ctx context.Context, row db.SsoConnection, state db.SsoState, code string) (idTokenClaims, error) {
+	verifier, err := s.open(state.PkceVerifierCiphertext, pkceVerifierAAD)
+	if err != nil {
+		return idTokenClaims{}, apierr.New("temporarily_unavailable", "SSO state is unavailable")
+	}
+	provider, err := s.discovery(ctx, row.Issuer)
+	if err != nil {
+		return idTokenClaims{}, err
+	}
 	clientSecret, err := s.open(row.ClientSecretCiphertext, clientSecretAAD)
 	if err != nil {
-		return account.AuthResult{}, apierr.New("temporarily_unavailable", "SSO connection is unavailable")
+		return idTokenClaims{}, apierr.New("temporarily_unavailable", "SSO connection is unavailable")
 	}
 	config := oauth2.Config{ClientID: row.ClientID, ClientSecret: string(clientSecret), Endpoint: provider.Endpoint(), RedirectURL: state.RedirectUri, Scopes: []string{"openid", "email", "profile"}}
 	exchangeCtx := context.WithValue(ctx, oauth2.HTTPClient, s.httpClient())
-	token, err := config.Exchange(exchangeCtx, in.Code, oauth2.SetAuthURLParam("code_verifier", string(verifier)))
+	token, err := config.Exchange(exchangeCtx, code, oauth2.SetAuthURLParam("code_verifier", string(verifier)))
 	if err != nil {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC authorization code is invalid")
+		return idTokenClaims{}, apierr.New("invalid_grant", "the OIDC authorization code is invalid")
 	}
 	rawIDToken, ok := token.Extra("id_token").(string)
 	if !ok || strings.TrimSpace(rawIDToken) == "" {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC provider did not return an ID token")
+		return idTokenClaims{}, apierr.New("invalid_grant", "the OIDC provider did not return an ID token")
 	}
 	claims, err := parseIDToken(exchangeCtx, provider, rawIDToken, row.ClientID, row.GroupsClaim)
 	if err != nil {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC ID token is invalid")
+		return idTokenClaims{}, apierr.New("invalid_grant", "the OIDC ID token is invalid")
 	}
 	if claims.Nonce == "" || !equalDigest(state.NonceHash, claims.Nonce) || claims.Subject == "" || len(claims.Subject) > maxExternalSubjectLen || claims.Email == "" || !claims.EmailVerified {
-		return account.AuthResult{}, apierr.New("invalid_grant", "the OIDC identity is not valid for this connection")
+		return idTokenClaims{}, apierr.New("invalid_grant", "the OIDC identity is not valid for this connection")
 	}
 	var upstreamAuthTime int64
 	if err := json.Unmarshal(claims.VerifiedClaims["auth_time"], &upstreamAuthTime); err == nil && upstreamAuthTime > 0 {
@@ -1022,11 +1039,7 @@ func (s *Service) callback(ctx context.Context, in CallbackInput, browser *OIDCB
 			claims.authTime = candidate
 		}
 	}
-	result, err := s.finishCallback(ctx, row, state, claims, browser)
-	if err != nil {
-		return account.AuthResult{}, err
-	}
-	return result, nil
+	return claims, nil
 }
 
 func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in CallbackInput) (account.AuthResult, error) {
@@ -1044,7 +1057,7 @@ func (s *Service) callbackSAML(ctx context.Context, row db.SsoConnection, in Cal
 			if err != nil {
 				return err
 			}
-			if state.BrowserBound || state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
+			if state.BrowserBound || state.LinkSessionID.Valid || state.ConnectionID != row.ID || state.ConsumedAt.Valid || !state.ExpiresAt.Time.After(time.Now().UTC()) {
 				return apierr.New("invalid_grant", "SAML state is invalid or expired")
 			}
 			if state.RequestID.Valid && inResponseTo != state.RequestID.String {
@@ -1212,7 +1225,7 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			if err != nil {
 				return err
 			}
-			if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID || lockedState.BrowserBound != (browser != nil) {
+			if lockedState.ConsumedAt.Valid || !lockedState.ExpiresAt.Time.After(time.Now().UTC()) || lockedState.ConnectionID != connection.ID || lockedState.BrowserBound != (browser != nil) || lockedState.LinkSessionID.Valid {
 				return apierr.New("invalid_grant", "SSO state is invalid or expired")
 			}
 			if err := q.ConsumeSSOState(ctx, db.ConsumeSSOStateParams{ID: lockedState.ID}); err != nil {

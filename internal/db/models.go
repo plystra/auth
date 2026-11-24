@@ -740,17 +740,20 @@ type SsoDomain struct {
 }
 
 type SsoState struct {
-	ID                     string             `json:"id"`
-	ConnectionID           string             `json:"connection_id"`
-	StateHash              []byte             `json:"state_hash"`
-	NonceHash              []byte             `json:"nonce_hash"`
-	PkceVerifierCiphertext []byte             `json:"pkce_verifier_ciphertext"`
-	RedirectUri            string             `json:"redirect_uri"`
-	ExpiresAt              pgtype.Timestamptz `json:"expires_at"`
-	ConsumedAt             pgtype.Timestamptz `json:"consumed_at"`
-	CreatedAt              pgtype.Timestamptz `json:"created_at"`
-	RequestID              pgtype.Text        `json:"request_id"`
-	BrowserBound           bool               `json:"browser_bound"`
+	ID                      string             `json:"id"`
+	ConnectionID            string             `json:"connection_id"`
+	StateHash               []byte             `json:"state_hash"`
+	NonceHash               []byte             `json:"nonce_hash"`
+	PkceVerifierCiphertext  []byte             `json:"pkce_verifier_ciphertext"`
+	RedirectUri             string             `json:"redirect_uri"`
+	ExpiresAt               pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt              pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	RequestID               pgtype.Text        `json:"request_id"`
+	BrowserBound            bool               `json:"browser_bound"`
+	LinkSessionID           pgtype.Text        `json:"link_session_id"`
+	LinkMemberID            pgtype.Text        `json:"link_member_id"`
+	LinkConnectionUpdatedAt pgtype.Timestamptz `json:"link_connection_updated_at"`
 }
 
 type User struct {

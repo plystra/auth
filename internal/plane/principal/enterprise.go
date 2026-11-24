@@ -149,6 +149,8 @@ type directoriesOutput struct {
 }
 
 func (a *API) registerEnterpriseRoutes(api huma.API) {
+	route.Register(api, route.NewSpec("me.sso_links.start", "POST", "/v1/me/sso-links/{connection_id}/start", route.Principal, "", []route.Subject{route.User}), a.startSSOIdentityLink)
+	route.Register(api, route.NewSpec(enterprise.CompleteIdentityLinkOperation, "POST", "/v1/me/sso-links/{connection_id}/complete", route.Principal, "", []route.Subject{route.User}, route.WithStepUp(), route.WithMaxBodyBytes(64<<10)), a.completeSSOIdentityLink)
 	route.Register(api, route.NewSpec("directories.list", "GET", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDirectories)
 	route.Register(api, route.NewSpec("directories.create", "POST", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectory)
 	route.Register(api, route.NewSpec("directories.update", "PATCH", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDirectory)

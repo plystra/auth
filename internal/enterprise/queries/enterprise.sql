@@ -86,19 +86,23 @@ RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_
 -- name: CreateSSOState :one
 INSERT INTO sso_states (
     id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, request_id, browser_bound
+    redirect_uri, expires_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(connection_id), sqlc.arg(state_hash), sqlc.arg(nonce_hash),
     sqlc.arg(pkce_verifier_ciphertext), sqlc.arg(redirect_uri), sqlc.arg(expires_at),
-    sqlc.narg(request_id), sqlc.arg(browser_bound)
+    sqlc.narg(request_id), sqlc.arg(browser_bound),
+    sqlc.narg(link_session_id), sqlc.narg(link_member_id), sqlc.narg(link_connection_updated_at)
 )
 RETURNING id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound;
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at;
 
 -- name: LockSSOStateByHash :one
 SELECT id, connection_id, state_hash, nonce_hash, pkce_verifier_ciphertext,
-    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound
+    redirect_uri, expires_at, consumed_at, created_at, request_id, browser_bound,
+    link_session_id, link_member_id, link_connection_updated_at
 FROM sso_states WHERE state_hash = sqlc.arg(state_hash) FOR UPDATE;
 
 -- name: ReserveOIDCBrowserSSO :execrows
@@ -152,6 +156,12 @@ LIMIT 1;
 INSERT INTO external_identities (id, user_id, issuer, subject, directory_user_id)
 VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(issuer), sqlc.arg(subject), sqlc.narg(directory_user_id))
 RETURNING id, user_id, issuer, subject, created_at, directory_user_id;
+
+-- name: LinkUnclaimedExternalIdentity :one
+INSERT INTO external_identities (id, user_id, issuer, subject)
+VALUES (sqlc.arg(id), sqlc.arg(user_id), sqlc.arg(issuer), sqlc.arg(subject))
+ON CONFLICT (issuer, subject) DO NOTHING
+RETURNING id;
 
 -- name: MarkExternalUserVerified :exec
 UPDATE users SET email_verified_at = COALESCE(email_verified_at, now()), status = 'active', updated_at = now()
