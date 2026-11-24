@@ -486,8 +486,31 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 	}
 
 	t.Run("verified account drives a live decision in the installed Space", func(t *testing.T) {
+		const installedClientID = "app_oidc_workforce"
+		installedClient := config
+		installedClient.ClientID = installedClientID
+		installedClient.ClientSecret = oauth2.GenerateVerifier()
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO applications
+			(id,space_id,name,client_id,redirect_uris,client_secret_hash,human_oidc_enabled,visibility,review_status,manifest_permissions)
+			SELECT $1,id,'Workforce relying party',$1,$2,$3,true,'public','approved','["auth.authz:check"]'
+			FROM spaces WHERE slug='default'`, installedClientID, redirects,
+			application.HMACClientSecretHash([]byte(hmacKey), installedClient.ClientSecret)); err != nil {
+			t.Fatal(err)
+		}
+		state, nonce, verifier := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+		callback := approve(t, startConsent(t, installedClient, state, nonce, verifier), state)
+		credentials, err := installedClient.Exchange(ctx, callback.Query().Get("code"), oauth2.VerifierOption(verifier))
+		if err != nil {
+			t.Fatal("installed relying party could not redeem its login code")
+		}
+		token, _ := credentials.Extra("id_token").(string)
+		identity, err := provider.Verifier(&oidc.Config{ClientID: installedClientID, SupportedSigningAlgs: []string{oidc.ES256}}).Verify(ctx, token)
+		if err != nil || identity.Subject != subject || identity.Nonce != nonce {
+			t.Fatal("installed relying party could not verify the signed account identity")
+		}
+
 		authz := &authorization.Service{Store: st}
-		space, member, err := authz.CreateSpace(ctx, claims.Subject, "Relying party workforce", "rp-workforce")
+		space, member, err := authz.CreateSpace(ctx, identity.Subject, "Relying party workforce", "rp-workforce")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -497,26 +520,22 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			space.ID, member.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := st.Pool.Exec(ctx, `UPDATE applications SET visibility='public', review_status='approved',
-			manifest_permissions='["auth.authz:check"]' WHERE id=$1`, clientID); err != nil {
-			t.Fatal(err)
-		}
 		apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(hmacKey)}}
-		if _, err := apps.InstallSpace(ctx, member.ID, clientID, space.ID); err != nil {
+		if _, err := apps.InstallSpace(ctx, member.ID, installedClientID, space.ID); err != nil {
 			t.Fatal(err)
 		}
 		expires := time.Now().Add(time.Hour)
-		apiKey, err := apps.CreateKey(ctx, clientID, "workforce-decision", []string{"auth.authz:check"}, &expires)
+		apiKey, err := apps.CreateKey(ctx, installedClientID, "workforce-decision", []string{"auth.authz:check"}, &expires)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allow_subject_assertion=true,
 			restrict_to=jsonb_build_array(jsonb_build_object('space_id',$1::text,'include_descendants',false))
-			WHERE application_id=$2 AND name='workforce-decision'`, space.ID, clientID); err != nil {
+			WHERE application_id=$2 AND name='workforce-decision'`, space.ID, installedClientID); err != nil {
 			t.Fatal(err)
 		}
 		target := serverPlane.URL + "/server/v1/authz/check"
-		body := server.CheckBody{Subject: server.CheckSubject{UserID: claims.Subject}, Action: "self:read",
+		body := server.CheckBody{Subject: server.CheckSubject{UserID: identity.Subject}, Action: "self:read",
 			Resource: server.CheckResource{Type: "member", ID: member.ID, SpaceID: space.ID}}
 		var result struct {
 			Data server.CheckDecision `json:"data"`
@@ -526,7 +545,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			t.Fatal("the installed application did not receive an allow decision for the signed account")
 		}
 		if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET status='revoked',revoked_at=clock_timestamp()
-			WHERE user_id=$1 AND member_id=$2`, claims.Subject, member.ID); err != nil {
+			WHERE user_id=$1 AND member_id=$2`, identity.Subject, member.ID); err != nil {
 			t.Fatal(err)
 		}
 		switchBackend()
