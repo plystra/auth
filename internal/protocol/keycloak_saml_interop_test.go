@@ -40,7 +40,13 @@ func fetchKeycloakSAMLMetadata(t *testing.T, client *http.Client, issuer string)
 	return string(body)
 }
 
-func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, entityID, callback string) {
+type keycloakAdmin struct {
+	client *http.Client
+	realm  string
+	token  string
+}
+
+func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, entityID, callback string) keycloakAdmin {
 	t.Helper()
 	origin := strings.TrimSuffix(issuer, "/realms/"+keycloakRealm)
 	form := url.Values{
@@ -71,7 +77,8 @@ func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, passw
 			"config": map[string]string{"user.attribute": name, "attribute.name": name, "attribute.nameformat": "Basic"},
 		}
 	}
-	body, err := json.Marshal(map[string]any{
+	admin := keycloakAdmin{client: client, realm: origin + "/admin/realms/" + keycloakRealm, token: credential.AccessToken}
+	admin.call(t, http.MethodPost, "/clients", map[string]any{
 		"clientId": entityID, "protocol": "saml", "enabled": true, "adminUrl": callback,
 		"redirectUris": []string{callback},
 		"attributes": map[string]string{
@@ -84,24 +91,38 @@ func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, passw
 			mapper("email", "saml-user-property-mapper"),
 			mapper(keycloakSAMLDirectoryClaim, "saml-user-attribute-mapper"),
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
+	}, nil, http.StatusCreated)
+	return admin
+}
+
+func (a keycloakAdmin) call(t *testing.T, method, path string, input, output any, status int) string {
+	t.Helper()
+	var body []byte
+	if input != nil {
+		var err error
+		body, err = json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	req, err = http.NewRequestWithContext(t.Context(), http.MethodPost, origin+"/admin/realms/"+keycloakRealm+"/clients", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(t.Context(), method, a.realm+path, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+credential.AccessToken)
-	res, err = client.Do(req)
+	req.Header.Set("Authorization", "Bearer "+a.token)
+	res, err := a.client.Do(req)
 	if err != nil {
-		t.Fatal("register the disposable Keycloak SAML client failed")
+		t.Fatal("disposable Keycloak administration request failed")
 	}
 	defer func() { _ = res.Body.Close() }()
-	if res.StatusCode != http.StatusCreated {
-		t.Fatalf("Keycloak rejected the fixture SAML client: %d", res.StatusCode)
+	if res.StatusCode != status {
+		t.Fatalf("disposable Keycloak administration returned HTTP %d, want %d", res.StatusCode, status)
 	}
+	if output != nil && json.NewDecoder(io.LimitReader(res.Body, 256<<10)).Decode(output) != nil {
+		t.Fatal("invalid Keycloak administration response")
+	}
+	return res.Header.Get("Location")
 }
 
 func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, issuer, callback, interaction string, identified interactionResponse) {

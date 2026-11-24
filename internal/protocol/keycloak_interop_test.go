@@ -313,8 +313,9 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var keycloak keycloakAdmin
 	if provider == "saml" {
-		registerKeycloakSAMLClient(t, upstream, issuer, adminPassword, rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
+		keycloak = registerKeycloakSAMLClient(t, upstream, issuer, adminPassword, rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
 	}
 	directory, err := rp.workforce.CreateDirectory(admin, owner.ID, space.ID, enterprise.DirectoryInput{
 		Name: "Workforce directory", SSOConnectionID: connection.ID, SSOIdentityClaim: claim,
@@ -435,7 +436,8 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	assertRevoked()
 	consent(http.StatusBadRequest)
 	setActive(true, suspended)
-	if restored, _ := signIn(); restored != subject {
+	restored, active := signIn()
+	if restored != subject {
 		t.Fatal("rehire created a different relying-party subject")
 	}
 	assertRevoked()
@@ -443,6 +445,13 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	if err := rp.st.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='auth.sso.login' AND user_id=$1),
 		count(*) FILTER (WHERE action='scim.user.update' AND actor_id=$2) FROM audit_logs WHERE outcome='success'`, subject, directory.ID).Scan(&loginCount, &directoryUpdates); err != nil || loginCount != 3 || directoryUpdates != 2 {
 		t.Fatal("employee sign-ins and directory updates were not audited")
+	}
+	if provider == "saml" {
+		verifyKeycloakSAMLRotation(t, rp, keycloak, issuer, transport, space.ID, connection, func() {
+			if after, _ := signIn(); after != subject {
+				t.Fatal("changing the Keycloak signing key changed the relying-party subject")
+			}
+		}, active.AccessToken)
 	}
 }
 
