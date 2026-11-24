@@ -46,14 +46,16 @@ func (q *Queries) AddDirectoryManagedGroupMember(ctx context.Context, arg AddDir
 
 const countDirectoryGroups = `-- name: CountDirectoryGroups :one
 SELECT count(*)::bigint FROM directory_groups WHERE directory_id = $1 AND deleted_at IS NULL
+  AND ($2::text = '' OR lower(display_name) = lower($2))
 `
 
 type CountDirectoryGroupsParams struct {
-	DirectoryID string `json:"directory_id"`
+	DirectoryID       string `json:"directory_id"`
+	FilterDisplayName string `json:"filter_display_name"`
 }
 
 func (q *Queries) CountDirectoryGroups(ctx context.Context, arg CountDirectoryGroupsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countDirectoryGroups, arg.DirectoryID)
+	row := q.db.QueryRow(ctx, countDirectoryGroups, arg.DirectoryID, arg.FilterDisplayName)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -745,17 +747,24 @@ func (q *Queries) ListDirectoryGroupUserIDs(ctx context.Context, arg ListDirecto
 const listDirectoryGroups = `-- name: ListDirectoryGroups :many
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = $1 AND deleted_at IS NULL
-ORDER BY id LIMIT $3 OFFSET $2
+  AND ($2::text = '' OR lower(display_name) = lower($2))
+ORDER BY id LIMIT $4 OFFSET $3
 `
 
 type ListDirectoryGroupsParams struct {
-	DirectoryID string `json:"directory_id"`
-	OffsetCount int32  `json:"offset_count"`
-	LimitCount  int32  `json:"limit_count"`
+	DirectoryID       string `json:"directory_id"`
+	FilterDisplayName string `json:"filter_display_name"`
+	OffsetCount       int32  `json:"offset_count"`
+	LimitCount        int32  `json:"limit_count"`
 }
 
 func (q *Queries) ListDirectoryGroups(ctx context.Context, arg ListDirectoryGroupsParams) ([]DirectoryGroup, error) {
-	rows, err := q.db.Query(ctx, listDirectoryGroups, arg.DirectoryID, arg.OffsetCount, arg.LimitCount)
+	rows, err := q.db.Query(ctx, listDirectoryGroups,
+		arg.DirectoryID,
+		arg.FilterDisplayName,
+		arg.OffsetCount,
+		arg.LimitCount,
+	)
 	if err != nil {
 		return nil, err
 	}

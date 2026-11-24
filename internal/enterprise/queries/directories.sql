@@ -110,10 +110,12 @@ FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.
 -- name: ListDirectoryGroups :many
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
+  AND (sqlc.arg(filter_display_name)::text = '' OR lower(display_name) = lower(sqlc.arg(filter_display_name)))
 ORDER BY id LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 
 -- name: CountDirectoryGroups :one
-SELECT count(*)::bigint FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL;
+SELECT count(*)::bigint FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
+  AND (sqlc.arg(filter_display_name)::text = '' OR lower(display_name) = lower(sqlc.arg(filter_display_name)));
 
 -- name: UpdateDirectoryGroup :one
 UPDATE directory_groups SET display_name = sqlc.arg(display_name), version = version + 1, updated_at = now()

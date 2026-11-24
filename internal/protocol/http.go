@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/plystra/auth/internal/account"
@@ -631,19 +632,21 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		writeSCIMResource(w, http.StatusCreated, scimGroupResource(created, directoryID))
+		writeSCIMResource(w, http.StatusCreated, scimGroupResource(created, directoryID, true))
 	case http.MethodGet:
+		includeMembers := !scimExcludesGroupMembers(r.URL.Query())
 		if resourceID != "" {
-			group, err := h.Enterprise.GetSCIMGroup(r.Context(), directoryID, token, resourceID)
+			group, err := h.Enterprise.GetSCIMGroup(r.Context(), directoryID, token, resourceID, includeMembers)
 			if err != nil {
 				route.WriteSCIMError(w, err)
 				return
 			}
-			writeSCIMResource(w, http.StatusOK, scimGroupResource(group, directoryID))
+			writeSCIMResource(w, http.StatusOK, scimGroupResource(group, directoryID, includeMembers))
 			return
 		}
-		if r.URL.Query().Get("filter") != "" {
-			route.WriteSCIMError(w, apierr.New("invalid_filter", "group filters are not supported"))
+		filter, err := parseSCIMGroupFilter(r.URL.Query().Get("filter"))
+		if err != nil {
+			route.WriteSCIMError(w, err)
 			return
 		}
 		start, count, err := scimPagination(r)
@@ -651,14 +654,14 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		groups, total, err := h.Enterprise.ListSCIMGroups(r.Context(), directoryID, token, start, count)
+		groups, total, err := h.Enterprise.ListSCIMGroups(r.Context(), directoryID, token, filter, includeMembers, start, count)
 		if err != nil {
 			route.WriteSCIMError(w, err)
 			return
 		}
 		resources := make([]any, 0, len(groups))
 		for _, group := range groups {
-			resources = append(resources, scimGroupResource(group, directoryID))
+			resources = append(resources, scimGroupResource(group, directoryID, includeMembers))
 		}
 		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
 	case http.MethodPut, http.MethodPatch:
@@ -696,7 +699,7 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		writeSCIMResource(w, http.StatusOK, scimGroupResource(updated, directoryID))
+		writeSCIMResource(w, http.StatusOK, scimGroupResource(updated, directoryID, true))
 	case http.MethodDelete:
 		if resourceID == "" {
 			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
@@ -1014,6 +1017,40 @@ func parseSCIMUserFilter(raw string) (string, error) {
 	return value, nil
 }
 
+func parseSCIMGroupFilter(raw string) (string, error) {
+	if len(raw) > 512 {
+		return "", apierr.New("invalid_filter", "SCIM filter is too long")
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	attribute, rest, _ := strings.Cut(raw, " ")
+	operator, literal, _ := strings.Cut(strings.TrimLeft(rest, " "), " ")
+	literal = strings.TrimSpace(literal)
+	if !strings.EqualFold(attribute, "displayName") || !strings.EqualFold(operator, "eq") ||
+		!strings.HasPrefix(literal, `"`) || !utf8.ValidString(literal) {
+		return "", apierr.New("invalid_filter", "only displayName eq \"…\" is supported")
+	}
+	var value string
+	if json.Unmarshal([]byte(literal), &value) != nil || strings.TrimSpace(value) == "" ||
+		len(value) > 128 || strings.ContainsFunc(value, unicode.IsControl) || strings.ContainsRune(value, utf8.RuneError) {
+		return "", apierr.New("invalid_filter", "the displayName filter is invalid")
+	}
+	return value, nil
+}
+
+func scimExcludesGroupMembers(query url.Values) bool {
+	for _, exclusion := range query["excludedAttributes"] {
+		for attribute := range strings.SplitSeq(exclusion, ",") {
+			if strings.EqualFold(strings.TrimSpace(attribute), "members") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func parseSCIMIfMatch(raw string) (int64, error) {
 	raw = strings.TrimSpace(raw)
 	if !strings.HasPrefix(raw, `W/"`) || !strings.HasSuffix(raw, `"`) {
@@ -1030,12 +1067,17 @@ func scimUserResource(user enterprise.SCIMUser, directoryID string) map[string]a
 	return map[string]any{"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:User"}, "id": user.ID, "externalId": user.ExternalID, "userName": user.UserName, "displayName": user.DisplayName, "active": user.Active, "meta": scimMeta("User", user.Version, user.CreatedAt, user.UpdatedAt, "/scim/v2/"+directoryID+"/Users/"+user.ID)}
 }
 
-func scimGroupResource(group enterprise.SCIMGroup, directoryID string) map[string]any {
-	members := make([]map[string]string, 0, len(group.MemberIDs))
-	for _, id := range group.MemberIDs {
-		members = append(members, map[string]string{"value": id, "type": "User"})
+func scimGroupResource(group enterprise.SCIMGroup, directoryID string, includeMembers bool) map[string]any {
+	resource := map[string]any{"schemas": []string{scimGroup}, "id": group.ID, "externalId": group.ExternalID,
+		"displayName": group.DisplayName, "meta": scimMeta("Group", group.Version, group.CreatedAt, group.UpdatedAt, "/scim/v2/"+directoryID+"/Groups/"+group.ID)}
+	if includeMembers {
+		members := make([]map[string]string, 0, len(group.MemberIDs))
+		for _, id := range group.MemberIDs {
+			members = append(members, map[string]string{"value": id, "type": "User"})
+		}
+		resource["members"] = members
 	}
-	return map[string]any{"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:Group"}, "id": group.ID, "externalId": group.ExternalID, "displayName": group.DisplayName, "members": members, "meta": scimMeta("Group", group.Version, group.CreatedAt, group.UpdatedAt, "/scim/v2/"+directoryID+"/Groups/"+group.ID)}
+	return resource
 }
 
 func scimMeta(resourceType string, version int64, createdAt, updatedAt time.Time, location string) map[string]any {

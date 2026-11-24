@@ -562,9 +562,9 @@ func TestSCIMRejectsCrossDirectoryReferencesAndUnsupportedPatch(t *testing.T) {
 	second.directory.Token = f.directory.Token
 	second.request(t, "GET", "Users", "", "", 401)
 	second.directory.Token = other.Token
-	f.request(t, "GET", "Groups?filter=displayName%20eq%20%22example%22", "", "", 400)
+	f.request(t, "GET", "Groups?filter=members%20eq%20%22example%22", "", "", 400)
 	second.request(t, "POST", "Groups", fmt.Sprintf(`{"externalId":"cross","displayName":"Cross","members":[{"value":%q}]}`, u.ID), "", 400)
-	f.request(t, "GET", `Groups?filter=displayName%20eq%20%22x%22`, "", "", 400)
+	f.request(t, "GET", `Groups?filter=displayName%20co%20%22x%22`, "", "", 400)
 	f.request(t, "PATCH", "Users/"+u.ID, scimPatch(map[string]any{"op": "replace", "value": map[string]any{"unknown": true}}), u.Meta.Version, 400)
 	f.request(t, "PATCH", "Users/"+u.ID, scimPatch(map[string]any{"op": "replace", "path": "userName", "value": ""}), u.Meta.Version, 400)
 	f.request(t, "PATCH", "Users/"+u.ID, `{"schemas":["urn:ietf:params:scim:api:messages:2.0:PatchOp"],"Operations":[]}`, u.Meta.Version, 400)
@@ -572,6 +572,88 @@ func TestSCIMRejectsCrossDirectoryReferencesAndUnsupportedPatch(t *testing.T) {
 	if got.Meta.Version != u.Meta.Version || got.DisplayName != u.DisplayName {
 		t.Fatal("invalid PATCH changed resource")
 	}
+}
+
+func TestSCIMDirectoryGroupLookupFiltersAndOmitsMembers(t *testing.T) {
+	f := newSCIMFixture(t)
+	const displayName = `Engineering "Core"`
+	member := f.user(t, "engineer", true)
+	create := func(target scimFixture, externalID string, members []map[string]string) scimTestResource {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"externalId": externalID, "displayName": displayName, "members": members})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return scimResource(t, target.request(t, http.MethodPost, "Groups", string(body), "", http.StatusCreated))
+	}
+	original := create(f, "engineering", []map[string]string{{"value": member.ID}})
+	const userID = "usr_scim_admin"
+	_, otherOwner, err := f.service.Authorization.CreateSpace(t.Context(), userID, "Other Space", "other-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(t.Context(), `INSERT INTO authorization_grants
+		(id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
+		VALUES ('grt_scim_second_directory',$1,'["auth.connections:manage"]',$2,'space',$1,$2)`, otherOwner.SpaceID, otherOwner.ID); err != nil {
+		t.Fatal(err)
+	}
+	otherCtx := authorization.WithHumanActor(t.Context(), otherOwner.ID, userID)
+	other, err := f.service.CreateDirectory(otherCtx, otherOwner.ID, otherOwner.SpaceID, enterprise.DirectoryInput{Name: "Second directory"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := f
+	second.directory = other
+	foreign := create(second, "other-engineering", nil)
+	filter := "Groups?filter=" + url.QueryEscape(`DisplayName EQ "engineering \"CORE\""`)
+	list := func(target scimFixture, path string, wantTotal int, wantIDs ...string) []map[string]json.RawMessage {
+		t.Helper()
+		res := target.request(t, http.MethodGet, path, "", "", http.StatusOK)
+		var view struct {
+			TotalResults, ItemsPerPage int
+			Resources                  []map[string]json.RawMessage
+		}
+		if err := json.Unmarshal(res.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.TotalResults != wantTotal || view.ItemsPerPage != len(wantIDs) || len(view.Resources) != len(wantIDs) {
+			t.Fatalf("unexpected group list total=%d items=%d", view.TotalResults, view.ItemsPerPage)
+		}
+		for i, id := range wantIDs {
+			var actual string
+			if err := json.Unmarshal(view.Resources[i]["id"], &actual); err != nil || actual != id {
+				t.Fatal("group query returned an unexpected resource")
+			}
+		}
+		return view.Resources
+	}
+	one := list(f, filter, 1, original.ID)[0]
+	if !strings.Contains(string(one["members"]), member.ID) {
+		t.Fatal("default group projection lost the member")
+	}
+	excluded := list(f, filter+"&excludedAttributes=members", 1, original.ID)[0]
+	if _, present := excluded["members"]; present {
+		t.Fatal("filtered list returned the excluded members field")
+	}
+	list(f, filter+"&count=0", 1)
+	list(f, filter+"&startIndex=2", 1)
+	list(second, filter, 1, foreign.ID)
+	list(f, "Groups?filter="+url.QueryEscape(`displayName eq "Engineering"`), 0)
+	group := f.request(t, http.MethodGet, "Groups/"+original.ID+"?excludedAttributes=members", "", "", http.StatusOK)
+	var detail map[string]json.RawMessage
+	if err := json.Unmarshal(group.Body.Bytes(), &detail); err != nil ||
+		detail["members"] != nil || group.Header().Get("ETag") != original.Meta.Version {
+		t.Fatal("group detail did not omit members and preserve resource version")
+	}
+	for _, bad := range []string{`displayName eq "x" or displayName eq "y"`, `displayName eq 10`, `displayName eq "\u0000"`} {
+		res := f.request(t, http.MethodGet, "Groups?filter="+url.QueryEscape(bad), "", "", http.StatusBadRequest)
+		if !strings.Contains(res.Body.String(), `"scimType":"invalidFilter"`) {
+			t.Fatal("invalid group filter did not return a SCIM invalidFilter")
+		}
+	}
+	f.request(t, http.MethodDelete, "Groups/"+original.ID, "", original.Meta.Version, http.StatusNoContent)
+	list(f, filter, 0)
+	list(second, filter, 1, foreign.ID)
 }
 
 func TestSCIMUserReplacementRejectsAccountTakeover(t *testing.T) {

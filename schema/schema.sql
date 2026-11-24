@@ -2142,3 +2142,7 @@ ALTER TABLE sso_states
 
 CREATE INDEX sso_states_link_session_idx ON sso_states (link_session_id) WHERE link_session_id IS NOT NULL;
 CREATE INDEX sso_states_link_member_idx ON sso_states (link_member_id) WHERE link_member_id IS NOT NULL;
+
+CREATE INDEX directory_groups_active_name_idx
+    ON directory_groups (directory_id, lower(display_name), id)
+    WHERE deleted_at IS NULL;
