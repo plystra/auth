@@ -447,12 +447,28 @@ func (h HTTP) ssoCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err == nil && (mediaType == "application/x-www-form-urlencoded" || mediaType == "multipart/form-data") {
-		if err := r.ParseForm(); err != nil {
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		if r.URL.RawQuery != "" || r.URL.ForceQuery {
+			writeErr(w, apierr.New("invalid_request", "the SAML callback URL cannot contain a query"))
+			return
+		}
+		var formErr error
+		if mediaType == "multipart/form-data" {
+			formErr = r.ParseMultipartForm(samlBrowserFormLimit)
+		} else {
+			formErr = r.ParseForm()
+		}
+		if formErr != nil {
 			writeErr(w, apierr.New("invalid_request", "SAML callback body is invalid"))
 			return
 		}
+		payload, relay := r.PostForm["SAMLResponse"], r.PostForm["RelayState"]
+		if len(payload) != 1 || payload[0] == "" || len(relay) > 1 {
+			writeErr(w, apierr.New("invalid_request", "one SAMLResponse and at most one RelayState are required"))
+			return
+		}
 		result, err := h.Enterprise.Callback(r.Context(), enterprise.CallbackInput{
-			ConnectionID: r.PathValue("connection_id"), State: r.FormValue("RelayState"), SAMLResponse: r.FormValue("SAMLResponse"),
+			ConnectionID: r.PathValue("connection_id"), State: r.PostForm.Get("RelayState"), SAMLResponse: payload[0],
 		})
 		if err != nil {
 			writeProtocolErr(w, err)

@@ -73,6 +73,40 @@ func TestPrincipalCORSUsesExplicitOriginPolicy(t *testing.T) {
 	}
 }
 
+func TestDirectSAMLFormNavigationDoesNotGrantCORSOrReplay(t *testing.T) {
+	const callback = "/v1/sso/sso_fixture/callback"
+	const form = "application/x-www-form-urlencoded; charset=utf-8"
+	for _, test := range []struct {
+		name, method, path, mediaType string
+		idempotency                   bool
+		status                        int
+		code                          string
+	}{
+		{name: "form", method: http.MethodPost, path: callback, mediaType: form, status: http.StatusNoContent},
+		{name: "multipart", method: http.MethodPost, path: callback, mediaType: "multipart/form-data; boundary=fixture", status: http.StatusNoContent},
+		{name: "form replay key", method: http.MethodPost, path: callback, mediaType: form, idempotency: true, status: http.StatusBadRequest, code: "VALIDATION_FAILED"},
+		{name: "json", method: http.MethodPost, path: callback, mediaType: "application/json", status: http.StatusForbidden, code: "CORS_ORIGIN_REJECTED"},
+		{name: "another route", method: http.MethodPost, path: callback + "/other", mediaType: form, status: http.StatusForbidden, code: "CORS_ORIGIN_REJECTED"},
+		{name: "preflight", method: http.MethodOptions, path: callback, mediaType: form, status: http.StatusForbidden, code: "CORS_ORIGIN_REJECTED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, "https://auth.test"+test.path, nil)
+			req.Header.Set("Origin", "https://idp.test")
+			req.Header.Set("Content-Type", test.mediaType)
+			if test.idempotency {
+				req.Header.Set("Idempotency-Key", "saml-navigation")
+			}
+			res := httptest.NewRecorder()
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+			Middleware(Principal, next).ServeHTTP(res, req)
+			if res.Code != test.status || !strings.Contains(res.Body.String(), test.code) ||
+				res.Header().Get("Access-Control-Allow-Origin") != "" || res.Header().Get("Cache-Control") != "no-store" {
+				t.Fatalf("unexpected response status or security headers: HTTP %d", res.Code)
+			}
+		})
+	}
+}
+
 func TestMiddlewarePreservesValidRequestIDAndReplacesOversizedID(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	valid := httptest.NewRequest(http.MethodGet, "http://auth.test/v1/me", nil)

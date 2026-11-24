@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -65,8 +66,23 @@ func checkOAuthSecretIdempotency(r *http.Request, plane Plane) error {
 }
 
 func isSAMLBrowserPost(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
 	connection, ok := strings.CutPrefix(r.URL.Path, SAMLBrowserCallbackPrefix)
-	return r.Method == http.MethodPost && ok && connection != "" && !strings.Contains(connection, "/")
+	if ok {
+		return connection != "" && !strings.Contains(connection, "/")
+	}
+	path, ok := strings.CutPrefix(r.URL.Path, "/v1/sso/")
+	if !ok {
+		return false
+	}
+	connection, operation, ok := strings.Cut(path, "/")
+	if !ok || connection == "" || operation != "callback" {
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && (mediaType == "application/x-www-form-urlencoded" || mediaType == "multipart/form-data")
 }
 
 type idempotencyResponseWriter struct {

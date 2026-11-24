@@ -27,6 +27,26 @@ import (
 	dsig "github.com/russellhaering/goxmldsig"
 )
 
+func TestDirectSAMLCallbackRejectsAmbiguousForm(t *testing.T) {
+	var mux http.ServeMux
+	(HTTP{Enterprise: &enterprise.Service{}}).Register(&mux)
+	const path = "/v1/sso/sso_fixture/callback"
+	for _, test := range []struct{ name, query, form string }{
+		{name: "query", query: "?SAMLResponse=fixture", form: "RelayState=fixture"},
+		{name: "duplicate assertion", form: "SAMLResponse=fixture&SAMLResponse=other"},
+		{name: "duplicate relay", form: "SAMLResponse=fixture&RelayState=first&RelayState=second"},
+		{name: "empty assertion", form: "SAMLResponse="},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, path+test.query, strings.NewReader(test.form))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			res := httptest.NewRecorder()
+			mux.ServeHTTP(res, req)
+			(employeeLifecycleResponse{status: res.Code, body: res.Body.Bytes()}).requireError(t, http.StatusBadRequest, "invalid_request")
+		})
+	}
+}
+
 func TestDirectorySAMLSSOUsesVerifiedStableAttributeAndRejectsAmbiguity(t *testing.T) {
 	f := newDirectorySSOFixture(t, "sub")
 	ctx := context.Background()
