@@ -85,7 +85,7 @@ func TestSAMLSigningTrustCLIAlertsAndClearsAfterRenewal(t *testing.T) {
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build certificate check CLI: %v\n%s", err, out)
 	}
-	run := func(wantExit int, args ...string) enterprise.SAMLTrustReport {
+	runOutput := func(wantExit int, args ...string) []byte {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, binary, append([]string{"sso", "check-saml-certificates"}, args...)...)
 		var diagnostics bytes.Buffer
@@ -102,19 +102,38 @@ func TestSAMLSigningTrustCLIAlertsAndClearsAfterRenewal(t *testing.T) {
 		if exit != wantExit {
 			t.Fatalf("certificate check exit = %d, want %d", exit, wantExit)
 		}
-		var report enterprise.SAMLTrustReport
 		if wantExit == 1 {
 			if len(output) != 0 {
 				t.Fatal("failed check published a report")
 			}
-			return report
+			return nil
 		}
-		if err := json.Unmarshal(output, &report); err != nil ||
-			diagnostics.Len() != 0 || strings.Contains(string(output), "CERTIFICATE") ||
-			strings.Contains(string(output), "fixture.test") {
-			t.Fatal("certificate check did not produce a sanitized JSON report")
+		if diagnostics.Len() != 0 || bytes.Contains(output, []byte("CERTIFICATE")) ||
+			bytes.Contains(output, []byte("fixture.test")) {
+			t.Fatal("certificate check did not produce a sanitized report")
+		}
+		return output
+	}
+	run := func(wantExit int, args ...string) enterprise.SAMLTrustReport {
+		t.Helper()
+		var report enterprise.SAMLTrustReport
+		if err := json.Unmarshal(runOutput(wantExit, args...), &report); err != nil {
+			t.Fatal("certificate check did not produce a valid JSON report")
 		}
 		return report
+	}
+	checkMetrics := func(exit, wantCount int) {
+		t.Helper()
+		output := string(runOutput(exit, "--format", "prometheus"))
+		for _, status := range []string{"coverage_ending", "no_current_signer", "invalid_trust"} {
+			if !strings.Contains(output, fmt.Sprintf("plystra_auth_saml_signing_trust_issues{status=%q} %d\n", status, wantCount)) {
+				t.Fatalf("missing trust metric for %s with count %d", status, wantCount)
+			}
+		}
+		if !strings.Contains(output, "\nplystra_auth_saml_signing_trust_checked_at_timestamp_seconds ") ||
+			strings.Contains(output, "spc_") || strings.Contains(output, "con_") {
+			t.Fatal("trust metrics omitted freshness or included resource identifiers")
+		}
 	}
 	if report := run(0); report.CheckedConnections != 32 || report.Issues == nil ||
 		len(report.Issues) != 0 || report.WarningUntil.Sub(report.CheckedAt) != 720*time.Hour {
@@ -133,6 +152,7 @@ func TestSAMLSigningTrustCLIAlertsAndClearsAfterRenewal(t *testing.T) {
 	if report.CheckedConnections != 35 || !reflect.DeepEqual(report.Issues, want) {
 		t.Fatalf("unexpected expiry report: %+v", report)
 	}
+	checkMetrics(2, 1)
 	if _, err := st.Pool.Exec(ctx, `UPDATE sso_connections SET saml_idp_certificate = $1
 		WHERE id IN ('con_gap','con_missing','con_unreadable')`, healthy); err != nil {
 		t.Fatal(err)
@@ -140,7 +160,9 @@ func TestSAMLSigningTrustCLIAlertsAndClearsAfterRenewal(t *testing.T) {
 	if report := run(0, "--within", "48h"); report.CheckedConnections != 35 || len(report.Issues) != 0 {
 		t.Fatalf("renewed trust still reports an issue: %+v", report)
 	}
-	run(1, "--within", "0h")
+	checkMetrics(0, 0)
+	runOutput(1, "--within", "0h")
+	runOutput(1, "--format", "text")
 	t.Setenv("PLYSTRA_AUTH_DATABASE_URL", "")
-	run(1)
+	runOutput(1, "--format", "prometheus")
 }

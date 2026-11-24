@@ -113,6 +113,32 @@ Confirm a fresh sign-in with the new IdP signer before removing the old certific
 calculates continuous coverage from the certificates configured in Auth. Confirm
 which certificate the IdP actually uses during the rotation.
 
+For Prometheus, enable the Node Exporter textfile collector on a private monitoring
+host. Run the script below every five minutes from a scheduler that provides
+`PLYSTRA_AUTH_DATABASE_URL` and puts `plystra-auth` on its PATH. Give the scheduler
+write access to the collector directory and give the exporter read access.
+Use a monitoring database login with `CONNECT`, schema `USAGE` and `SELECT` on
+the `id`, `space_id`, `provider`, `status` and `saml_idp_certificate` columns of
+`sso_connections`.
+
+```sh
+sh docker/saml-monitoring/publish-textfile.sh /var/lib/node_exporter/textfile_collector 720h
+```
+
+Set `--collector.textfile.directory` on Node Exporter to that directory. Scrape it
+with the Prometheus job name `plystra-auth-saml-trust` and load
+[`docker/saml-monitoring/rules.yml`](docker/saml-monitoring/rules.yml) through
+`rule_files`. Route the warning and critical alerts to the operating team's
+Alertmanager receiver, with resolved notifications enabled.
+
+The script publishes a complete snapshot atomically when the scan succeeds,
+including when it finds trust issues. A failed scan preserves the last snapshot.
+The rules raise a separate critical alert if the exporter is unavailable or the
+snapshot is missing or more than 15 minutes old. Payloads contain only counts,
+issue categories, and the monitoring target. Use the JSON check to locate a
+connection, rotate through the normal SAML metadata flow, and wait for a fresh
+scan to confirm that the alert cleared. [Node Exporter textfile collector](https://github.com/prometheus/node_exporter#textfile-collector) · [Prometheus alerting rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)
+
 ### Provision signing keys
 
 Run `plystra-auth migrate` before serving. In deployments that configure an encrypted

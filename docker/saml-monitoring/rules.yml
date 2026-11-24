@@ -1,0 +1,28 @@
+groups:
+  - name: plystra-auth-saml-signing-trust
+    rules:
+      - alert: PlystraAuthSAMLCertificateCoverageEnding
+        expr: plystra_auth_saml_signing_trust_issues{job="plystra-auth-saml-trust",status="coverage_ending"} > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: Plystra Auth SAML signing trust is nearing a gap
+          description: Run the JSON certificate check for the affected connections and import replacement metadata before coverage ends.
+      - alert: PlystraAuthSAMLCertificateTrustUnavailable
+        expr: plystra_auth_saml_signing_trust_issues{job="plystra-auth-saml-trust",status=~"no_current_signer|invalid_trust"} > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: Plystra Auth SAML signing trust needs immediate attention
+          description: Run the JSON certificate check to locate the connections and restore valid signing metadata.
+      - alert: PlystraAuthSAMLCertificateCheckUnavailable
+        expr: |
+          (up{job="plystra-auth-saml-trust"} == 0)
+          or
+          (up{job="plystra-auth-saml-trust"} unless on (job, instance)
+            ((time() - plystra_auth_saml_signing_trust_checked_at_timestamp_seconds{job="plystra-auth-saml-trust"}) <= 900))
+        labels:
+          severity: critical
+        annotations:
+          summary: Plystra Auth SAML certificate checks have stopped reporting
+          description: Check the scheduler, database access and node exporter before relying on the certificate status.
