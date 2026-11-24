@@ -258,11 +258,29 @@ func TestKeycloakExistingAccountLinksAndSignsInToRelyingParty(t *testing.T) {
 }
 
 func TestKeycloakDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testing.T) {
+	testKeycloakDirectoryEmployee(t, "oidc")
+}
+
+func TestKeycloakSAMLDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testing.T) {
+	testKeycloakDirectoryEmployee(t, "saml")
+}
+
+func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
+	t.Helper()
 	upstream := &http.Client{Timeout: 15 * time.Second,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	rp := newHumanRPWithWorkforce(t, false, upstream)
 	callback := rp.host.URL + "/oidc/upstream"
-	issuer, transport := keycloakFixture(t, callback)
+	var options []testcontainers.ContainerCustomizer
+	adminPassword := ""
+	if provider == "saml" {
+		adminPassword = oauth2.GenerateVerifier()
+		options = append(options, testcontainers.WithEnv(map[string]string{
+			"KC_BOOTSTRAP_ADMIN_USERNAME": keycloakFixtureAdmin,
+			"KC_BOOTSTRAP_ADMIN_PASSWORD": adminPassword,
+		}))
+	}
+	issuer, transport := keycloakFixture(t, callback, options...)
 	upstream.Transport = transport
 	t.Cleanup(transport.CloseIdleConnections)
 
@@ -278,15 +296,28 @@ func TestKeycloakDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testin
 		t.Fatal(err)
 	}
 	admin := authorization.WithHumanActor(ctx, owner.ID, adminID)
-	connection, err := rp.workforce.CreateConnection(admin, owner.ID, space.ID, enterprise.ConnectionInput{
+	input := enterprise.ConnectionInput{
 		Name: "Workforce Keycloak", Provider: "oidc", Issuer: issuer, ClientID: keycloakClientID,
 		ClientSecret: keycloakClientSecret, RedirectURI: callback,
-	})
+	}
+	claim := "sub"
+	if provider == "saml" {
+		input = enterprise.ConnectionInput{
+			Name: "Workforce Keycloak SAML", Provider: "saml",
+			SAMLMetadata: fetchKeycloakSAMLMetadata(t, upstream, issuer),
+			RedirectURI:  rp.host.URL + route.SAMLBrowserCallbackPrefix + "{connection_id}",
+		}
+		claim = keycloakSAMLDirectoryClaim
+	}
+	connection, err := rp.workforce.CreateConnection(admin, owner.ID, space.ID, input)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if provider == "saml" {
+		registerKeycloakSAMLClient(t, upstream, issuer, adminPassword, rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
+	}
 	directory, err := rp.workforce.CreateDirectory(admin, owner.ID, space.ID, enterprise.DirectoryInput{
-		Name: "Workforce directory", SSOConnectionID: connection.ID, SSOIdentityClaim: "sub",
+		Name: "Workforce directory", SSOConnectionID: connection.ID, SSOIdentityClaim: claim,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -340,8 +371,14 @@ func TestKeycloakDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testin
 		if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
 			t.Fatal("the employee was not routed to Keycloak")
 		}
-		returned := keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, "original")
-		loggedIn, _ := browser.request(t, http.MethodPost, path+"/sso/complete", map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}, rp.host.URL, "", status)
+		var loggedIn interactionResponse
+		if provider == "saml" {
+			keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, path, identified)
+			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", status)
+		} else {
+			returned := keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, "original")
+			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/complete", map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}, rp.host.URL, "", status)
+		}
 		if status != http.StatusOK {
 			return "", "", ""
 		}
@@ -421,7 +458,7 @@ func keycloakInteropData[T any](t *testing.T, phase string, response employeeLif
 	return employeeLifecycleData[T](t, response)
 }
 
-func keycloakFixture(t *testing.T, callback string) (string, *http.Transport) {
+func keycloakFixture(t *testing.T, callback string, options ...testcontainers.ContainerCustomizer) (string, *http.Transport) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
@@ -455,7 +492,7 @@ func keycloakFixture(t *testing.T, callback string) (string, *http.Transport) {
 		t.Fatal(err)
 	}
 	const port = "8443/tcp"
-	container, err := testcontainers.Run(ctx, "quay.io/keycloak/keycloak:26.8.1",
+	customizers := []testcontainers.ContainerCustomizer{
 		testcontainers.WithCmd("start-dev", "--http-enabled=false", "--hostname-strict=false", "--import-realm",
 			"--https-certificate-file=/tmp/fixture-cert.pem", "--https-certificate-key-file=/tmp/fixture-key.pem"),
 		testcontainers.WithFiles(
@@ -468,8 +505,9 @@ func keycloakFixture(t *testing.T, callback string) (string, *http.Transport) {
 			config.PortBindings = network.PortMap{network.MustParsePort(port): {{HostIP: netip.MustParseAddr("127.0.0.1"), HostPort: "0"}}}
 		}),
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/realms/"+keycloakRealm+"/.well-known/openid-configuration").
-			WithPort(port).WithTLS(true, tlsConfig).WithStartupTimeout(100*time.Second)),
-	)
+			WithPort(port).WithTLS(true, tlsConfig).WithStartupTimeout(100 * time.Second)),
+	}
+	container, err := testcontainers.Run(ctx, "quay.io/keycloak/keycloak:26.8.1", append(customizers, options...)...)
 	if container != nil {
 		t.Cleanup(func() { _ = container.Terminate(context.Background()) })
 	}
@@ -493,6 +531,7 @@ func keycloakRealmConfiguration(callback string) map[string]any {
 		}
 		if username == "original" {
 			user["id"] = keycloakEmployeeID
+			user["attributes"] = map[string][]string{keycloakSAMLDirectoryClaim: {keycloakEmployeeID}}
 		}
 		users = append(users, user)
 	}
@@ -512,6 +551,17 @@ func keycloakRealmConfiguration(callback string) map[string]any {
 }
 
 func keycloakAuthorize(t *testing.T, transport *http.Transport, authorizationURL, callback, username string) url.Values {
+	t.Helper()
+	result := submitKeycloakLogin(t, transport, authorizationURL, username)
+	defer func() { _ = result.Body.Close() }()
+	location, err := result.Location()
+	if err != nil || result.StatusCode < 300 || result.StatusCode >= 400 || !strings.HasPrefix(location.String(), callback+"?") {
+		t.Fatalf("Keycloak did not redirect to the registered callback: %d", result.StatusCode)
+	}
+	return location.Query()
+}
+
+func submitKeycloakLogin(t *testing.T, transport *http.Transport, authorizationURL, username string) *http.Response {
 	t.Helper()
 	start, err := url.Parse(authorizationURL)
 	if err != nil {
@@ -546,12 +596,7 @@ func keycloakAuthorize(t *testing.T, transport *http.Transport, authorizationURL
 	if err != nil {
 		t.Fatal("submit disposable Keycloak login failed")
 	}
-	defer func() { _ = result.Body.Close() }()
-	location, err := result.Location()
-	if err != nil || result.StatusCode < 300 || result.StatusCode >= 400 || !strings.HasPrefix(location.String(), callback+"?") {
-		t.Fatalf("Keycloak did not redirect to the registered callback: %d", result.StatusCode)
-	}
-	return location.Query()
+	return result
 }
 
 func keycloakLoginFormAction(node *html.Node) string {
