@@ -33,7 +33,7 @@ func runInvoiceSaaSScenario(t *testing.T, scenario mvpDelegationScenario, projec
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./examples/invoice-saas/cmd/invoice-saas")
+	build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", binary, "./examples/invoice-saas/cmd/invoice-saas")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build Invoice SaaS example: %v\n%s", err, output)
