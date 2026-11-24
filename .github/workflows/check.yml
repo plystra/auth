@@ -24,3 +24,5 @@ jobs:
           cache: true
       - name: Run checks
         run: make check
+      - name: Verify workforce login across issuer failure
+        run: go test -tags interop -race ./internal/protocol -run '^TestKeycloakDirectoryEmployeeCompletesAfterIssuerProcessExit$' -count=1

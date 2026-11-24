@@ -29,11 +29,13 @@ import (
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
+	"github.com/plystra/auth/internal/testdb"
 	"golang.org/x/oauth2"
 )
 
 type humanRP struct {
 	st            *store.Store
+	database      testdb.Database
 	host          *httptest.Server
 	provider      *oidc.Provider
 	config        oauth2.Config
@@ -153,7 +155,7 @@ func newHumanRPWithWorkforce(t *testing.T, managed bool, upstream *http.Client) 
 	}
 	config := oauth2.Config{ClientID: client, ClientSecret: password, RedirectURL: callback, Endpoint: provider.Endpoint()}
 	config.Endpoint.AuthStyle = oauth2.AuthStyleInHeader
-	rp := &humanRP{st: st, host: host, provider: provider, config: config, session: tokens, signer: sessions.Signer, workforce: workforce}
+	rp := &humanRP{st: st, database: database, host: host, provider: provider, config: config, session: tokens, signer: sessions.Signer, workforce: workforce}
 	if managed {
 		if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants (id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
 			VALUES ('grt_rp_publisher',$1,'["auth.applications:manage"]',$2,'space',$1,$2)`, space.ID, publisher.ID); err != nil {

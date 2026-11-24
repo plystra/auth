@@ -258,24 +258,37 @@ func TestKeycloakExistingAccountLinksAndSignsInToRelyingParty(t *testing.T) {
 }
 
 func TestKeycloakDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testing.T) {
-	testKeycloakDirectoryEmployee(t, "oidc")
+	testKeycloakDirectoryEmployee(t, "oidc", false)
 }
 
 func TestKeycloakSAMLDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testing.T) {
-	testKeycloakDirectoryEmployee(t, "saml")
+	testKeycloakDirectoryEmployee(t, "saml", false)
 }
 
-func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
+func TestKeycloakDirectoryEmployeeCompletesAfterIssuerProcessExit(t *testing.T) {
+	testKeycloakDirectoryEmployee(t, "oidc", true)
+}
+
+func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailover bool) {
 	t.Helper()
 	upstream := &http.Client{Timeout: 15 * time.Second,
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	rp := newHumanRPWithWorkforce(t, false, upstream)
+	var processProxy *workforceProcessProxy
+	var upstreamHost string
+	if processFailover {
+		processProxy = newWorkforceProcessProxy(t)
+		rp.host = processProxy.front
+		rp.workforce.Issuer = rp.host.URL
+		upstreamHost = workforceUpstreamHost
+	}
 	callback := rp.host.URL + "/oidc/upstream"
 	adminPassword := oauth2.GenerateVerifier()
-	issuer, transport := keycloakFixture(t, callback, testcontainers.WithEnv(map[string]string{
+	idp := startKeycloakFixture(t, callback, upstreamHost, testcontainers.WithEnv(map[string]string{
 		"KC_BOOTSTRAP_ADMIN_USERNAME": keycloakFixtureAdmin,
 		"KC_BOOTSTRAP_ADMIN_PASSWORD": adminPassword,
 	}))
+	issuer, transport := idp.issuer, idp.transport
 	upstream.Transport = transport
 	t.Cleanup(transport.CloseIdleConnections)
 
@@ -333,6 +346,10 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	if _, err := rp.st.Pool.Exec(ctx, `UPDATE applications SET redirect_uris=jsonb_build_array($1::text) WHERE client_id=$2`, rp.config.RedirectURL, rp.config.ClientID); err != nil {
 		t.Fatal(err)
 	}
+	var exitPrimary func()
+	if processProxy != nil {
+		exitPrimary = processProxy.start(t, rp, idp)
+	}
 
 	client := employeeLifecycleClient{server: rp.host}
 	const scim = "application/scim+json"
@@ -359,6 +376,14 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	}
 
 	browser := newOIDCBrowser(t, rp)
+	if processFailover {
+		attempt := employeeLifecycleData[account.SignInChallenge](t, client.send(t, http.MethodPost, "/v1/auth/sign-in", "", "application/json", "", map[string]string{"email": "rp@example.test"}))
+		signedIn := employeeLifecycleData[account.AuthResult](t, client.send(t, http.MethodPost, "/v1/auth/sign-in/"+attempt.AttemptID, "", "application/json", "", map[string]string{"password": browserFixturePassword}))
+		if signedIn.Tokens == nil {
+			t.Fatal("the running issuer did not issue the control account's credentials")
+		}
+		rp.session = *signedIn.Tokens
+	}
 	consent := func(status int) (code, verifier, nonce string) {
 		t.Helper()
 		verifier, nonce, state := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
@@ -373,7 +398,16 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", status)
 		} else {
 			returned := keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, "original")
-			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/complete", map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}, rp.host.URL, "", status)
+			payload := map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}
+			failedOver := exitPrimary != nil
+			if failedOver {
+				exitPrimary()
+				exitPrimary = nil
+			}
+			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/complete", payload, rp.host.URL, "", status)
+			if failedOver {
+				browser.request(t, http.MethodPost, path+"/sso/complete", payload, rp.host.URL, "", http.StatusBadRequest)
+			}
 		}
 		if status != http.StatusOK {
 			return "", "", ""
@@ -440,6 +474,9 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	if err := rp.st.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='auth.sso.login' AND user_id=$1),
 		count(*) FILTER (WHERE action='scim.user.update' AND actor_id=$2) FROM audit_logs WHERE outcome='success'`, subject, directory.ID).Scan(&loginCount, &directoryUpdates); err != nil || loginCount != 3 || directoryUpdates != 2 {
 		t.Fatal("employee sign-ins and directory updates were not audited")
+	}
+	if processFailover {
+		return
 	}
 	if provider == "saml" {
 		verifyKeycloakSAMLRotation(t, rp, keycloak, issuer, transport, space.ID, connection, func() {
@@ -522,6 +559,19 @@ func keycloakInteropData[T any](t *testing.T, phase string, response employeeLif
 
 func keycloakFixture(t *testing.T, callback string, options ...testcontainers.ContainerCustomizer) (string, *http.Transport) {
 	t.Helper()
+	fixture := startKeycloakFixture(t, callback, "", options...)
+	return fixture.issuer, fixture.transport
+}
+
+type keycloakInstance struct {
+	issuer    string
+	transport *http.Transport
+	certPEM   []byte
+	ip        string
+}
+
+func startKeycloakFixture(t *testing.T, callback, hostname string, options ...testcontainers.ContainerCustomizer) keycloakInstance {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -533,6 +583,9 @@ func keycloakFixture(t *testing.T, callback string, options ...testcontainers.Co
 		Subject:  pkix.Name{CommonName: "localhost"},
 		DNSNames: []string{"localhost"}, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if hostname != "" {
+		cert.DNSNames = append(cert.DNSNames, hostname)
 	}
 	der, err := x509.CreateCertificate(rand.Reader, cert, cert, key.Public(), key)
 	if err != nil {
@@ -569,6 +622,9 @@ func keycloakFixture(t *testing.T, callback string, options ...testcontainers.Co
 		testcontainers.WithWaitStrategy(wait.ForHTTP("/realms/"+keycloakRealm+"/.well-known/openid-configuration").
 			WithPort(port).WithTLS(true, tlsConfig).WithStartupTimeout(100 * time.Second)),
 	}
+	if hostname != "" {
+		customizers = append(customizers, testcontainers.WithEnv(map[string]string{"KC_HOSTNAME": "https://" + hostname + ":8443"}))
+	}
 	container, err := testcontainers.Run(ctx, "quay.io/keycloak/keycloak:26.8.1", append(customizers, options...)...)
 	if container != nil {
 		t.Cleanup(func() { _ = container.Terminate(context.Background()) })
@@ -580,7 +636,28 @@ func keycloakFixture(t *testing.T, callback string, options ...testcontainers.Co
 	if err != nil {
 		t.Fatal(err)
 	}
-	return endpoint + "/realms/" + keycloakRealm, &http.Transport{TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true}
+	transport := &http.Transport{TLSClientConfig: tlsConfig, ForceAttemptHTTP2: true}
+	fixture := keycloakInstance{issuer: endpoint + "/realms/" + keycloakRealm, transport: transport, certPEM: certPEM}
+	if hostname != "" {
+		fixture.ip, err = container.ContainerIP(ctx)
+		if err != nil || net.ParseIP(fixture.ip) == nil {
+			t.Fatal("read Keycloak container address", err)
+		}
+		mapped, err := url.Parse(endpoint)
+		if err != nil {
+			t.Fatal("parse Keycloak fixture endpoint", err)
+		}
+		upstream := net.JoinHostPort(hostname, "8443")
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address != upstream {
+				return nil, errors.New("unexpected Keycloak fixture endpoint")
+			}
+			return dialer.DialContext(ctx, network, mapped.Host)
+		}
+		fixture.issuer = "https://" + upstream + "/realms/" + keycloakRealm
+	}
+	return fixture
 }
 
 func keycloakRealmConfiguration(callback string) map[string]any {
