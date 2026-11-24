@@ -603,6 +603,21 @@ func (q *Queries) GetSCIMStandardRoot(ctx context.Context, arg GetSCIMStandardRo
 	return i, err
 }
 
+const isDirectoryBackedGroup = `-- name: IsDirectoryBackedGroup :one
+SELECT EXISTS (SELECT 1 FROM directory_groups WHERE group_id = $1)
+`
+
+type IsDirectoryBackedGroupParams struct {
+	GroupID string `json:"group_id"`
+}
+
+func (q *Queries) IsDirectoryBackedGroup(ctx context.Context, arg IsDirectoryBackedGroupParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isDirectoryBackedGroup, arg.GroupID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listDirectories = `-- name: ListDirectories :many
 SELECT id, space_id, name, status, version, created_at, updated_at, sso_connection_id, sso_identity_claim
 FROM directories WHERE space_id = $1

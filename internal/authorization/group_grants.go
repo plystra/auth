@@ -28,8 +28,12 @@ type GrantInput struct {
 // still pass the membership delta check; an empty group is not an authorization
 // shortcut for admitting members after the assigner's rights have been revoked.
 func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, groupID string, in GrantInput) (Grant, error) {
+	return s.createGroupGrant(ctx, actorMemberID, spaceID, groupID, nil, in)
+}
+
+func (s *Service) createGroupGrant(ctx context.Context, actorMemberID, spaceID, groupID string, directoryRequest map[string]string, in GrantInput) (Grant, error) {
 	in.Permissions = uniqueSorted(in.Permissions)
-	if actorMemberID == "" || spaceID == "" || groupID == "" || (in.RoleID == "") == (len(in.Permissions) == 0) || len(in.Permissions) > 256 {
+	if actorMemberID == "" || spaceID == "" || (groupID == "" && directoryRequest == nil) || (in.RoleID == "") == (len(in.Permissions) == 0) || len(in.Permissions) > 256 {
 		return Grant{}, apierr.New("VALIDATION_FAILED", "a group grant requires exactly one role or permission set")
 	}
 	if in.Scope == "" {
@@ -58,6 +62,13 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := lockHumanActorAccountTx(ctx, q, actorMemberID); err != nil {
 			return err
+		}
+		if directoryRequest != nil {
+			var err error
+			groupID, err = directoryGrantGroupTx(ctx, q, directoryRequest)
+			if err != nil {
+				return err
+			}
 		}
 		permissions, err := grantPermissionSourceTx(ctx, q, spaceID, in)
 		if err != nil {
@@ -102,6 +113,33 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 		if err := s.authorizeGroupTx(ctx, q, actorMemberID, "auth.grants:assign", spaceID, groupID); err != nil {
 			return err
 		}
+		var cohortBefore delta.Snapshot
+		if directoryRequest == nil {
+			backed, err := q.IsDirectoryBackedGroup(ctx, db.IsDirectoryBackedGroupParams{GroupID: groupID})
+			if err != nil {
+				return err
+			}
+			if backed {
+				return apierr.New("VALIDATION_FAILED", "directory groups require the directory grant operation")
+			}
+		} else {
+			if err := s.authorizeDirectoryGroupGrantTx(ctx, q, actorMemberID, directoryRequest); err != nil {
+				return err
+			}
+			// SCIM writes and directory configuration share the governing Space lock.
+			// Treat the initial group lookup as a hint until that lock is held.
+			lockedGroup, err := directoryGrantGroupTx(ctx, q, directoryRequest)
+			if err != nil {
+				return err
+			}
+			if lockedGroup != groupID {
+				return apierr.New("CONFLICT", "the directory group changed; retry the grant")
+			}
+			cohortBefore, err = directoryGroupSnapshotTx(ctx, q, spaceID, groupID)
+			if err != nil {
+				return err
+			}
+		}
 		// Membership writers lock the governing Space before changing the tree.
 		// Re-read under that lock; abort if the set changed while acquiring the
 		// member locks, rather than authorize an incomplete recipient snapshot.
@@ -141,6 +179,11 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 		if err != nil {
 			return normalizeDBError(err)
 		}
+		if directoryRequest != nil {
+			if err := s.coverDirectoryGroupDeltaTx(ctx, q, actorMemberID, spaceID, groupID, cohortBefore); err != nil {
+				return err
+			}
+		}
 		for _, member := range current {
 			after, err := s.grantAuthoritySnapshotAtPositionTx(ctx, q, member.ID, spaceID, member.Type, position)
 			if err != nil {
@@ -162,9 +205,18 @@ func (s *Service) CreateGroupGrant(ctx context.Context, actorMemberID, spaceID, 
 		if in.RoleID != "" {
 			action = "grant.create"
 		}
+		var metadata map[string]string
+		if directoryRequest != nil {
+			if err := s.consumeStepUpTx(ctx, q); err != nil {
+				return err
+			}
+			action = "directory.group.grant.create"
+			metadata = map[string]string{"directory_id": directoryRequest["directory_id"], "directory_group_id": directoryRequest["directory_group_id"], "role_id": in.RoleID}
+		}
 		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "member", ActorID: actorMemberID, MemberID: actorMemberID, Action: action, Outcome: "success",
 			Resource: audit.Resource{Type: "grant", ID: row.ID, SpaceID: spaceID, GroupID: groupID}, Permission: "auth.grants:assign",
+			Metadata: metadata,
 		}); err != nil {
 			return err
 		}

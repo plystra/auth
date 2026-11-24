@@ -427,7 +427,7 @@ func principalStepUpOperation(operation string) bool {
 	switch operation {
 	case "sso_connections.list", "sso_connections.get", "sso_connections.create", enterprise.SSOConnectionUpdateOperation, "sso_connections.delete", enterprise.CompleteIdentityLinkOperation,
 		"domains.list", "domains.create", "domains.verify", "domains.delete",
-		"directories.list", "directories.create", "directories.update", "directories.delete":
+		"directories.list", "directories.create", "directories.update", "directories.delete", authorization.DirectoryGroupGrantOperation:
 		return true
 	case "members.bindings.create", "members.bindings.revoke", "assignment_rights.list", "assignment_rights.create", "assignment_rights.revoke", "me.agents.create", "me.agents.rotate", "me.factors.create", "me.factors.delete", "approvals.approve", "approvals.reject", "applications.register", "applications.update", "applications.oauth_client_secret.rotate", "applications.keys.create", "applications.keys.rotate", "installations.create", "invitations.create":
 		return true

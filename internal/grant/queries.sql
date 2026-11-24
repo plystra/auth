@@ -106,6 +106,8 @@ WITH RECURSIVE member_groups AS (
     JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
     WHERE gm.member_id = sqlc.arg(member_id)
     UNION
+    SELECT cohort.id FROM groups cohort WHERE cohort.id = sqlc.narg(cohort_group_id) AND cohort.status = 'active'
+    UNION
     SELECT g.parent_id
     FROM groups g
     JOIN member_groups mg ON mg.group_id = g.id

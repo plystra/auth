@@ -10,6 +10,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 
 	"github.com/plystra/auth/internal/apierr"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
@@ -143,6 +144,20 @@ type deleteDirectoryInput struct {
 	DirectoryID   string `path:"dir_id"`
 }
 
+type createDirectoryGroupGrantInput struct {
+	Authorization    string `header:"Authorization"`
+	ApprovalID       string `header:"Approval-Id"`
+	ID               string `path:"id"`
+	DirectoryID      string `path:"dir_id"`
+	DirectoryGroupID string `path:"directory_group_id"`
+	Body             struct {
+		RoleID        string `json:"role_id"`
+		Scope         string `json:"scope,omitempty"`
+		AnchorSpaceID string `json:"anchor_space_id,omitempty"`
+		AnchorGroupID string `json:"anchor_group_id,omitempty"`
+	}
+}
+
 type directoryOutput struct {
 	Body struct {
 		Data enterprise.Directory `json:"data"`
@@ -162,6 +177,7 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("directories.create", "POST", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectory)
 	route.Register(api, route.NewSpec("directories.update", "PATCH", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDirectory)
 	route.Register(api, route.NewSpec("directories.delete", "DELETE", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDirectory)
+	route.Register(api, route.NewSpec(authorization.DirectoryGroupGrantOperation, "POST", "/v1/spaces/{id}/directories/{dir_id}/groups/{directory_group_id}/grants", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.grants:assign"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectoryGroupGrant)
 	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDomains)
 	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
 	route.Register(api, route.NewSpec("domains.verify", "POST", "/v1/spaces/{id}/domains/{domain_id}/verify", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.verifyDomain)
@@ -181,6 +197,27 @@ func (a *API) enterpriseSettingsListActor(ctx context.Context, in *enterpriseSet
 	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
 	return actor.ID, ctx, err
+}
+
+func (a *API) createDirectoryGroupGrant(ctx context.Context, in *createDirectoryGroupGrantInput) (*authorizationDataOutput[authorization.Grant], error) {
+	grantInput := authorization.GrantInput{RoleID: in.Body.RoleID, Scope: in.Body.Scope, AnchorSpaceID: in.Body.AnchorSpaceID, AnchorGroupID: in.Body.AnchorGroupID}
+	operation := authorization.DirectoryGroupGrantOperation
+	request := authorization.DirectoryGroupGrantRequest(in.ID, in.DirectoryID, in.DirectoryGroupID, grantInput)
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
+	if err != nil {
+		return nil, err
+	}
+	grant, err := a.Authorization.CreateDirectoryGroupGrant(ctx, actor.ID, in.ID, in.DirectoryID, in.DirectoryGroupID, grantInput)
+	if err != nil {
+		return nil, err
+	}
+	out := &authorizationDataOutput[authorization.Grant]{}
+	out.Body.Data = grant
+	return out, nil
 }
 
 func (a *API) listDirectories(ctx context.Context, in *enterpriseSettingsListInput) (*directoriesOutput, error) {

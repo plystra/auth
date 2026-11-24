@@ -1054,6 +1054,27 @@
         ],
         "type": "object"
       },
+      "CreateDirectoryGroupGrantInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "anchor_group_id": {
+            "type": "string"
+          },
+          "anchor_space_id": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "role_id"
+        ],
+        "type": "object"
+      },
       "CreateDirectoryInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -6880,6 +6901,84 @@
           }
         },
         "summary": "directories.update"
+      }
+    },
+    "/v1/spaces/{id}/directories/{dir_id}/groups/{directory_group_id}/grants": {
+      "post": {
+        "operationId": "directory_groups.grants.create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Approval-Id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "dir_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "directory_group_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDirectoryGroupGrantInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuthorizationDataOutputGrantBody"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "directory_groups.grants.create"
       }
     },
     "/v1/spaces/{id}/domains": {

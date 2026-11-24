@@ -103,6 +103,9 @@ FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND external_i
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND deleted_at IS NULL;
 
+-- name: IsDirectoryBackedGroup :one
+SELECT EXISTS (SELECT 1 FROM directory_groups WHERE group_id = sqlc.arg(group_id));
+
 -- name: LockDirectoryGroup :one
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND deleted_at IS NULL FOR UPDATE;

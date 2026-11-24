@@ -2320,6 +2320,8 @@ WITH RECURSIVE member_groups AS (
     JOIN groups g ON g.id = gm.group_id AND g.status = 'active'
     WHERE gm.member_id = $1
     UNION
+    SELECT cohort.id FROM groups cohort WHERE cohort.id = $2 AND cohort.status = 'active'
+    UNION
     SELECT g.parent_id
     FROM groups g
     JOIN member_groups mg ON mg.group_id = g.id
@@ -2347,7 +2349,8 @@ ORDER BY ag.id, p.key
 `
 
 type ListMemberAssignmentsParams struct {
-	MemberID pgtype.Text `json:"member_id"`
+	MemberID      pgtype.Text `json:"member_id"`
+	CohortGroupID pgtype.Text `json:"cohort_group_id"`
 }
 
 type ListMemberAssignmentsRow struct {
@@ -2369,7 +2372,7 @@ type ListMemberAssignmentsRow struct {
 }
 
 func (q *Queries) ListMemberAssignments(ctx context.Context, arg ListMemberAssignmentsParams) ([]ListMemberAssignmentsRow, error) {
-	rows, err := q.db.Query(ctx, listMemberAssignments, arg.MemberID)
+	rows, err := q.db.Query(ctx, listMemberAssignments, arg.MemberID, arg.CohortGroupID)
 	if err != nil {
 		return nil, err
 	}
