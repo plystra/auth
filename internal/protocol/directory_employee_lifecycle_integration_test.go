@@ -25,6 +25,7 @@ import (
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
+	"github.com/plystra/auth/internal/testdb"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -38,11 +39,6 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	accounts := &account.Service{Store: st, Passwords: enterpriseSvc.Passwords, Sessions: sessions, Authorization: authz, SignInPolicy: enterpriseSvc}
 	client := startEmployeeLifecycleEndpoint(t, accounts, enterpriseSvc)
 
-	peerStore, err := store.Open(ctx, st.Pool.Config().ConnString())
-	if err != nil {
-		t.Fatal("open the peer's database pool")
-	}
-	t.Cleanup(peerStore.Close)
 	wrappingKey := bytes.Repeat([]byte{17}, 32)
 	issuer := sessions.Signer.Issuer()
 	if _, err := st.InitializeSigningKeys(ctx, sessions.Signer, wrappingKey); err != nil {
@@ -51,23 +47,32 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	loadSigner := func(ctx context.Context, q *db.Queries) (*security.Signer, error) {
 		return store.LoadSigningKeys(ctx, q, issuer, wrappingKey)
 	}
-	peerSigner, err := loadSigner(ctx, peerStore.Queries())
-	if err != nil {
-		t.Fatal(err)
-	}
 	sessions.LoadSigner = loadSigner
-	peerAuthz := &authorization.Service{Store: peerStore}
-	peerSessions := &session.Service{
-		Store: peerStore, Signer: peerSigner, LoadSigner: loadSigner, HMACKeys: sessions.HMACKeys, Settings: sessions.Settings,
+	openReplica := func(t *testing.T, dsn string) employeeLifecycleClient {
+		t.Helper()
+		replicaStore, err := store.Open(t.Context(), dsn)
+		if err != nil {
+			t.Fatal("open the replica's database pool")
+		}
+		t.Cleanup(replicaStore.Close)
+		replicaSigner, err := loadSigner(t.Context(), replicaStore.Queries())
+		if err != nil {
+			t.Fatal(err)
+		}
+		replicaAuthz := &authorization.Service{Store: replicaStore}
+		replicaSessions := &session.Service{
+			Store: replicaStore, Signer: replicaSigner, LoadSigner: loadSigner, HMACKeys: sessions.HMACKeys, Settings: sessions.Settings,
+		}
+		replicaSSO := &enterprise.Service{
+			Store: replicaStore, Authorization: replicaAuthz, Sessions: replicaSessions, StepUp: replicaSessions,
+			DataKey: enterpriseSvc.DataKey, Passwords: enterpriseSvc.Passwords, HTTPClient: provider.server.Client(),
+		}
+		replicaSessions.SpaceSignInPolicy = replicaSSO
+		return startEmployeeLifecycleEndpoint(t, &account.Service{
+			Store: replicaStore, Passwords: replicaSSO.Passwords, Sessions: replicaSessions, Authorization: replicaAuthz, SignInPolicy: replicaSSO,
+		}, replicaSSO)
 	}
-	peerSSO := &enterprise.Service{
-		Store: peerStore, Authorization: peerAuthz, Sessions: peerSessions, StepUp: peerSessions,
-		DataKey: enterpriseSvc.DataKey, Passwords: enterpriseSvc.Passwords, HTTPClient: provider.server.Client(),
-	}
-	peerSessions.SpaceSignInPolicy = peerSSO
-	peer := startEmployeeLifecycleEndpoint(t, &account.Service{
-		Store: peerStore, Passwords: peerSSO.Passwords, Sessions: peerSessions, Authorization: peerAuthz, SignInPolicy: peerSSO,
-	}, peerSSO)
+	peer := openReplica(t, st.Pool.Config().ConnString())
 
 	const adminID = "usr_sso_http_owner"
 	admin, err := sessions.CreateForMember(ctx, adminID, owner.ID, nil, "workforce fixture", 1)
@@ -315,6 +320,50 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	}
 	retained := employeeLifecycleData[session.Tokens](t, refresh(independent, ""))
 	assertBoundSession(retained, otherMember.ID, "pwd")
+
+	t.Run("logical_restore_preserves_offboarding", func(t *testing.T) {
+		recoveryCtx, cancel := context.WithTimeout(t.Context(), time.Minute)
+		defer cancel()
+		recovery, err := testdb.Start(recoveryCtx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = recovery.Close(context.Background()) })
+		restored, err := protocolDB.RestoreSnapshot(recoveryCtx, st.Pool.Config().ConnConfig.Database, recovery)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = restored.Close(context.Background()) })
+		restoreReplica := openReplica(t, restored.AppURL)
+		originalClient, originalPeer := client, peer
+		client, peer = restoreReplica, restoreReplica
+		defer func() { client, peer = originalClient, originalPeer }()
+
+		// A still-valid control session establishes that signing and HMAC keys were
+		// recovered and that the revoked tokens fail because of restored state.
+		members(retained).requireStatus(t, http.StatusOK)
+		refresh(retained, "").requireStatus(t, http.StatusOK)
+		for _, revoked := range []session.Tokens{current, switched, *third.Tokens} {
+			members(revoked).requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+			refresh(revoked, "").requireError(t, http.StatusBadRequest, "invalid_grant")
+		}
+		record := client.send(t, http.MethodGet, userPath, directory.Token.Value(), scimContentType, "", nil)
+		record.requireStatus(t, http.StatusOK)
+		var restoredEmployee scimTestResource
+		if err := json.Unmarshal(record.body, &restoredEmployee); err != nil ||
+			restoredEmployee.ID != employee.ID || restoredEmployee.Active || record.etag != suspendedVersion {
+			t.Fatal("the restored SCIM resource lost its identifier, inactive state or version")
+		}
+		login().requireStatus(t, http.StatusBadRequest)
+		updateActive(true, suspendedVersion)
+		rejoined := employeeLifecycleData[account.AuthResult](t, login())
+		if rejoined.Tokens == nil || rejoined.User.ID != employeeUserID {
+			t.Fatal("the restored deployment did not sign the reprovisioned employee into the original account")
+		}
+		assertBoundSession(*rejoined.Tokens, initialClaims.MemberID, "oidc")
+		members(*rejoined.Tokens).requireStatus(t, http.StatusOK)
+		refresh(current, "").requireError(t, http.StatusBadRequest, "invalid_grant")
+	})
 
 	updateActive(true, suspendedVersion)
 	t.Run("reactivation never revives the old family", func(t *testing.T) {

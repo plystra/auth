@@ -155,6 +155,63 @@ Development without a configured file continues to use an ephemeral process-loca
 
 Keep the signing-key encryption key outside PostgreSQL and available to restore its backups.
 
+### Back up Auth and rehearse workforce recovery
+
+Use a PostgreSQL client that supports the source server version. Configure two libpq services
+with TLS verification and credentials from your secret store. Set `AUTH_BACKUP_SOURCE` to
+the service that can read the source database. Set `AUTH_RESTORE_TARGET` to a privileged
+restore service for a newly created, isolated database. Provision the required database roles
+with their original names on the target before restoring. The database archive preserves
+object ownership and grants, while PostgreSQL roles themselves are managed separately.
+
+The example uses [age](https://github.com/FiloSottile/age) to encrypt the archive as it is
+written. Set `AUTH_BACKUP_RECIPIENT` to an approved public recipient, `AUTH_BACKUP_FILE`
+to a new archive path, and `AUTH_BACKUP_IDENTITY` to the recovery identity file supplied
+through the secret store. Keep that identity separately from the backup.
+
+```bash
+set -euo pipefail
+umask 077
+test ! -e "$AUTH_BACKUP_FILE"
+partial=$(mktemp "${AUTH_BACKUP_FILE}.partial.XXXXXXXX")
+trap 'rm -f -- "$partial"' EXIT
+pg_dump --dbname="service=$AUTH_BACKUP_SOURCE" --format=custom \
+  | age --encrypt --recipient "$AUTH_BACKUP_RECIPIENT" > "$partial"
+ln -- "$partial" "$AUTH_BACKUP_FILE"
+```
+
+Keep the matching Auth build, issuer configuration and IdP trust configuration available
+for recovery. Retain the original `PLYSTRA_AUTH_DATA_KEY`, `PLYSTRA_AUTH_SESSION_HMAC_KEYS`
+and `PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY` securely. The database holds the encrypted
+persistent signing keys. Preserve `PLYSTRA_AUTH_SIGNING_KEY_FILE` if your deployment uses
+a mounted bootstrap key file.
+
+Restore into the isolated, empty database while Auth and its workers are offline. Restore
+the whole archive in one transaction and discard the target if any part of the pipeline
+fails. Run Auth at the backed-up version first and use the restricted application role for
+the service. Keep the recovery environment private and suppress external job delivery
+during rehearsals.
+
+```bash
+set -euo pipefail
+age --decrypt --identity "$AUTH_BACKUP_IDENTITY" "$AUTH_BACKUP_FILE" \
+  | pg_restore --single-transaction --dbname="service=$AUTH_RESTORE_TARGET"
+```
+
+Check readiness, public signing keys, the directory record and its version, and sign-in
+against the configured IdP. A rehearsal that captures a known SCIM suspension should verify
+that pre-suspension access and refresh tokens still fail and a separate active account or
+session remains usable. Re-enable the rehearsal employee through SCIM and require a fresh
+SSO ceremony. Verify that the resulting identity is the original user and member.
+
+Before exposing a recovered database, reconcile changes made after the snapshot against
+authoritative directories and other identity and credential-management records. An older
+snapshot may predate employee departures, removed memberships or credential revocations.
+Keep the deployment isolated until those changes have been reapplied and checked. Record
+the backup timestamp tested, recovery time, result and any gap against your recovery
+objectives. See [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html) and
+[pg_restore](https://www.postgresql.org/docs/17/app-pgrestore.html).
+
 ### Integrate application sign-in
 
 1. Register an application with its exact HTTPS callback and `human_oidc_enabled: true`.
