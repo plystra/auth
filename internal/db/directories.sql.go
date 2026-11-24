@@ -44,6 +44,35 @@ func (q *Queries) AddDirectoryManagedGroupMember(ctx context.Context, arg AddDir
 	return err
 }
 
+const advanceSCIMUserGroupVersions = `-- name: AdvanceSCIMUserGroupVersions :exec
+WITH previous_members AS (
+    SELECT unnest($2::text[]) AS id
+), current_members AS (
+    SELECT du.id
+    FROM directory_group_members dgm
+    JOIN directory_users du ON du.directory_id = $1 AND du.member_id = dgm.member_id
+    WHERE dgm.directory_group_id = $3
+), changed_members AS (
+    (SELECT id FROM previous_members EXCEPT SELECT id FROM current_members)
+    UNION ALL
+    (SELECT id FROM current_members EXCEPT SELECT id FROM previous_members)
+)
+UPDATE directory_users du SET version = du.version + 1, updated_at = clock_timestamp()
+WHERE du.directory_id = $1 AND du.deleted_at IS NULL
+    AND du.id IN (SELECT id FROM changed_members)
+`
+
+type AdvanceSCIMUserGroupVersionsParams struct {
+	DirectoryID      string   `json:"directory_id"`
+	PreviousUserIds  []string `json:"previous_user_ids"`
+	DirectoryGroupID string   `json:"directory_group_id"`
+}
+
+func (q *Queries) AdvanceSCIMUserGroupVersions(ctx context.Context, arg AdvanceSCIMUserGroupVersionsParams) error {
+	_, err := q.db.Exec(ctx, advanceSCIMUserGroupVersions, arg.DirectoryID, arg.PreviousUserIds, arg.DirectoryGroupID)
+	return err
+}
+
 const countDirectoryGroups = `-- name: CountDirectoryGroups :one
 SELECT count(*)::bigint FROM directory_groups WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR lower(display_name) = lower($2))
@@ -961,6 +990,47 @@ func (q *Queries) ListDirectoryUsersForLock(ctx context.Context, arg ListDirecto
 	for rows.Next() {
 		var i ListDirectoryUsersForLockRow
 		if err := rows.Scan(&i.UserID, &i.MemberID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSCIMUserGroups = `-- name: ListSCIMUserGroups :many
+SELECT du.id AS user_id, dg.id AS directory_group_id
+FROM directory_users du
+JOIN directory_group_members dgm ON dgm.member_id = du.member_id
+JOIN directory_groups dg ON dg.id = dgm.directory_group_id
+    AND dg.directory_id = du.directory_id AND dg.deleted_at IS NULL
+WHERE du.directory_id = $1
+    AND du.id = ANY($2::text[]) AND du.deleted_at IS NULL
+ORDER BY du.id, dg.id
+`
+
+type ListSCIMUserGroupsParams struct {
+	DirectoryID string   `json:"directory_id"`
+	UserIds     []string `json:"user_ids"`
+}
+
+type ListSCIMUserGroupsRow struct {
+	UserID           string `json:"user_id"`
+	DirectoryGroupID string `json:"directory_group_id"`
+}
+
+func (q *Queries) ListSCIMUserGroups(ctx context.Context, arg ListSCIMUserGroupsParams) ([]ListSCIMUserGroupsRow, error) {
+	rows, err := q.db.Query(ctx, listSCIMUserGroups, arg.DirectoryID, arg.UserIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSCIMUserGroupsRow{}
+	for rows.Next() {
+		var i ListSCIMUserGroupsRow
+		if err := rows.Scan(&i.UserID, &i.DirectoryGroupID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

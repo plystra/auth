@@ -23,6 +23,8 @@ func WriteSCIMError(w http.ResponseWriter, err error) {
 		status, scimType = http.StatusBadRequest, "invalidFilter"
 	case "scim_no_target":
 		status, scimType = http.StatusBadRequest, "noTarget"
+	case "scim_mutability":
+		status, scimType = http.StatusBadRequest, "mutability"
 	}
 	w.Header().Set("Content-Type", "application/scim+json")
 	w.WriteHeader(status)

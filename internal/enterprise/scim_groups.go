@@ -259,6 +259,10 @@ func (s *Service) syncDirectoryMembersTx(ctx context.Context, q *db.Queries, dir
 	if s.Authorization == nil {
 		return apierr.New("temporarily_unavailable", "directory authorization service is unavailable")
 	}
+	previous, err := q.ListDirectoryGroupUserIDs(ctx, db.ListDirectoryGroupUserIDsParams{DirectoryID: directory.ID, DirectoryGroupID: group.ID})
+	if err != nil {
+		return err
+	}
 	members, err := q.ListDirectoryBackedGroupMembers(ctx, db.ListDirectoryBackedGroupMembersParams{GroupID: group.GroupID})
 	if err != nil {
 		return err
@@ -283,6 +287,11 @@ func (s *Service) syncDirectoryMembersTx(ctx context.Context, q *db.Queries, dir
 			return q.RemoveDirectoryBackedGroup(ctx, db.RemoveDirectoryBackedGroupParams{GroupID: group.GroupID, SpaceID: directory.SpaceID})
 		}
 		return nil
+	}); err != nil {
+		return err
+	}
+	if err := q.AdvanceSCIMUserGroupVersions(ctx, db.AdvanceSCIMUserGroupVersionsParams{
+		DirectoryID: directory.ID, DirectoryGroupID: group.ID, PreviousUserIds: previous,
 	}); err != nil {
 		return err
 	}

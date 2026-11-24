@@ -37,6 +37,10 @@ func TestSCIMSearchUsesDirectoryScopedReadOnlyCollections(t *testing.T) {
 	foreign.user(t, "outsider", true)
 	group := scimResource(t, f.request(t, http.MethodPost, "Groups",
 		`{"externalId":"engineering","displayName":"Engineering","members":[{"value":"`+alice.ID+`"}]}`, "", http.StatusCreated))
+	memberVersion := scimResource(t, f.request(t, http.MethodGet, "Users/"+alice.ID, "", "", http.StatusOK))
+	if memberVersion.Meta.Version == alice.Meta.Version {
+		t.Fatal("group setup did not advance the member's version")
+	}
 	scimResource(t, foreign.request(t, http.MethodPost, "Groups", `{"externalId":"engineering","displayName":"Engineering"}`, "", http.StatusCreated))
 
 	type searchPage struct {
@@ -111,7 +115,7 @@ func TestSCIMSearchUsesDirectoryScopedReadOnlyCollections(t *testing.T) {
 	if denied.Code != http.StatusUnauthorized || denied.Header().Get("Content-Type") != "application/scim+json" {
 		t.Fatal("search accepted a foreign directory token")
 	}
-	for _, resource := range []scimTestResource{alice, group} {
+	for _, resource := range []scimTestResource{memberVersion, group} {
 		path := strings.TrimPrefix(resource.Meta.Location, "/scim/v2/"+f.directory.ID+"/")
 		if f.request(t, http.MethodGet, path, "", "", http.StatusOK).Header().Get("ETag") != resource.Meta.Version {
 			t.Fatal("body-based search advanced a resource version")

@@ -177,6 +177,33 @@ JOIN directory_users du ON du.directory_id = sqlc.arg(directory_id) AND du.membe
 WHERE dgm.directory_group_id = sqlc.arg(directory_group_id)
 ORDER BY du.id;
 
+-- name: ListSCIMUserGroups :many
+SELECT du.id AS user_id, dg.id AS directory_group_id
+FROM directory_users du
+JOIN directory_group_members dgm ON dgm.member_id = du.member_id
+JOIN directory_groups dg ON dg.id = dgm.directory_group_id
+    AND dg.directory_id = du.directory_id AND dg.deleted_at IS NULL
+WHERE du.directory_id = sqlc.arg(directory_id)
+    AND du.id = ANY(sqlc.arg(user_ids)::text[]) AND du.deleted_at IS NULL
+ORDER BY du.id, dg.id;
+
+-- name: AdvanceSCIMUserGroupVersions :exec
+WITH previous_members AS (
+    SELECT unnest(sqlc.arg(previous_user_ids)::text[]) AS id
+), current_members AS (
+    SELECT du.id
+    FROM directory_group_members dgm
+    JOIN directory_users du ON du.directory_id = sqlc.arg(directory_id) AND du.member_id = dgm.member_id
+    WHERE dgm.directory_group_id = sqlc.arg(directory_group_id)
+), changed_members AS (
+    (SELECT id FROM previous_members EXCEPT SELECT id FROM current_members)
+    UNION ALL
+    (SELECT id FROM current_members EXCEPT SELECT id FROM previous_members)
+)
+UPDATE directory_users du SET version = du.version + 1, updated_at = clock_timestamp()
+WHERE du.directory_id = sqlc.arg(directory_id) AND du.deleted_at IS NULL
+    AND du.id IN (SELECT id FROM changed_members);
+
 -- name: RemoveDirectoryBackedGroup :exec
 UPDATE groups SET status = 'removed'
 WHERE id = sqlc.arg(group_id) AND space_id = sqlc.arg(space_id);

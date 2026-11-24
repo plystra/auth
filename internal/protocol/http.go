@@ -549,7 +549,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		projection.write(w, http.StatusCreated, created, directoryID)
 	case http.MethodGet:
 		if resourceID != "" {
-			user, err := h.Enterprise.GetSCIMUser(r.Context(), directoryID, token, resourceID)
+			user, err := h.Enterprise.GetSCIMUser(r.Context(), directoryID, token, resourceID, projection.includesAttribute("groups"))
 			if err != nil {
 				route.WriteSCIMError(w, err)
 				return
@@ -748,6 +748,7 @@ type scimUserBody struct {
 	DisplayName *string                `json:"displayName,omitempty"`
 	Name        enterprise.SCIMName    `json:"name,omitempty"`
 	Emails      []enterprise.SCIMEmail `json:"emails,omitempty"`
+	Groups      json.RawMessage        `json:"groups,omitempty"`
 	Active      *bool                  `json:"active,omitempty"`
 	Operations  []scimOperation        `json:"Operations,omitempty"`
 }
@@ -766,6 +767,9 @@ func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
 }
 
 func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
+	if b.Groups != nil {
+		return enterprise.SCIMUserInput{}, apierr.New("scim_mutability", "change membership through the SCIM group")
+	}
 	if b.hasReadOnlyFields() {
 		return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH requires a PatchOp document")
 	}
@@ -823,6 +827,8 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 						return enterprise.SCIMUserInput{}, err
 					}
 					input.EmailPatches = append(input.EmailPatches, patch)
+				case "groups":
+					return enterprise.SCIMUserInput{}, apierr.New("scim_mutability", "change membership through the SCIM group")
 				default:
 					return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH attribute is unsupported")
 				}
@@ -860,6 +866,9 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 			}
 			input.Active, input.ActiveSet = value, true
 		default:
+			if path == "groups" || strings.HasPrefix(path, "groups.") || strings.HasPrefix(path, "groups[") {
+				return enterprise.SCIMUserInput{}, apierr.New("scim_mutability", "change membership through the SCIM group")
+			}
 			if path == "emails" || strings.HasPrefix(path, "emails[") {
 				patch, err := scimEmailsPatch(op, rawPath, operation.Value)
 				if err != nil {
@@ -1210,6 +1219,13 @@ func scimUserResource(user enterprise.SCIMUser, directoryID string) map[string]a
 	}
 	if len(user.Emails) > 0 {
 		resource["emails"] = user.Emails
+	}
+	if len(user.GroupIDs) > 0 {
+		groups := make([]map[string]string, 0, len(user.GroupIDs))
+		for _, id := range user.GroupIDs {
+			groups = append(groups, map[string]string{"value": id, "$ref": "/scim/v2/" + directoryID + "/Groups/" + id, "type": "direct"})
+		}
+		resource["groups"] = groups
 	}
 	return resource
 }

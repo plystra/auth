@@ -601,6 +601,7 @@ func TestSCIMGroupSyncRequiresCurrentConfiguratorAuthority(t *testing.T) {
 			g = scimResource(t, f.request(t, "PATCH", "Groups/"+g.ID, scimPatch(map[string]any{"op": "remove", "path": "members"}), g.Meta.Version, 200))
 			if kind == "reactivation" || kind == "binding_rights" {
 				g = scimResource(t, f.request(t, "PATCH", "Groups/"+g.ID, patch, g.Meta.Version, 200))
+				u = scimResource(t, f.request(t, "GET", "Users/"+u.ID, "", "", 200))
 				u = scimResource(t, f.request(t, "PATCH", "Users/"+u.ID, scimPatch(map[string]any{"op": "replace", "path": "active", "value": false}), u.Meta.Version, 200))
 			}
 			if kind == "missing_configurator" {

@@ -131,11 +131,28 @@ func TestKeycloakDirectoryGroupControlsEmployeeSessionAccess(t *testing.T) {
 		t.Fatal("admission did not advance the directory group version")
 	}
 	checkAccess(http.StatusOK)
+	userPath := scim + "/Users/" + employee.ID
+	admittedUser := client.send(t, http.MethodGet, userPath, directory.Token.Value(), "", "", nil)
+	admittedUser.requireStatus(t, http.StatusOK)
+	var membership struct {
+		Groups []struct{ Value string }
+	}
+	if err := json.Unmarshal(admittedUser.body, &membership); err != nil || len(membership.Groups) != 1 ||
+		membership.Groups[0].Value != group.ID || admittedUser.etag == employee.Meta.Version {
+		t.Fatal("the directory user did not expose the membership that authorized the employee session")
+	}
 	remove := map[string]any{"op": "remove", "path": "members[value eq " + strconv.Quote(employee.ID) + "]"}
 	updateGroup(group.Meta.Version, http.StatusPreconditionFailed, remove)
 	checkAccess(http.StatusOK)
 	updateGroup(admitted.etag, http.StatusOK, remove)
 	checkAccess(http.StatusForbidden)
+	departedUser := client.send(t, http.MethodGet, userPath, directory.Token.Value(), "", "", nil)
+	departedUser.requireStatus(t, http.StatusOK)
+	membership.Groups = nil
+	if err := json.Unmarshal(departedUser.body, &membership); err != nil || len(membership.Groups) != 0 ||
+		departedUser.etag == "" || departedUser.etag == admittedUser.etag {
+		t.Fatal("the directory user retained a stale membership after group removal")
+	}
 	client.send(t, http.MethodGet, "/v1/me/members", signedIn.Tokens.AccessToken, "", "", nil).requireStatus(t, http.StatusOK)
 
 	var updates int

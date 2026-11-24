@@ -2166,3 +2166,6 @@ ALTER TABLE sso_connections
     ADD COLUMN token_endpoint_auth_method text NOT NULL DEFAULT 'client_secret_basic'
     CHECK (token_endpoint_auth_method = 'client_secret_basic'
            OR (provider = 'oidc' AND token_endpoint_auth_method = 'client_secret_post'));
+
+CREATE INDEX directory_group_members_member_idx
+    ON directory_group_members (member_id, directory_group_id);

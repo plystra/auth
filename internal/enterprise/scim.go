@@ -40,6 +40,7 @@ type SCIMUser struct {
 	DisplayName string
 	Name        SCIMName
 	Emails      []SCIMEmail
+	GroupIDs    []string
 	Active      bool
 	Version     int64
 	CreatedAt   time.Time
@@ -153,7 +154,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 	return out, nil
 }
 
-func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token secret.String, filter SCIMCollectionFilter, startIndex, count int32) ([]SCIMUser, int64, error) {
+func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token secret.String, filter SCIMCollectionFilter, startIndex, count int32, includeGroups bool) ([]SCIMUser, int64, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return nil, 0, err
@@ -184,6 +185,19 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 			}
 			users = append(users, user)
 		}
+		if includeGroups && len(users) != 0 {
+			ids := make([]string, 0, len(users))
+			for _, user := range users {
+				ids = append(ids, user.ID)
+			}
+			groups, err := scimUserGroupsTx(ctx, q, directory.ID, ids)
+			if err != nil {
+				return err
+			}
+			for i := range users {
+				users[i].GroupIDs = groups[users[i].ID]
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -192,7 +206,7 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 	return users, total, nil
 }
 
-func (s *Service) GetSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string) (SCIMUser, error) {
+func (s *Service) GetSCIMUser(ctx context.Context, directoryID string, token secret.String, userID string, includeGroups bool) (SCIMUser, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return SCIMUser{}, err
@@ -206,7 +220,11 @@ func (s *Service) GetSCIMUser(ctx context.Context, directoryID string, token sec
 		if err != nil {
 			return err
 		}
-		out, err = scimUserFromRow(row)
+		if includeGroups {
+			out, err = scimUserWithGroupsTx(ctx, q, row)
+		} else {
+			out, err = scimUserFromRow(row)
+		}
 		return err
 	})
 	if err != nil {
@@ -359,7 +377,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 		if err != nil {
 			return err
 		}
-		out, err = scimUserFromRow(updated)
+		out, err = scimUserWithGroupsTx(ctx, q, updated)
 		if err != nil {
 			return err
 		}
@@ -452,6 +470,31 @@ func scimUserFromRow(row db.DirectoryUser) (SCIMUser, error) {
 		return SCIMUser{}, err
 	}
 	return SCIMUser{ID: row.ID, ExternalID: row.ExternalID, UserName: row.UserName, DisplayName: row.DisplayName, Name: name, Emails: emails, Active: row.Active, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}, nil
+}
+
+func scimUserWithGroupsTx(ctx context.Context, q *db.Queries, row db.DirectoryUser) (SCIMUser, error) {
+	user, err := scimUserFromRow(row)
+	if err != nil {
+		return SCIMUser{}, err
+	}
+	groups, err := scimUserGroupsTx(ctx, q, row.DirectoryID, []string{row.ID})
+	if err != nil {
+		return SCIMUser{}, err
+	}
+	user.GroupIDs = groups[row.ID]
+	return user, nil
+}
+
+func scimUserGroupsTx(ctx context.Context, q *db.Queries, directoryID string, ids []string) (map[string][]string, error) {
+	memberships, err := q.ListSCIMUserGroups(ctx, db.ListSCIMUserGroupsParams{DirectoryID: directoryID, UserIds: ids})
+	if err != nil {
+		return nil, err
+	}
+	groups := make(map[string][]string)
+	for _, membership := range memberships {
+		groups[membership.UserID] = append(groups[membership.UserID], membership.DirectoryGroupID)
+	}
+	return groups, nil
 }
 
 func scimGroupFromRow(row db.DirectoryGroup, members []string) SCIMGroup {

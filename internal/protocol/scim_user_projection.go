@@ -10,7 +10,7 @@ import (
 	"github.com/plystra/auth/internal/enterprise"
 )
 
-var scimProjectionPath = regexp.MustCompile(`^(?:urn:[a-z0-9:.-]+:)?[a-z][a-z0-9_$-]*(?:\.[a-z][a-z0-9_$-]*)?$`)
+var scimProjectionPath = regexp.MustCompile(`^(?:urn:[a-z0-9:.-]+:)?[a-z][a-z0-9_$-]*(?:\.[a-z$][a-z0-9_$-]*)?$`)
 
 type scimProjection struct {
 	paths   map[string]bool
@@ -57,7 +57,7 @@ func (p scimProjection) apply(resource map[string]any) map[string]any {
 		switch name {
 		case "id", "schemas":
 			continue
-		case "name", "emails", "meta", "members":
+		case "name", "emails", "groups", "meta", "members":
 			if p.paths[name] {
 				if p.include {
 					projected[name] = value

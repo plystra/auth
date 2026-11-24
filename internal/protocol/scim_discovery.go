@@ -134,13 +134,24 @@ func scimSchemas(base string) []map[string]any {
 		attribute("value", "string", false, false), attribute("type", "string", false, false),
 		attribute("display", "string", false, false), attribute("primary", "boolean", false, false),
 	}
+	groups := attribute("groups", "complex", false, true)
+	groupValue := attribute("value", "string", false, false)
+	groupValue["caseExact"] = true
+	groupReference := attribute("$ref", "reference", false, false)
+	groupReference["referenceTypes"] = []string{"Group"}
+	groupType := attribute("type", "string", false, false)
+	groupType["canonicalValues"] = []string{"direct"}
+	groups["subAttributes"] = []map[string]any{groupValue, groupReference, groupType}
+	for _, field := range []map[string]any{groups, groupValue, groupReference, groupType} {
+		field["mutability"] = "readOnly"
+	}
 	members := attribute("members", "complex", false, true)
 	memberValue := attribute("value", "string", true, false)
 	memberValue["caseExact"] = true
 	memberValue["mutability"] = "immutable"
 	members["subAttributes"] = []map[string]any{memberValue}
 	return []map[string]any{
-		schema(scimUser, "User", "Directory-provisioned user.", userName, name, emails,
+		schema(scimUser, "User", "Directory-provisioned user.", userName, name, emails, groups,
 			attribute("displayName", "string", false, false), attribute("active", "boolean", false, false)),
 		schema(scimGroup, "Group", "Directory-managed group with User members.",
 			attribute("displayName", "string", true, false), members),

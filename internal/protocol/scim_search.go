@@ -56,7 +56,7 @@ func (h HTTP) scimSearch(nameAttribute, schema string) http.HandlerFunc {
 			h.listSCIMUsers(w, r, token, query)
 			return
 		}
-		h.listSCIMGroups(w, r, token, query, query.projection.includesMembers())
+		h.listSCIMGroups(w, r, token, query, query.projection.includesAttribute("members"))
 	}
 }
 
@@ -99,12 +99,13 @@ func decodeSCIMSearch(w http.ResponseWriter, r *http.Request, nameAttribute, sch
 	return scimListQuery{filter, projection, start, count}, nil
 }
 
-func (p scimProjection) includesMembers() bool {
+func (p scimProjection) includesAttribute(name string) bool {
 	if p.paths == nil || !p.include {
-		return !p.paths["members"]
+		return !p.paths[name]
 	}
+	prefix := name + "."
 	for path := range p.paths {
-		if path == "members" || strings.HasPrefix(path, "members.") {
+		if path == name || strings.HasPrefix(path, prefix) {
 			return true
 		}
 	}
@@ -113,7 +114,7 @@ func (p scimProjection) includesMembers() bool {
 
 func (h HTTP) listSCIMUsers(w http.ResponseWriter, r *http.Request, token secret.String, query scimListQuery) {
 	directoryID := r.PathValue("dir_id")
-	users, total, err := h.Enterprise.ListSCIMUsers(r.Context(), directoryID, token, query.filter, query.start, query.count)
+	users, total, err := h.Enterprise.ListSCIMUsers(r.Context(), directoryID, token, query.filter, query.start, query.count, query.projection.includesAttribute("groups"))
 	if err != nil {
 		route.WriteSCIMError(w, err)
 		return
