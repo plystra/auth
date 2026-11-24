@@ -25,6 +25,7 @@ func TestDirectoryGroupDiscoveryBindsProofToEachPage(t *testing.T) {
 	ctx := t.Context()
 	st, authz, svc, owner, spaceID, _ := newSSOHTTPFixture(t)
 	sessions := svc.Sessions
+	sessions.Factors = &factor.Service{Store: st, DataKey: svc.DataKey}
 	svc.StepUp = sessions
 	adminCtx := authorization.WithHumanActor(ctx, owner.ID, adminUser)
 	newDirectory := func(name string) enterprise.Directory {
@@ -90,7 +91,17 @@ func TestDirectoryGroupDiscoveryBindsProofToEachPage(t *testing.T) {
 	}
 	get(input, admin.AccessToken, http.StatusForbidden)
 	get(input, directory.Token.Value(), http.StatusUnauthorized)
-	prove(input)
+	enrollment, err := sessions.Factors.BeginTOTP(ctx, adminUser, "sso-http-owner@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.send(t, http.MethodPost, "/v1/auth/step-up", admin.AccessToken, "application/json", "", map[string]any{
+		"operation": enterprise.DirectoryGroupListOperation, "mfa_code": code, "request": input.Request(),
+	}).requireStatus(t, http.StatusOK)
 	wrongDirectory := input
 	wrongDirectory.DirectoryID = other.ID
 	get(wrongDirectory, admin.AccessToken, http.StatusForbidden)
@@ -102,8 +113,8 @@ func TestDirectoryGroupDiscoveryBindsProofToEachPage(t *testing.T) {
 	get(input, admin.AccessToken, http.StatusForbidden)
 	prove(input)
 	last := get(input, admin.AccessToken, http.StatusOK)
-	if len(last.Data) != 1 || last.NextCursor != "" || last.Data[0].ID <= first.Data[0].ID ||
-		!(first.Data[0].ID == alpha.ID && last.Data[0].ID == beta.ID || first.Data[0].ID == beta.ID && last.Data[0].ID == alpha.ID) {
+	if len(last.Data) != 1 || last.NextCursor != "" ||
+		first.Data[0].ID != min(alpha.ID, beta.ID) || last.Data[0].ID != max(alpha.ID, beta.ID) {
 		t.Fatal("discovery leaked a foreign or removed group, or paginated incorrectly")
 	}
 	if _, err := st.Pool.Exec(ctx, `UPDATE directories SET status='disabled' WHERE id=$1`, directory.ID); err != nil {
