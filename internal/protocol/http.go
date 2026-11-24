@@ -884,7 +884,13 @@ func (b scimGroupBody) patchOperations() ([]enterprise.SCIMGroupOperation, error
 			if !ok || kind == "remove" || len(object) == 0 {
 				return apierr.New("invalid_request", "SCIM PATCH value is invalid")
 			}
+			seen := make(map[string]bool, len(object))
 			for key, value := range object {
+				name := strings.ToLower(strings.TrimSpace(key))
+				if name == "" || seen[name] {
+					return apierr.New("invalid_request", "SCIM PATCH attribute is empty or duplicated")
+				}
+				seen[name] = true
 				if err := appendOp(scimOperation{Op: kind, Path: key, Value: value}); err != nil {
 					return err
 				}
@@ -909,10 +915,10 @@ func (b scimGroupBody) patchOperations() ([]enterprise.SCIMGroupOperation, error
 				return apierr.New("invalid_request", "members must contain SCIM user values")
 			}
 			out.MemberIDs = values
-		case kind == "remove" && strings.HasPrefix(path, `members[value eq "`) && strings.HasSuffix(path, `"]`):
-			value := strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(op.Path), `members[value eq "`), `"]`)
-			if value == "" || strings.ContainsAny(value, `"[]`) {
-				return apierr.New("invalid_request", "SCIM member filter is invalid")
+		case kind == "remove" && strings.HasPrefix(path, "members["):
+			value, err := scimMemberSelector(op.Path)
+			if err != nil {
+				return err
 			}
 			out.Path = "members"
 			out.MemberIDs = []string{value}
@@ -935,6 +941,20 @@ func validateSCIMPatch(schemas []string, count int) error {
 		return apierr.New("invalid_request", "SCIM PATCH requires its schema and 1 to 100 operations")
 	}
 	return nil
+}
+
+func scimMemberSelector(path string) (string, error) {
+	path = strings.TrimSpace(path)
+	_, selection, _ := strings.Cut(path, "[")
+	if len(path) <= 4096 && strings.HasSuffix(selection, "]") {
+		attribute, operator, literal := splitSCIMComparison(strings.TrimSuffix(selection, "]"))
+		if strings.EqualFold(attribute, "value") && strings.EqualFold(operator, "eq") {
+			if value, valid := decodeSCIMFilterValue(literal); valid && len(value) <= 512 {
+				return value, nil
+			}
+		}
+	}
+	return "", apierr.New("invalid_filter", "SCIM member filter requires equality on value")
 }
 
 func scimMemberValues(raw any) ([]string, bool) {
@@ -1019,20 +1039,16 @@ func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollec
 	if expression == "" && len(raw) <= 512 {
 		return filter, nil
 	}
-	attribute, rest, _ := strings.Cut(expression, " ")
-	operator, literal, _ := strings.Cut(strings.TrimLeft(rest, " "), " ")
-	literal = strings.TrimSpace(literal)
+	attribute, operator, literal := splitSCIMComparison(expression)
 	external := strings.EqualFold(attribute, "externalId")
-	if (!external && !strings.EqualFold(attribute, nameAttribute)) || !strings.EqualFold(operator, "eq") ||
-		!strings.HasPrefix(literal, `"`) || !utf8.ValidString(literal) {
+	if (!external && !strings.EqualFold(attribute, nameAttribute)) || !strings.EqualFold(operator, "eq") {
 		return filter, apierr.New("invalid_filter", "only equality on "+nameAttribute+" and externalId is supported")
 	}
 	if !external && len(raw) > 512 {
 		return filter, apierr.New("invalid_filter", "SCIM filter is too long")
 	}
-	var value string
-	if json.Unmarshal([]byte(literal), &value) != nil || strings.TrimSpace(value) == "" ||
-		strings.ContainsFunc(value, unicode.IsControl) || strings.ContainsRune(value, utf8.RuneError) {
+	value, valid := decodeSCIMFilterValue(literal)
+	if !valid {
 		return filter, apierr.New("invalid_filter", "the SCIM filter value is invalid")
 	}
 	switch {
@@ -1054,6 +1070,22 @@ func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollec
 		filter.Name = value
 	}
 	return filter, nil
+}
+
+func splitSCIMComparison(expression string) (attribute, operator, literal string) {
+	attribute, rest, _ := strings.Cut(strings.TrimSpace(expression), " ")
+	operator, literal, _ = strings.Cut(strings.TrimLeft(rest, " "), " ")
+	return attribute, operator, strings.TrimSpace(literal)
+}
+
+func decodeSCIMFilterValue(literal string) (string, bool) {
+	var value string
+	if !strings.HasPrefix(literal, `"`) || !utf8.ValidString(literal) ||
+		json.Unmarshal([]byte(literal), &value) != nil || strings.TrimSpace(value) == "" ||
+		strings.ContainsFunc(value, unicode.IsControl) || strings.ContainsRune(value, utf8.RuneError) {
+		return "", false
+	}
+	return value, true
 }
 
 func scimExcludesGroupMembers(query url.Values) bool {

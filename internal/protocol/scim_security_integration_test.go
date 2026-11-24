@@ -419,6 +419,63 @@ func TestSCIMGroupPatchPreservesMembersAndManualSources(t *testing.T) {
 	f.request(t, "PATCH", "Groups/"+g.ID, scimPatch(map[string]any{"op": "replace", "path": "displayName", "value": "Recreated"}), `W/"4"`, 404)
 }
 
+func TestSCIMGroupMembershipPatchReconcilesWithoutWritingNoOps(t *testing.T) {
+	f := newSCIMFixture(t)
+	first, second := f.user(t, "first", true), f.user(t, "second", true)
+	created := f.request(t, http.MethodPost, "Groups", fmt.Sprintf(
+		`{"externalId":"on-call","displayName":"On Call","members":[{"value":%q},{"value":%q}]}`, first.ID, second.ID),
+		"", http.StatusCreated)
+	group := scimResource(t, created)
+	path := "Groups/" + group.ID
+	lookup := func() (int64, int64) {
+		t.Helper()
+		var version, updates int64
+		err := f.store.Pool.QueryRow(f.ctx, `SELECT policy_version,
+			(SELECT count(*) FROM audit_logs WHERE space_id = $1 AND action = 'scim.group.update')
+			FROM spaces WHERE id = $1`, f.owner.SpaceID).Scan(&version, &updates)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return version, updates
+	}
+	policy, audits := lookup()
+	addExisting := map[string]any{"op": "add", "path": "Members", "value": []any{map[string]any{"value": first.ID}}}
+	absent := map[string]any{"op": "remove", "path": `Members[VaLuE EQ "not-a-member"]`}
+	noOp := scimPatch(addExisting, absent)
+	result := f.request(t, http.MethodPatch, path, noOp, group.Meta.Version, http.StatusOK)
+	if result.Header().Get("ETag") != group.Meta.Version || result.Body.String() != created.Body.String() {
+		t.Fatal("a repeated add and an absent-target remove changed the SCIM resource")
+	}
+	if current, written := lookup(); current != policy || written != audits {
+		t.Fatal("a no-op PATCH changed the policy version or audit")
+	}
+	f.request(t, http.MethodPatch, path, noOp, `W/"999"`, http.StatusPreconditionFailed)
+
+	// The selector's names are case insensitive, and the exact value can be JSON escaped.
+	selector := `MEMBERS[ VaLuE   eQ   "\u0064` + first.ID[1:] + `" ]`
+	remove := map[string]any{"op": "remove", "path": selector}
+	invalid := map[string]any{"op": "remove", "path": `members[value co ""]`}
+	rejected := f.request(t, http.MethodPatch, path, scimPatch(remove, invalid), group.Meta.Version, http.StatusBadRequest)
+	if !strings.Contains(rejected.Body.String(), `"scimType":"invalidFilter"`) {
+		t.Fatal("an unsupported selector did not return a SCIM filter error")
+	}
+	unchanged := f.request(t, http.MethodGet, path, "", "", http.StatusOK)
+	if unchanged.Body.String() != created.Body.String() {
+		t.Fatal("the invalid second operation applied the first removal")
+	}
+	updated := scimResource(t, f.request(t, http.MethodPatch, path, scimPatch(remove), group.Meta.Version, http.StatusOK))
+	if updated.Meta.Version == group.Meta.Version || len(updated.Members) != 1 || updated.Members[0].Value != second.ID {
+		t.Fatal("the selector did not remove just the requested member")
+	}
+	if current, written := lookup(); current <= policy || written != audits+1 {
+		t.Fatal("the mutation did not record policy and audit changes")
+	}
+	result = f.request(t, http.MethodPatch, path, scimPatch(remove), updated.Meta.Version, http.StatusOK)
+	if result.Header().Get("ETag") != updated.Meta.Version {
+		t.Fatal("an absent-target retry changed the group version")
+	}
+}
+
 func TestSCIMGroupSyncRequiresCurrentConfiguratorAuthority(t *testing.T) {
 	for _, kind := range []string{"permissions", "binding_rights", "reactivation", "missing_configurator", "self_escalation"} {
 		t.Run(kind, func(t *testing.T) {

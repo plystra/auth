@@ -193,7 +193,7 @@ func (s *Service) mutateSCIMGroup(ctx context.Context, directoryID string, token
 			if err != nil {
 				return err
 			}
-			in = SCIMGroupInput{ExternalID: row.ExternalID, DisplayName: row.DisplayName, MemberIDs: members}
+			in = SCIMGroupInput{ExternalID: row.ExternalID, DisplayName: row.DisplayName, MemberIDs: slices.Clone(members)}
 			for _, op := range operations {
 				if op.Op != "add" && op.Op != "replace" && op.Op != "remove" {
 					return apierr.New("invalid_request", "SCIM PATCH operation is unsupported")
@@ -220,9 +220,15 @@ func (s *Service) mutateSCIMGroup(ctx context.Context, directoryID string, token
 				default:
 					return apierr.New("invalid_request", "SCIM PATCH path is unsupported")
 				}
+				slices.Sort(in.MemberIDs)
+				in.MemberIDs = slices.Compact(in.MemberIDs)
 				if len(in.MemberIDs) > 1000 {
 					return apierr.New("invalid_request", "SCIM group member limit exceeded")
 				}
+			}
+			if strings.TrimSpace(in.DisplayName) == row.DisplayName && slices.Equal(in.MemberIDs, members) {
+				out = scimGroupFromRow(row, members)
+				return nil
 			}
 		}
 		in.DisplayName = strings.TrimSpace(in.DisplayName)
