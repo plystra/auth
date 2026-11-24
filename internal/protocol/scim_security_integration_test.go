@@ -14,8 +14,11 @@ import (
 
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/authorization"
+	"github.com/plystra/auth/internal/credential"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/enterprise"
+	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/store"
 )
@@ -120,6 +123,106 @@ func (f scimFixture) user(t *testing.T, externalID string, active bool) scimTest
 func scimPatch(operations ...map[string]any) string {
 	body, _ := json.Marshal(map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:PatchOp"}, "Operations": operations})
 	return string(body)
+}
+
+func TestSCIMDiscoveryDescribesSupportedResourcesAndRequiresCurrentDirectoryToken(t *testing.T) {
+	f := newSCIMFixture(t)
+	const issuer = "https://identity.example.test"
+	mux := route.NewMux()
+	(HTTP{Issuer: issuer, Enterprise: f.service}).Register(mux)
+	f.handler = route.MiddlewareWithIdempotency(route.Principal, mux, f.store, (credential.Validator{Directory: f.service}).Validate)
+	base := issuer + "/scim/v2/" + f.directory.ID
+
+	config := f.request(t, http.MethodGet, "ServiceProviderConfig", "", "", http.StatusOK)
+	var features struct {
+		Schemas        []string
+		Patch          struct{ Supported bool }
+		ETag           struct{ Supported bool }
+		Sort           struct{ Supported bool }
+		Bulk           struct{ Supported bool }
+		ChangePassword struct{ Supported bool }
+		Filter         struct {
+			Supported  bool
+			MaxResults int32
+		}
+		AuthenticationSchemes []struct{ Type string }
+	}
+	if err := json.Unmarshal(config.Body.Bytes(), &features); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(features.Schemas, []string{scimConfig}) || !features.Patch.Supported || !features.ETag.Supported ||
+		!features.Filter.Supported || features.Filter.MaxResults != enterprise.MaxSCIMPageSize ||
+		features.Sort.Supported || features.Bulk.Supported || features.ChangePassword.Supported ||
+		len(features.AuthenticationSchemes) != 1 || features.AuthenticationSchemes[0].Type != "oauthbearertoken" ||
+		config.Header().Get("Location") != base+"/ServiceProviderConfig" {
+		t.Fatal("service capabilities did not match the mounted directory")
+	}
+
+	for _, tc := range []struct {
+		collection, first, second, schema string
+	}{
+		{"ResourceTypes", "User", "Group", scimCore + "ResourceType"},
+		{"Schemas", scimUser, scimGroup, scimCore + "Schema"},
+	} {
+		t.Run(tc.collection, func(t *testing.T) {
+			list := f.request(t, http.MethodGet, tc.collection+"?startIndex=999&count=0", "", "", http.StatusOK)
+			var result struct {
+				Schemas                                []string
+				TotalResults, ItemsPerPage, StartIndex int
+				Resources                              []struct {
+					ID, Endpoint, Schema string
+					Schemas              []string
+					Attributes           []struct{ Name string }
+					Meta                 struct{ Location string }
+				}
+			}
+			if err := json.Unmarshal(list.Body.Bytes(), &result); err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(result.Schemas, []string{scimListSchema}) || result.TotalResults != 2 ||
+				result.ItemsPerPage != 2 || result.StartIndex != 1 || len(result.Resources) != 2 ||
+				result.Resources[0].ID != tc.first || result.Resources[1].ID != tc.second {
+				t.Fatal("discovery did not return the complete User and Group list")
+			}
+			for _, resource := range result.Resources {
+				path := tc.collection + "/" + url.PathEscape(resource.ID)
+				item := f.request(t, http.MethodGet, path, "", "", http.StatusOK)
+				var got struct{ ID string }
+				if json.Unmarshal(item.Body.Bytes(), &got) != nil || got.ID != resource.ID ||
+					item.Header().Get("Location") != resource.Meta.Location ||
+					resource.Meta.Location != base+"/"+path || !slices.Equal(resource.Schemas, []string{tc.schema}) {
+					t.Fatal("discovery item did not resolve from its advertised location")
+				}
+			}
+			f.request(t, http.MethodGet, tc.collection+"/Unknown", "", "", http.StatusNotFound)
+			f.request(t, http.MethodGet, tc.collection+"?filter=", "", "", http.StatusForbidden)
+			if tc.collection == "ResourceTypes" {
+				if result.Resources[0].Endpoint != "/Users" || result.Resources[1].Endpoint != "/Groups" ||
+					result.Resources[0].Schema != scimUser || result.Resources[1].Schema != scimGroup {
+					t.Fatal("resource types did not reference the supported endpoints and schemas")
+				}
+			} else if !slices.ContainsFunc(result.Resources[0].Attributes, func(a struct{ Name string }) bool { return a.Name == "userName" }) ||
+				!slices.ContainsFunc(result.Resources[1].Attributes, func(a struct{ Name string }) bool { return a.Name == "members" }) {
+				t.Fatal("schema discovery did not describe provisionable fields")
+			}
+		})
+	}
+	old := f.directory
+	other, err := f.service.CreateDirectory(f.ctx, f.owner.ID, f.owner.SpaceID, enterprise.DirectoryInput{Name: "Other workforce"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, token := range []string{"", other.Token.Value()} {
+		f.directory.Token = secret.New(token)
+		f.request(t, http.MethodGet, "ServiceProviderConfig", "", "", http.StatusUnauthorized)
+	}
+	f.directory, err = f.service.RotateDirectoryToken(f.ctx, f.owner.ID, f.owner.SpaceID, old.ID, old.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, http.MethodGet, "ResourceTypes", "", "", http.StatusOK)
+	f.directory = old
+	f.request(t, http.MethodGet, "Schemas", "", "", http.StatusUnauthorized)
 }
 
 func TestSCIMListPaginationNormalizesPageAndReturnsTotals(t *testing.T) {

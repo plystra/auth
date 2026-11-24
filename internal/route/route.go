@@ -410,7 +410,22 @@ func scimDirectory(plane Plane, r *http.Request) string {
 		return ""
 	}
 	collection, id, item := strings.Cut(resource, "/")
-	if collection != "Users" && collection != "Groups" || item && (id == "" || strings.Contains(id, "/")) {
+	if item && (id == "" || strings.Contains(id, "/")) {
+		return ""
+	}
+	switch collection {
+	case "ServiceProviderConfig":
+		if r.Method == http.MethodGet && !item {
+			return directory
+		}
+		return ""
+	case "ResourceTypes", "Schemas":
+		if r.Method == http.MethodGet {
+			return directory
+		}
+		return ""
+	case "Users", "Groups":
+	default:
 		return ""
 	}
 	switch r.Method {
