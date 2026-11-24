@@ -55,6 +55,17 @@ ORDER BY um.created_at, um.user_id;
 -- name: GetMemberForUser :one
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at FROM members m JOIN user_members um ON um.member_id=m.id WHERE um.user_id=sqlc.arg(user_id) AND um.status = 'active' AND (um.expires_at IS NULL OR um.expires_at > now()) AND um.revoked_at IS NULL AND m.status = 'active' AND m.space_id=sqlc.arg(space_id) LIMIT 1;
 
+-- name: FindAssertedHumanMembersInSpace :many
+SELECT m.id
+FROM members m
+JOIN user_members um ON um.member_id = m.id
+WHERE um.user_id = sqlc.arg(user_id) AND m.space_id = sqlc.arg(space_id)
+  AND m.type = 'human' AND m.status = 'active'
+  AND um.status = 'active' AND um.revoked_at IS NULL
+  AND (um.expires_at IS NULL OR um.expires_at > clock_timestamp())
+ORDER BY m.id
+LIMIT 2;
+
 -- name: ListMembersForUser :many
 SELECT m.id, m.space_id, m.name, m.type, m.binding_policy, m.status, m.created_at
 FROM members m

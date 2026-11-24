@@ -30,7 +30,9 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/lestrrat-go/jwx/v3/jws"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
+	"github.com/plystra/auth/internal/plane/server"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
 	"github.com/plystra/auth/internal/store"
@@ -44,9 +46,14 @@ import (
 // httptest's TLS client routes this certificate-valid hostname to its listener.
 const rpTestIssuer = "https://auth.example.com"
 
+type oidcTestReplica struct {
+	principal *httputil.ReverseProxy
+	server    *httputil.ReverseProxy
+}
+
 // Run two independent serve processes behind a single HTTPS issuer. Switch
 // between them at explicit points rather than depending on request scheduling.
-func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmacKey string, wrappingKey []byte) (*httptest.Server, func(), []string, func(*testing.T)) {
+func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmacKey string, wrappingKey []byte) (*httptest.Server, *httptest.Server, func(), []string, func(*testing.T)) {
 	t.Helper()
 	ctx := t.Context()
 	fixture := t.TempDir()
@@ -67,7 +74,7 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 	}
 	var dataKey [32]byte
 	_, _ = rand.Read(dataKey[:])
-	startProcess := func(name string) (*httputil.ReverseProxy, string, testcontainers.Container) {
+	startProcess := func(name string) (*oidcTestReplica, string, testcontainers.Container) {
 		t.Helper()
 		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 		if err != nil {
@@ -96,7 +103,7 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 					"PLYSTRA_AUTH_SIGNING_KEY_ENCRYPTION_KEY": base64.StdEncoding.EncodeToString(wrappingKey),
 					"PLYSTRA_AUTH_SIGNING_KEY_FILE":           containerKeyFile,
 				},
-				ExposedPorts: []string{"8080/tcp", "8090/tcp"},
+				ExposedPorts: []string{"8080/tcp", "8081/tcp", "8090/tcp"},
 				WaitingFor:   wait.ForHTTP("/.well-known/openid-configuration").WithPort("8080/tcp"),
 			}, Started: true,
 		})
@@ -106,30 +113,38 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 		if err != nil {
 			t.Fatalf("start Auth process: %v", err)
 		}
-		backend, err := process.PortEndpoint(ctx, "8080/tcp", "http")
-		if err != nil {
-			t.Fatal(err)
-		}
-		target, err := url.Parse(backend)
-		if err != nil {
-			t.Fatal(err)
+		proxy := func(port string) *httputil.ReverseProxy {
+			t.Helper()
+			backend, err := process.PortEndpoint(ctx, port, "http")
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := url.Parse(backend)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return httputil.NewSingleHostReverseProxy(target)
 		}
 		health, err := process.PortEndpoint(ctx, "8090/tcp", "http")
 		if err != nil {
 			t.Fatal(err)
 		}
-		return httputil.NewSingleHostReverseProxy(target), health + "/readyz", process
+		return &oidcTestReplica{principal: proxy("8080/tcp"), server: proxy("8081/tcp")}, health + "/readyz", process
 	}
 	// Independently provisioned files may seed a pristine database. Once
 	// initialized, both processes must use the same persisted issuer key.
 	primary, primaryReady, primaryProcess := startProcess("primary")
 	peer, peerReady, _ := startProcess("peer")
-	var active atomic.Pointer[httputil.ReverseProxy]
+	var active atomic.Pointer[oidcTestReplica]
 	active.Store(primary)
 	issuer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		active.Load().ServeHTTP(w, r)
+		active.Load().principal.ServeHTTP(w, r)
 	}))
 	t.Cleanup(issuer.Close)
+	serverPlane := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		active.Load().server.ServeHTTP(w, r)
+	}))
+	t.Cleanup(serverPlane.Close)
 	switchBackend := func() {
 		if active.Load() == primary {
 			active.Store(peer)
@@ -152,7 +167,7 @@ func startOIDCTestIssuer(t *testing.T, database testdb.Database, dbAddress, hmac
 		}
 		active.Store(peer)
 	}
-	return issuer, switchBackend, []string{primaryReady, peerReady}, losePrimary
+	return issuer, serverPlane, switchBackend, []string{primaryReady, peerReady}, losePrimary
 }
 
 func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
@@ -190,7 +205,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 	}
 	var wrappingKey [32]byte
 	_, _ = rand.Read(wrappingKey[:])
-	issuer, switchBackend, readyURLs, losePrimary := startOIDCTestIssuer(t, database, net.JoinHostPort(host, strconv.Itoa(port)), hmacKey, wrappingKey[:])
+	issuer, serverPlane, switchBackend, readyURLs, losePrimary := startOIDCTestIssuer(t, database, net.JoinHostPort(host, strconv.Itoa(port)), hmacKey, wrappingKey[:])
 	client := issuer.Client()
 	ctx = oidc.ClientContext(ctx, client)
 	provider, err := oidc.NewProvider(ctx, rpTestIssuer)
@@ -469,6 +484,57 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			t.Fatalf("ID Token on %s returned %d", path, status)
 		}
 	}
+
+	t.Run("verified account drives a live decision in the installed Space", func(t *testing.T) {
+		authz := &authorization.Service{Store: st}
+		space, member, err := authz.CreateSpace(ctx, claims.Subject, "Relying party workforce", "rp-workforce")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants
+			(id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
+			VALUES ('grt_rp_workforce_app_manage',$1,'["auth.applications:manage"]',$2,'space',$1,$2)`,
+			space.ID, member.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE applications SET visibility='public', review_status='approved',
+			manifest_permissions='["auth.authz:check"]' WHERE id=$1`, clientID); err != nil {
+			t.Fatal(err)
+		}
+		apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(hmacKey)}}
+		if _, err := apps.InstallSpace(ctx, member.ID, clientID, space.ID); err != nil {
+			t.Fatal(err)
+		}
+		expires := time.Now().Add(time.Hour)
+		apiKey, err := apps.CreateKey(ctx, clientID, "workforce-decision", []string{"auth.authz:check"}, &expires)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allow_subject_assertion=true,
+			restrict_to=jsonb_build_array(jsonb_build_object('space_id',$1::text,'include_descendants',false))
+			WHERE application_id=$2 AND name='workforce-decision'`, space.ID, clientID); err != nil {
+			t.Fatal(err)
+		}
+		target := serverPlane.URL + "/server/v1/authz/check"
+		body := server.CheckBody{Subject: server.CheckSubject{UserID: claims.Subject}, Action: "self:read",
+			Resource: server.CheckResource{Type: "member", ID: member.ID, SpaceID: space.ID}}
+		var result struct {
+			Data server.CheckDecision `json:"data"`
+		}
+		request(t, http.MethodPost, target, apiKey, body, &result)
+		if result.Data.Decision != "allow" || result.Data.DecisionID == "" {
+			t.Fatal("the installed application did not receive an allow decision for the signed account")
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET status='revoked',revoked_at=clock_timestamp()
+			WHERE user_id=$1 AND member_id=$2`, claims.Subject, member.ID); err != nil {
+			t.Fatal(err)
+		}
+		switchBackend()
+		defer switchBackend()
+		if status := request(t, http.MethodPost, target, apiKey, body, nil); status != http.StatusNotFound {
+			t.Fatalf("peer did not reject a withdrawn binding: HTTP %d", status)
+		}
+	})
 
 	t.Run("discovery advertises supported client authentication methods", func(t *testing.T) {
 		type metadata struct {

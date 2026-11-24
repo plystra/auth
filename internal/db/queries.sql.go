@@ -1010,6 +1010,43 @@ func (q *Queries) DeleteFactor(ctx context.Context, arg DeleteFactorParams) erro
 	return err
 }
 
+const findAssertedHumanMembersInSpace = `-- name: FindAssertedHumanMembersInSpace :many
+SELECT m.id
+FROM members m
+JOIN user_members um ON um.member_id = m.id
+WHERE um.user_id = $1 AND m.space_id = $2
+  AND m.type = 'human' AND m.status = 'active'
+  AND um.status = 'active' AND um.revoked_at IS NULL
+  AND (um.expires_at IS NULL OR um.expires_at > clock_timestamp())
+ORDER BY m.id
+LIMIT 2
+`
+
+type FindAssertedHumanMembersInSpaceParams struct {
+	UserID  string `json:"user_id"`
+	SpaceID string `json:"space_id"`
+}
+
+func (q *Queries) FindAssertedHumanMembersInSpace(ctx context.Context, arg FindAssertedHumanMembersInSpaceParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, findAssertedHumanMembersInSpace, arg.UserID, arg.SpaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const findOAuthRefreshCredentialMember = `-- name: FindOAuthRefreshCredentialMember :one
 SELECT member_id FROM agent_credentials
 WHERE secret_hash = $1 AND kind = 'oauth_refresh'

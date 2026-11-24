@@ -11,15 +11,22 @@ import (
 	"github.com/plystra/auth/internal/db"
 )
 
-// CheckAssertedHuman binds a trusted application's named human account to the
-// same live member throughout the business authorization decision.
-func (s *Service) CheckAssertedHuman(ctx context.Context, in CheckRequest, userID string) (engine.Decision, int64, error) {
+type AssertedHumanDecision struct {
+	MemberID      string
+	Decision      engine.Decision
+	PolicyVersion int64
+}
+
+// CheckAssertedHuman binds an application-asserted account to its live human
+// member. Without an explicit MemberID, exactly one eligible binding must
+// exist in the requested Space.
+func (s *Service) CheckAssertedHuman(ctx context.Context, in CheckRequest, userID string) (AssertedHumanDecision, error) {
 	if s == nil || s.Store == nil {
-		return engine.Decision{}, 0, apierr.New("UNAVAILABLE", "authorization is unavailable")
+		return AssertedHumanDecision{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	missing := apierr.New("SUBJECT_NOT_FOUND", "the asserted account has no active binding to this human member")
-	var decision engine.Decision
-	var version int64
+	chooseMember := in.MemberID == ""
+	var result AssertedHumanDecision
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		// Account → member is also the lock order for offboarding and binding revocation.
 		user, err := q.LockUserForAuthorization(ctx, db.LockUserForAuthorizationParams{ID: userID})
@@ -29,6 +36,17 @@ func (s *Service) CheckAssertedHuman(ctx context.Context, in CheckRequest, userI
 		if err != nil {
 			return err
 		}
+		params := db.FindAssertedHumanMembersInSpaceParams{UserID: userID, SpaceID: in.ResourceSpace}
+		if chooseMember {
+			eligible, err := q.FindAssertedHumanMembersInSpace(ctx, params)
+			if err != nil {
+				return err
+			}
+			if len(eligible) != 1 {
+				return missing
+			}
+			in.MemberID = eligible[0]
+		}
 		member, err := q.LockMemberForAuthorization(ctx, db.LockMemberForAuthorizationParams{ID: in.MemberID})
 		if errors.Is(err, pgx.ErrNoRows) || err == nil && (member.Type != "human" || member.SpaceID != in.ResourceSpace) {
 			return missing
@@ -36,24 +54,35 @@ func (s *Service) CheckAssertedHuman(ctx context.Context, in CheckRequest, userI
 		if err != nil {
 			return err
 		}
-		decision, version, err = s.checkQueries(ctx, q, in, 0, false)
+		decision, version, err := s.checkQueries(ctx, q, in, 0, false)
 		if err != nil {
 			return err
 		}
 		// A binding can expire while authorization waits on another current fact.
-		bound, err := s.UserBoundToMemberTx(ctx, q, userID, in.MemberID)
-		if err != nil {
-			return err
+		if chooseMember {
+			eligible, err := q.FindAssertedHumanMembersInSpace(ctx, params)
+			if err != nil {
+				return err
+			}
+			if len(eligible) != 1 || eligible[0] != in.MemberID {
+				return missing
+			}
+		} else {
+			bound, err := s.UserBoundToMemberTx(ctx, q, userID, in.MemberID)
+			if err != nil {
+				return err
+			}
+			if !bound {
+				return missing
+			}
 		}
-		if !bound {
-			return missing
-		}
+		result = AssertedHumanDecision{MemberID: in.MemberID, Decision: decision, PolicyVersion: version}
 		return nil
 	})
 	if err != nil {
-		return engine.Decision{}, 0, err
+		return AssertedHumanDecision{}, err
 	}
-	return decision, version, nil
+	return result, nil
 }
 
 type humanActorKey struct{}

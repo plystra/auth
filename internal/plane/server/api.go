@@ -40,6 +40,10 @@ type CheckSubject struct {
 	unknown  []string
 }
 
+func (s CheckSubject) accountOnly() bool {
+	return s.Token == "" && s.MemberID == "" && s.UserID != ""
+}
+
 func (s *CheckSubject) UnmarshalJSON(data []byte) error {
 	var fields struct {
 		Token    string `json:"token,omitempty"`
@@ -210,6 +214,9 @@ func (a *API) createApproval(ctx context.Context, in *ApprovalCreateInput) (*App
 	if err != nil {
 		return nil, err
 	}
+	if body.Subject.accountOnly() {
+		return nil, apierr.New("VALIDATION_FAILED", "business approvals require an Agent subject")
+	}
 	evaluation, err := a.evaluateWithKey(ctx, key, body, "auth.authz:check", false)
 	if err != nil {
 		return nil, err
@@ -318,6 +325,15 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		return authorizationEvaluation{}, apierr.New("UNAVAILABLE", "authorization is unavailable")
 	}
 	spaceID := strings.TrimSpace(body.Resource.SpaceID)
+	accountAssertion := body.Subject.accountOnly()
+	if accountAssertion {
+		if spaceID == "" {
+			return authorizationEvaluation{}, apierr.New("VALIDATION_FAILED", "resource.space_id is required for an account assertion")
+		}
+		if !key.AllowSubjectAssertion {
+			return authorizationEvaluation{}, apierr.New("VALIDATION_FAILED", "subject assertions are not enabled for this API key")
+		}
+	}
 	var resolved resolvedSubject
 	if spaceID == "" {
 		if !contains(key.Scopes, requiredScope) {
@@ -342,7 +358,9 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 		}
 		return authorizationEvaluation{decision: keyDecision, policyVersion: keyVersion, spaceID: spaceID}, nil
 	}
-	if resolved.ID == "" {
+	if accountAssertion {
+		resolved.UserID = body.Subject.UserID
+	} else if resolved.ID == "" {
 		resolved, err = a.resolveSubject(ctx, key, body.Subject, spaceID)
 		if err != nil {
 			return authorizationEvaluation{}, err
@@ -372,7 +390,9 @@ func (a *API) evaluateWithKey(ctx context.Context, key application.Key, body Che
 	var decision engine.Decision
 	var policyVersion int64
 	if body.Subject.Token == "" && resolved.UserID != "" {
-		decision, policyVersion, err = a.Authorization.CheckAssertedHuman(ctx, check, resolved.UserID)
+		var checked authorization.AssertedHumanDecision
+		checked, err = a.Authorization.CheckAssertedHuman(ctx, check, resolved.UserID)
+		memberID, decision, policyVersion = checked.MemberID, checked.Decision, checked.PolicyVersion
 	} else if consumeApproval {
 		ctx = audit.WithCaller(ctx, audit.Caller{ApplicationID: key.ApplicationID, KeyID: key.ID, UserID: resolved.UserID, CredentialType: "application_api_key"})
 		decision, policyVersion, err = a.Authorization.CheckBusiness(ctx, check, body.Resource.Type, body.Resource.ID)

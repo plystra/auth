@@ -84,6 +84,94 @@ func TestAssertedHumanRequiresCurrentExactAccountBinding(t *testing.T) {
 	}
 }
 
+func TestAccountAssertionChecksUniqueActiveMembershipInExplicitSpace(t *testing.T) {
+	const accountID = "usr_server_actor"
+	const unboundMember = "mem_unbound_extra"
+	st, authz, original, space, key, sessions := newServerFixture(t)
+	ctx := t.Context()
+	exec := func(statement string, args ...any) {
+		t.Helper()
+		if _, err := st.Pool.Exec(ctx, statement, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`UPDATE api_keys SET scopes = '["auth.authz:check","auth.authz:explain"]' WHERE name='server-test'`)
+	api := &API{Applications: &application.Service{Store: st, HMACKeys: [][]byte{[]byte(strings.Repeat("s", 32))}}, Authorization: authz, Sessions: sessions}
+	mux := http.NewServeMux()
+	api.Register(humago.New(mux, route.HumaConfig("Account assertion", "1")))
+	host := httptest.NewTLSServer(route.Middleware(route.Server, mux))
+	t.Cleanup(host.Close)
+	request := func(operation string, input any, status int, want string) {
+		t.Helper()
+		body, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, host.URL+"/server/v1/authz/"+operation, bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+key)
+		response, err := host.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = response.Body.Close() }()
+		var result json.RawMessage
+		if err := json.NewDecoder(response.Body).Decode(&result); err != nil {
+			t.Fatal(err)
+		}
+		if response.StatusCode != status || !bytes.Contains(result, []byte(want)) {
+			t.Fatalf("%s returned %d %s, want %d containing %s", operation, response.StatusCode, result, status, want)
+		}
+	}
+	check := CheckBody{
+		Subject:  CheckSubject{UserID: accountID},
+		Action:   "self:read",
+		Resource: CheckResource{Type: "member", ID: original.ID, SpaceID: space},
+	}
+	foreign, _, err := authz.CreateSpace(ctx, accountID, "Other Space", "account-assertion-other-space")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request("check", check, http.StatusOK, `"decision":"allow"`)
+	request("batch-check", BatchCheckBody{Requests: []CheckBody{check}}, http.StatusOK, `"decision":"allow"`)
+	request("explain", check, http.StatusOK, `"decision":"allow"`)
+	wrongTarget := check
+	wrongTarget.Resource.SpaceID = foreign.ID
+	request("check", wrongTarget, http.StatusOK, "KEY_SCOPE_EXCLUDED")
+	wrongTarget.Resource.SpaceID = ""
+	request("check", wrongTarget, http.StatusBadRequest, "VALIDATION_FAILED")
+	exec(`UPDATE api_keys SET allow_subject_assertion = false WHERE name='server-test'`)
+	request("check", check, http.StatusBadRequest, "VALIDATION_FAILED")
+	exec(`UPDATE api_keys SET allow_subject_assertion = true WHERE name='server-test'`)
+
+	exec(`INSERT INTO members (id, space_id, name, type) VALUES ($1, $2, 'Second identity', 'human')`, unboundMember, space)
+	exec(`INSERT INTO user_members (user_id, member_id) VALUES ($1, $2)`, accountID, unboundMember)
+	request("check", check, http.StatusNotFound, "SUBJECT_NOT_FOUND")
+	explicit := check
+	explicit.Subject.MemberID = original.ID
+	request("check", explicit, http.StatusOK, `"decision":"allow"`)
+	exec(`UPDATE user_members SET expires_at=clock_timestamp()-interval '1 second' WHERE user_id=$1 AND member_id=$2`, accountID, unboundMember)
+	request("check", check, http.StatusOK, `"decision":"allow"`)
+
+	denied := check
+	denied.Action = "fixture:undeclared"
+	request("check", denied, http.StatusOK, `"decision":"deny"`)
+	var recordedUser, recordedMember, source string
+	if err := st.Pool.QueryRow(ctx, `SELECT user_id, member_id, metadata->>'subject_source'
+		FROM audit_logs WHERE action='authz.check' AND permission_key=$1 AND space_id=$2`,
+		denied.Action, space).Scan(&recordedUser, &recordedMember, &source); err != nil {
+		t.Fatal(err)
+	}
+	if recordedUser != accountID || recordedMember != original.ID || source != "application_assertion" {
+		t.Fatal("the decision audit did not use the resolved identity")
+	}
+	exec(`UPDATE user_members SET status='revoked', revoked_at=clock_timestamp() WHERE user_id=$1 AND member_id=$2`, accountID, original.ID)
+	request("check", check, http.StatusNotFound, "SUBJECT_NOT_FOUND")
+}
+
 func TestAssertedHumanRechecksAccountAfterWaitingForLock(t *testing.T) {
 	st, request, space := assertedHumanFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
