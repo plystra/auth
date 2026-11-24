@@ -550,7 +550,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		filter, err := parseSCIMUserFilter(r.URL.Query().Get("filter"))
+		filter, err := parseSCIMCollectionFilter(r.URL.Query().Get("filter"), "userName")
 		if err != nil {
 			route.WriteSCIMError(w, err)
 			return
@@ -660,7 +660,7 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			writeSCIMResource(w, http.StatusOK, scimGroupResource(group, directoryID, includeMembers))
 			return
 		}
-		filter, err := parseSCIMGroupFilter(r.URL.Query().Get("filter"))
+		filter, err := parseSCIMCollectionFilter(r.URL.Query().Get("filter"), "displayName")
 		if err != nil {
 			route.WriteSCIMError(w, err)
 			return
@@ -1009,51 +1009,51 @@ func scimPagination(r *http.Request) (int32, int32, error) {
 	return int32(max(start, 1)), int32(min(max(count, 0), enterprise.MaxSCIMPageSize)), nil
 }
 
-func parseSCIMUserFilter(raw string) (string, error) {
-	if len(raw) > 512 {
-		return "", apierr.New("invalid_filter", "SCIM filter is too long")
+func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollectionFilter, error) {
+	var filter enterprise.SCIMCollectionFilter
+	// Allow JSON escaping of each byte in a 512-byte external ID.
+	if len(raw) > 4096 {
+		return filter, apierr.New("invalid_filter", "SCIM filter is too long")
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
+	expression := strings.TrimSpace(raw)
+	if expression == "" && len(raw) <= 512 {
+		return filter, nil
 	}
-	const prefix = "userName eq "
-	literal, ok := strings.CutPrefix(raw, prefix)
-	if !ok || !strings.HasPrefix(literal, `"`) {
-		return "", apierr.New("invalid_filter", "only userName eq \"…\" is supported")
-	}
-	var value string
-	if !utf8.ValidString(literal) || json.Unmarshal([]byte(literal), &value) != nil {
-		return "", apierr.New("invalid_filter", "the userName filter is invalid")
-	}
-	value = strings.ToLower(value)
-	if !enterprise.ValidSCIMUserName(value) || strings.ContainsAny(value, `"\`) || strings.ContainsRune(value, utf8.RuneError) {
-		return "", apierr.New("invalid_filter", "the userName filter is invalid")
-	}
-	return value, nil
-}
-
-func parseSCIMGroupFilter(raw string) (string, error) {
-	if len(raw) > 512 {
-		return "", apierr.New("invalid_filter", "SCIM filter is too long")
-	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil
-	}
-	attribute, rest, _ := strings.Cut(raw, " ")
+	attribute, rest, _ := strings.Cut(expression, " ")
 	operator, literal, _ := strings.Cut(strings.TrimLeft(rest, " "), " ")
 	literal = strings.TrimSpace(literal)
-	if !strings.EqualFold(attribute, "displayName") || !strings.EqualFold(operator, "eq") ||
+	external := strings.EqualFold(attribute, "externalId")
+	if (!external && !strings.EqualFold(attribute, nameAttribute)) || !strings.EqualFold(operator, "eq") ||
 		!strings.HasPrefix(literal, `"`) || !utf8.ValidString(literal) {
-		return "", apierr.New("invalid_filter", "only displayName eq \"…\" is supported")
+		return filter, apierr.New("invalid_filter", "only equality on "+nameAttribute+" and externalId is supported")
+	}
+	if !external && len(raw) > 512 {
+		return filter, apierr.New("invalid_filter", "SCIM filter is too long")
 	}
 	var value string
 	if json.Unmarshal([]byte(literal), &value) != nil || strings.TrimSpace(value) == "" ||
-		len(value) > 128 || strings.ContainsFunc(value, unicode.IsControl) || strings.ContainsRune(value, utf8.RuneError) {
-		return "", apierr.New("invalid_filter", "the displayName filter is invalid")
+		strings.ContainsFunc(value, unicode.IsControl) || strings.ContainsRune(value, utf8.RuneError) {
+		return filter, apierr.New("invalid_filter", "the SCIM filter value is invalid")
 	}
-	return value, nil
+	switch {
+	case external:
+		if len(value) > 512 {
+			return filter, apierr.New("invalid_filter", "the externalId filter value is too long")
+		}
+		filter.ExternalID = value
+	case nameAttribute == "userName":
+		value = strings.ToLower(value)
+		if !enterprise.ValidSCIMUserName(value) || strings.ContainsAny(value, `"\`) {
+			return filter, apierr.New("invalid_filter", "the userName filter value is invalid")
+		}
+		filter.Name = value
+	default:
+		if len(value) > 128 {
+			return filter, apierr.New("invalid_filter", "the displayName filter value is too long")
+		}
+		filter.Name = value
+	}
+	return filter, nil
 }
 
 func scimExcludesGroupMembers(query url.Values) bool {

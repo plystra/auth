@@ -63,13 +63,15 @@ SELECT id, directory_id, external_id, user_id, member_id, user_name, display_nam
 FROM directory_users
 WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name))
+  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id))
 ORDER BY id
 LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 
 -- name: CountDirectoryUsers :one
 SELECT count(*)::bigint FROM directory_users
 WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
-  AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name));
+  AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name))
+  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id));
 
 -- name: UpdateDirectoryUser :one
 UPDATE directory_users SET user_name = sqlc.arg(user_name), display_name = sqlc.arg(display_name),
@@ -123,11 +125,13 @@ FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_display_name)::text = '' OR lower(display_name) = lower(sqlc.arg(filter_display_name)))
+  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id))
 ORDER BY id LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 
 -- name: CountDirectoryGroups :one
 SELECT count(*)::bigint FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
-  AND (sqlc.arg(filter_display_name)::text = '' OR lower(display_name) = lower(sqlc.arg(filter_display_name)));
+  AND (sqlc.arg(filter_display_name)::text = '' OR lower(display_name) = lower(sqlc.arg(filter_display_name)))
+  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id));
 
 -- name: UpdateDirectoryGroup :one
 UPDATE directory_groups SET display_name = sqlc.arg(display_name), version = version + 1, updated_at = now()

@@ -47,15 +47,17 @@ func (q *Queries) AddDirectoryManagedGroupMember(ctx context.Context, arg AddDir
 const countDirectoryGroups = `-- name: CountDirectoryGroups :one
 SELECT count(*)::bigint FROM directory_groups WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR lower(display_name) = lower($2))
+  AND ($3::text = '' OR external_id = $3)
 `
 
 type CountDirectoryGroupsParams struct {
 	DirectoryID       string `json:"directory_id"`
 	FilterDisplayName string `json:"filter_display_name"`
+	FilterExternalID  string `json:"filter_external_id"`
 }
 
 func (q *Queries) CountDirectoryGroups(ctx context.Context, arg CountDirectoryGroupsParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countDirectoryGroups, arg.DirectoryID, arg.FilterDisplayName)
+	row := q.db.QueryRow(ctx, countDirectoryGroups, arg.DirectoryID, arg.FilterDisplayName, arg.FilterExternalID)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -65,15 +67,17 @@ const countDirectoryUsers = `-- name: CountDirectoryUsers :one
 SELECT count(*)::bigint FROM directory_users
 WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR user_name = $2)
+  AND ($3::text = '' OR external_id = $3)
 `
 
 type CountDirectoryUsersParams struct {
-	DirectoryID    string `json:"directory_id"`
-	FilterUserName string `json:"filter_user_name"`
+	DirectoryID      string `json:"directory_id"`
+	FilterUserName   string `json:"filter_user_name"`
+	FilterExternalID string `json:"filter_external_id"`
 }
 
 func (q *Queries) CountDirectoryUsers(ctx context.Context, arg CountDirectoryUsersParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countDirectoryUsers, arg.DirectoryID, arg.FilterUserName)
+	row := q.db.QueryRow(ctx, countDirectoryUsers, arg.DirectoryID, arg.FilterUserName, arg.FilterExternalID)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -811,12 +815,14 @@ const listDirectoryGroups = `-- name: ListDirectoryGroups :many
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR lower(display_name) = lower($2))
-ORDER BY id LIMIT $4 OFFSET $3
+  AND ($3::text = '' OR external_id = $3)
+ORDER BY id LIMIT $5 OFFSET $4
 `
 
 type ListDirectoryGroupsParams struct {
 	DirectoryID       string `json:"directory_id"`
 	FilterDisplayName string `json:"filter_display_name"`
+	FilterExternalID  string `json:"filter_external_id"`
 	OffsetCount       int32  `json:"offset_count"`
 	LimitCount        int32  `json:"limit_count"`
 }
@@ -825,6 +831,7 @@ func (q *Queries) ListDirectoryGroups(ctx context.Context, arg ListDirectoryGrou
 	rows, err := q.db.Query(ctx, listDirectoryGroups,
 		arg.DirectoryID,
 		arg.FilterDisplayName,
+		arg.FilterExternalID,
 		arg.OffsetCount,
 		arg.LimitCount,
 	)
@@ -861,21 +868,24 @@ SELECT id, directory_id, external_id, user_id, member_id, user_name, display_nam
 FROM directory_users
 WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR user_name = $2)
+  AND ($3::text = '' OR external_id = $3)
 ORDER BY id
-LIMIT $4 OFFSET $3
+LIMIT $5 OFFSET $4
 `
 
 type ListDirectoryUsersParams struct {
-	DirectoryID    string `json:"directory_id"`
-	FilterUserName string `json:"filter_user_name"`
-	OffsetCount    int32  `json:"offset_count"`
-	LimitCount     int32  `json:"limit_count"`
+	DirectoryID      string `json:"directory_id"`
+	FilterUserName   string `json:"filter_user_name"`
+	FilterExternalID string `json:"filter_external_id"`
+	OffsetCount      int32  `json:"offset_count"`
+	LimitCount       int32  `json:"limit_count"`
 }
 
 func (q *Queries) ListDirectoryUsers(ctx context.Context, arg ListDirectoryUsersParams) ([]DirectoryUser, error) {
 	rows, err := q.db.Query(ctx, listDirectoryUsers,
 		arg.DirectoryID,
 		arg.FilterUserName,
+		arg.FilterExternalID,
 		arg.OffsetCount,
 		arg.LimitCount,
 	)

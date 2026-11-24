@@ -70,7 +70,7 @@ func (s *Service) CreateSCIMGroup(ctx context.Context, directoryID string, token
 	return out, normalizeSCIMError(err)
 }
 
-func (s *Service) ListSCIMGroups(ctx context.Context, directoryID string, token secret.String, displayName string, includeMembers bool, startIndex, count int32) ([]SCIMGroup, int64, error) {
+func (s *Service) ListSCIMGroups(ctx context.Context, directoryID string, token secret.String, filter SCIMCollectionFilter, includeMembers bool, startIndex, count int32) ([]SCIMGroup, int64, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return nil, 0, err
@@ -82,12 +82,15 @@ func (s *Service) ListSCIMGroups(ctx context.Context, directoryID string, token 
 	var total int64
 	err = s.withDirectoryTx(ctx, directory, token, false, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
 		rows, err := q.ListDirectoryGroups(ctx, db.ListDirectoryGroupsParams{
-			DirectoryID: directory.ID, FilterDisplayName: displayName, OffsetCount: startIndex - 1, LimitCount: count,
+			DirectoryID: directory.ID, FilterDisplayName: filter.Name, FilterExternalID: filter.ExternalID,
+			OffsetCount: startIndex - 1, LimitCount: count,
 		})
 		if err != nil {
 			return err
 		}
-		total, err = q.CountDirectoryGroups(ctx, db.CountDirectoryGroupsParams{DirectoryID: directory.ID, FilterDisplayName: displayName})
+		total, err = q.CountDirectoryGroups(ctx, db.CountDirectoryGroupsParams{
+			DirectoryID: directory.ID, FilterDisplayName: filter.Name, FilterExternalID: filter.ExternalID,
+		})
 		if err != nil {
 			return err
 		}

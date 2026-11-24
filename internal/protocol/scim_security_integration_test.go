@@ -298,6 +298,86 @@ func TestSCIMUserTombstoneAndInitialInactiveState(t *testing.T) {
 	}
 }
 
+func TestSCIMExternalIDLookupSupportsVersionedLifecycleInEachDirectory(t *testing.T) {
+	f := newSCIMFixture(t)
+	other := f
+	var err error
+	other.directory, err = f.service.CreateDirectory(f.ctx, f.owner.ID, f.owner.SpaceID, enterprise.DirectoryInput{Name: "Partners"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const externalID = "Identity-42"
+	for _, collection := range []string{"Users", "Groups"} {
+		t.Run(collection, func(t *testing.T) {
+			create := func(dir scimFixture, name string) scimTestResource {
+				t.Helper()
+				body := map[string]any{"externalId": externalID, "displayName": name}
+				if collection == "Users" {
+					body["userName"] = name + "@scim.test"
+				}
+				request, err := json.Marshal(body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return scimResource(t, dir.request(t, http.MethodPost, collection, string(request), "", http.StatusCreated))
+			}
+			lookup := func(dir scimFixture, value, parameters string, wantTotal int) []scimTestResource {
+				t.Helper()
+				path := collection + "?filter=" + url.QueryEscape(value) + parameters
+				response := dir.request(t, http.MethodGet, path, "", "", http.StatusOK)
+				var result struct {
+					Total     int                `json:"totalResults"`
+					Resources []scimTestResource `json:"Resources"`
+				}
+				if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+					t.Fatal(err)
+				}
+				if result.Total != wantTotal || result.Resources == nil || len(result.Resources) > result.Total {
+					t.Fatalf("unexpected collection total: got %d, want %d", result.Total, wantTotal)
+				}
+				return result.Resources
+			}
+			// The first SCIM group becomes the Space's root. Keep it in the
+			// other directory so deleting the local leaf leaves it intact.
+			foreign, local := create(other, "contractor"), create(f, "employee")
+			const expression = `ExternalID EQ "Identity\u002d42"`
+			first := lookup(f, expression, "", 1)
+			second := lookup(other, expression, "", 1)
+			if len(first) != 1 || first[0].ID != local.ID || first[0].Meta.Version != local.Meta.Version ||
+				len(second) != 1 || second[0].ID != foreign.ID {
+				t.Fatal("lookup did not bind each result and its version to its own directory")
+			}
+			if rows := lookup(f, expression, "&count=0", 1); len(rows) != 0 {
+				t.Fatal("count-only query returned resources")
+			}
+			lookup(f, `externalId eq "identity-42"`, "", 0)
+			lookup(f, `externalId eq " Identity-42"`, "", 0)
+			for _, invalid := range []string{`externalId eq ""`, `externalId eq "wrong" or externalId eq "Identity-42"`} {
+				response := f.request(t, http.MethodGet, collection+"?filter="+url.QueryEscape(invalid), "", "", http.StatusBadRequest)
+				if !strings.Contains(response.Body.String(), `"scimType":"invalidFilter"`) {
+					t.Fatal("malformed filter did not return invalidFilter")
+				}
+			}
+			field, value := "displayName", any("Renamed")
+			if collection == "Users" {
+				field, value = "active", false
+			}
+			path := collection + "/" + first[0].ID
+			updated := scimResource(t, f.request(t, http.MethodPatch, path,
+				scimPatch(map[string]any{"op": "replace", "path": field, "value": value}),
+				first[0].Meta.Version, http.StatusOK))
+			after := lookup(f, expression, "", 1)
+			if len(after) != 1 || after[0].Meta.Version != updated.Meta.Version || updated.Meta.Version == local.Meta.Version ||
+				collection == "Users" && after[0].Active || collection == "Groups" && after[0].DisplayName != "Renamed" {
+				t.Fatal("lookup did not expose the updated resource and version")
+			}
+			f.request(t, http.MethodDelete, path, "", after[0].Meta.Version, http.StatusNoContent)
+			lookup(f, expression, "", 0)
+			lookup(other, expression, "", 1)
+		})
+	}
+}
+
 func TestSCIMGroupPatchPreservesMembersAndManualSources(t *testing.T) {
 	f := newSCIMFixture(t)
 	u1, u2 := f.user(t, "alice", true), f.user(t, "bob", true)

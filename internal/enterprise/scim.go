@@ -55,6 +55,11 @@ type SCIMGroup struct {
 	UpdatedAt   time.Time
 }
 
+type SCIMCollectionFilter struct {
+	Name       string
+	ExternalID string
+}
+
 func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token secret.String, in SCIMUserInput) (SCIMUser, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
@@ -130,7 +135,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 	return out, nil
 }
 
-func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token secret.String, filter string, startIndex, count int32) ([]SCIMUser, int64, error) {
+func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token secret.String, filter SCIMCollectionFilter, startIndex, count int32) ([]SCIMUser, int64, error) {
 	directory, err := s.authenticateDirectory(ctx, directoryID, token)
 	if err != nil {
 		return nil, 0, err
@@ -141,11 +146,16 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 	users := []SCIMUser{}
 	var total int64
 	err = s.withDirectoryTx(ctx, directory, token, false, func(ctx context.Context, q *db.Queries, _ db.Directory) error {
-		rows, e := q.ListDirectoryUsers(ctx, db.ListDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter, OffsetCount: startIndex - 1, LimitCount: count})
+		rows, e := q.ListDirectoryUsers(ctx, db.ListDirectoryUsersParams{
+			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID,
+			OffsetCount: startIndex - 1, LimitCount: count,
+		})
 		if e != nil {
 			return e
 		}
-		total, e = q.CountDirectoryUsers(ctx, db.CountDirectoryUsersParams{DirectoryID: directory.ID, FilterUserName: filter})
+		total, e = q.CountDirectoryUsers(ctx, db.CountDirectoryUsersParams{
+			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID,
+		})
 		if e != nil {
 			return e
 		}
