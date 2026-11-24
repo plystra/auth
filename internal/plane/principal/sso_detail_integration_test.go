@@ -100,14 +100,15 @@ func TestSSOConnectionDetailScopesAndProtectsConfiguration(t *testing.T) {
 	}
 	checkPublic := func(t *testing.T, out response) {
 		t.Helper()
-		keys := []string{"id", "space_id", "name", "provider", "issuer", "client_id", "redirect_uri", "groups_claim", "role_mappings", "covers_subtree", "status", "created_at", "updated_at"}
+		keys := []string{"id", "space_id", "name", "provider", "issuer", "client_id", "token_endpoint_auth_method", "redirect_uri", "groups_claim", "role_mappings", "covers_subtree", "status", "created_at", "updated_at"}
 		for key := range out.Data {
 			if !slices.Contains(keys, key) {
 				t.Fatalf("non-public connection field %q", key)
 			}
 		}
 		if len(out.Data) != len(keys) || string(out.Data["id"]) != `"`+connection.ID+`"` || string(out.Data["space_id"]) != `"`+spaceID+`"` ||
-			string(out.Data["groups_claim"]) != `"teams"` || string(out.Data["covers_subtree"]) != "true" || string(out.Data["role_mappings"]) != "{}" {
+			string(out.Data["groups_claim"]) != `"teams"` || string(out.Data["covers_subtree"]) != "true" || string(out.Data["role_mappings"]) != "{}" ||
+			string(out.Data["token_endpoint_auth_method"]) != `"client_secret_basic"` {
 			t.Fatal("detail did not return the expected public connection configuration")
 		}
 	}
