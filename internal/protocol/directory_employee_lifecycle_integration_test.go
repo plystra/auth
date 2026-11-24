@@ -22,7 +22,9 @@ import (
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
+	"github.com/plystra/auth/internal/store"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -34,13 +36,38 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	sessions.SpaceSignInPolicy = enterpriseSvc
 	enterpriseSvc.StepUp = sessions
 	accounts := &account.Service{Store: st, Passwords: enterpriseSvc.Passwords, Sessions: sessions, Authorization: authz, SignInPolicy: enterpriseSvc}
-	mux := http.NewServeMux()
-	(&principal.API{Accounts: accounts, Authorization: authz, Sessions: sessions, Signer: sessions.Signer, Enterprise: enterpriseSvc}).Register(
-		humago.New(mux, route.HumaConfig("Enterprise employee lifecycle", "1.0.0")))
-	(HTTP{Enterprise: enterpriseSvc}).Register(mux)
-	httpServer := httptest.NewServer(route.Middleware(route.Principal, mux))
-	t.Cleanup(httpServer.Close)
-	client := employeeLifecycleClient{server: httpServer}
+	client := startEmployeeLifecycleEndpoint(t, accounts, enterpriseSvc)
+
+	peerStore, err := store.Open(ctx, st.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal("open the peer's database pool")
+	}
+	t.Cleanup(peerStore.Close)
+	wrappingKey := bytes.Repeat([]byte{17}, 32)
+	issuer := sessions.Signer.Issuer()
+	if _, err := st.InitializeSigningKeys(ctx, sessions.Signer, wrappingKey); err != nil {
+		t.Fatal(err)
+	}
+	loadSigner := func(ctx context.Context, q *db.Queries) (*security.Signer, error) {
+		return store.LoadSigningKeys(ctx, q, issuer, wrappingKey)
+	}
+	peerSigner, err := loadSigner(ctx, peerStore.Queries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.LoadSigner = loadSigner
+	peerAuthz := &authorization.Service{Store: peerStore}
+	peerSessions := &session.Service{
+		Store: peerStore, Signer: peerSigner, LoadSigner: loadSigner, HMACKeys: sessions.HMACKeys, Settings: sessions.Settings,
+	}
+	peerSSO := &enterprise.Service{
+		Store: peerStore, Authorization: peerAuthz, Sessions: peerSessions, StepUp: peerSessions,
+		DataKey: enterpriseSvc.DataKey, Passwords: enterpriseSvc.Passwords, HTTPClient: provider.server.Client(),
+	}
+	peerSessions.SpaceSignInPolicy = peerSSO
+	peer := startEmployeeLifecycleEndpoint(t, &account.Service{
+		Store: peerStore, Passwords: peerSSO.Passwords, Sessions: peerSessions, Authorization: peerAuthz, SignInPolicy: peerSSO,
+	}, peerSSO)
 
 	const adminID = "usr_sso_http_owner"
 	admin, err := sessions.CreateForMember(ctx, adminID, owner.ID, nil, "workforce fixture", 1)
@@ -116,7 +143,7 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 		}
 		provider.addCode(start.State, oidcTestCode{nonce: authorizationURL.Query().Get("nonce"), subject: "employee-oidc-subject",
 			email: "employee-upstream@example.test", emailVerified: true, extra: map[string]any{"oid": externalID}})
-		return client.send(t, http.MethodPost, path+"/callback", "", "application/json", "",
+		return peer.send(t, http.MethodPost, path+"/callback", "", "application/json", "",
 			map[string]string{"state": start.State, "code": start.State, "redirect_uri": connection.RedirectURI})
 	}
 	result := employeeLifecycleData[account.AuthResult](t, login())
@@ -139,12 +166,12 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	}
 	refresh := func(tokens session.Tokens, memberID string) employeeLifecycleResponse {
 		t.Helper()
-		return client.send(t, http.MethodPost, "/v1/auth/refresh", "", "application/json", "",
+		return peer.send(t, http.MethodPost, "/v1/auth/refresh", "", "application/json", "",
 			map[string]string{"refresh_token": tokens.RefreshToken, "member_id": memberID})
 	}
 	members := func(tokens session.Tokens) employeeLifecycleResponse {
 		t.Helper()
-		return client.send(t, http.MethodGet, "/v1/me/members", tokens.AccessToken, "", "", nil)
+		return peer.send(t, http.MethodGet, "/v1/me/members", tokens.AccessToken, "", "", nil)
 	}
 	assertBoundSession(initial, initialClaims.MemberID, "oidc")
 	initialMembers := employeeLifecycleData[[]authorization.Member](t, members(initial))
@@ -263,6 +290,7 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	}
 	switched := employeeLifecycleData[session.Tokens](t, refresh(*second.Tokens, otherMember.ID))
 	assertBoundSession(switched, otherMember.ID, "oidc")
+	members(*third.Tokens).requireStatus(t, http.StatusOK)
 	members(switched).requireStatus(t, http.StatusOK)
 
 	suspendedVersion := updateActive(false, provisioned.etag)
@@ -307,6 +335,19 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	members(*fresh.Tokens).requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
 	refresh(*fresh.Tokens, "").requireError(t, http.StatusForbidden, "PERMISSION_DENIED")
 	members(retained).requireStatus(t, http.StatusOK)
+}
+
+func startEmployeeLifecycleEndpoint(t *testing.T, accounts *account.Service, enterpriseSvc *enterprise.Service) employeeLifecycleClient {
+	t.Helper()
+	mux := http.NewServeMux()
+	sessions := enterpriseSvc.Sessions
+	(&principal.API{
+		Accounts: accounts, Authorization: enterpriseSvc.Authorization, Sessions: sessions, Signer: sessions.Signer, Enterprise: enterpriseSvc,
+	}).Register(humago.New(mux, route.HumaConfig("Enterprise employee lifecycle", "1.0.0")))
+	(HTTP{Enterprise: enterpriseSvc}).Register(mux)
+	host := httptest.NewTLSServer(route.Middleware(route.Principal, mux))
+	t.Cleanup(host.Close)
+	return employeeLifecycleClient{server: host}
 }
 
 type employeeDomainResolver struct{ verificationToken string }
