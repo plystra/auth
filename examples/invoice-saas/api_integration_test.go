@@ -259,7 +259,7 @@ func TestInvoiceSaaSPostgresAndHTTP(t *testing.T) {
 	})
 	t.Run("CLIUsesIndependentDatabase", func(t *testing.T) {
 		binary := filepath.Join(t.TempDir(), "invoice-saas.exe")
-		build := exec.CommandContext(ctx, "go", "build", "-o", binary, "./cmd/invoice-saas")
+		build := exec.CommandContext(ctx, "go", "build", "-buildvcs=false", "-o", binary, "./cmd/invoice-saas")
 		if output, err := build.CombinedOutput(); err != nil {
 			t.Fatalf("build SaaS CLI: %v\n%s", err, output)
 		}
