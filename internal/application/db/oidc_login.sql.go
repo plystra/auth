@@ -83,25 +83,26 @@ func (q *Queries) BindOIDCBrowserSession(ctx context.Context, arg BindOIDCBrowse
 const createOIDCLoginRequest = `-- name: CreateOIDCLoginRequest :one
 INSERT INTO oidc_login_requests (
     id, request_hash, application_id, application_generation, redirect_uri, scope,
-    state, nonce, code_challenge, browser_bound, expires_at
+    state, nonce, code_challenge, browser_bound, max_authentication_age, expires_at
 ) VALUES (
     $1, $2, $3, $4,
     $5, $6, $7, $8,
-    $9, $10, clock_timestamp() + interval '5 minutes'
+    $9, $10, $11, clock_timestamp() + interval '5 minutes'
 ) RETURNING expires_at
 `
 
 type CreateOIDCLoginRequestParams struct {
-	ID                    string `json:"id"`
-	RequestHash           []byte `json:"request_hash"`
-	ApplicationID         string `json:"application_id"`
-	ApplicationGeneration int64  `json:"application_generation"`
-	RedirectUri           string `json:"redirect_uri"`
-	Scope                 string `json:"scope"`
-	State                 string `json:"state"`
-	Nonce                 string `json:"nonce"`
-	CodeChallenge         string `json:"code_challenge"`
-	BrowserBound          bool   `json:"browser_bound"`
+	ID                    string      `json:"id"`
+	RequestHash           []byte      `json:"request_hash"`
+	ApplicationID         string      `json:"application_id"`
+	ApplicationGeneration int64       `json:"application_generation"`
+	RedirectUri           string      `json:"redirect_uri"`
+	Scope                 string      `json:"scope"`
+	State                 string      `json:"state"`
+	Nonce                 string      `json:"nonce"`
+	CodeChallenge         string      `json:"code_challenge"`
+	BrowserBound          bool        `json:"browser_bound"`
+	MaxAuthenticationAge  pgtype.Int4 `json:"max_authentication_age"`
 }
 
 func (q *Queries) CreateOIDCLoginRequest(ctx context.Context, arg CreateOIDCLoginRequestParams) (pgtype.Timestamptz, error) {
@@ -116,6 +117,7 @@ func (q *Queries) CreateOIDCLoginRequest(ctx context.Context, arg CreateOIDCLogi
 		arg.Nonce,
 		arg.CodeChallenge,
 		arg.BrowserBound,
+		arg.MaxAuthenticationAge,
 	)
 	var expires_at pgtype.Timestamptz
 	err := row.Scan(&expires_at)
@@ -146,7 +148,7 @@ WHERE request_hash = $2 AND application_id = $3
     AND application_generation = $4
     AND browser_bound = $5
     AND status = 'pending' AND expires_at > clock_timestamp()
-RETURNING id, redirect_uri, state, scope, expires_at
+RETURNING id, redirect_uri, state, scope, expires_at, created_at, max_authentication_age
 `
 
 type FinishOIDCLoginRequestParams struct {
@@ -158,11 +160,13 @@ type FinishOIDCLoginRequestParams struct {
 }
 
 type FinishOIDCLoginRequestRow struct {
-	ID          string             `json:"id"`
-	RedirectUri string             `json:"redirect_uri"`
-	State       string             `json:"state"`
-	Scope       string             `json:"scope"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID                   string             `json:"id"`
+	RedirectUri          string             `json:"redirect_uri"`
+	State                string             `json:"state"`
+	Scope                string             `json:"scope"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	MaxAuthenticationAge pgtype.Int4        `json:"max_authentication_age"`
 }
 
 func (q *Queries) FinishOIDCLoginRequest(ctx context.Context, arg FinishOIDCLoginRequestParams) (FinishOIDCLoginRequestRow, error) {
@@ -180,12 +184,38 @@ func (q *Queries) FinishOIDCLoginRequest(ctx context.Context, arg FinishOIDCLogi
 		&i.State,
 		&i.Scope,
 		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.MaxAuthenticationAge,
 	)
+	return i, err
+}
+
+const getOIDCSessionAuthenticationEvidence = `-- name: GetOIDCSessionAuthenticationEvidence :one
+SELECT authentication_time, session_authentication_time, upstream::boolean AS upstream
+FROM oidc_session_authentication_evidence
+WHERE session_id = $1
+`
+
+type GetOIDCSessionAuthenticationEvidenceParams struct {
+	SessionID string `json:"session_id"`
+}
+
+type GetOIDCSessionAuthenticationEvidenceRow struct {
+	AuthenticationTime        pgtype.Timestamptz `json:"authentication_time"`
+	SessionAuthenticationTime pgtype.Timestamptz `json:"session_authentication_time"`
+	Upstream                  bool               `json:"upstream"`
+}
+
+func (q *Queries) GetOIDCSessionAuthenticationEvidence(ctx context.Context, arg GetOIDCSessionAuthenticationEvidenceParams) (GetOIDCSessionAuthenticationEvidenceRow, error) {
+	row := q.db.QueryRow(ctx, getOIDCSessionAuthenticationEvidence, arg.SessionID)
+	var i GetOIDCSessionAuthenticationEvidenceRow
+	err := row.Scan(&i.AuthenticationTime, &i.SessionAuthenticationTime, &i.Upstream)
 	return i, err
 }
 
 const getPendingOIDCBrowserInteraction = `-- name: GetPendingOIDCBrowserInteraction :one
 SELECT r.id, r.application_id, a.name AS client_name, a.client_id, r.scope, r.expires_at,
+    r.created_at, r.max_authentication_age,
     r.browser_attempt_id, r.browser_session_id,
     COALESCE(sso.connection_id, '')::text AS sso_connection_id,
     COALESCE(attempt.method, '')::text AS sign_in_method,
@@ -206,17 +236,19 @@ type GetPendingOIDCBrowserInteractionParams struct {
 }
 
 type GetPendingOIDCBrowserInteractionRow struct {
-	ID               string             `json:"id"`
-	ApplicationID    string             `json:"application_id"`
-	ClientName       string             `json:"client_name"`
-	ClientID         string             `json:"client_id"`
-	Scope            string             `json:"scope"`
-	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
-	BrowserAttemptID pgtype.Text        `json:"browser_attempt_id"`
-	BrowserSessionID pgtype.Text        `json:"browser_session_id"`
-	SsoConnectionID  string             `json:"sso_connection_id"`
-	SignInMethod     string             `json:"sign_in_method"`
-	NeedsTotp        bool               `json:"needs_totp"`
+	ID                   string             `json:"id"`
+	ApplicationID        string             `json:"application_id"`
+	ClientName           string             `json:"client_name"`
+	ClientID             string             `json:"client_id"`
+	Scope                string             `json:"scope"`
+	ExpiresAt            pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt            pgtype.Timestamptz `json:"created_at"`
+	MaxAuthenticationAge pgtype.Int4        `json:"max_authentication_age"`
+	BrowserAttemptID     pgtype.Text        `json:"browser_attempt_id"`
+	BrowserSessionID     pgtype.Text        `json:"browser_session_id"`
+	SsoConnectionID      string             `json:"sso_connection_id"`
+	SignInMethod         string             `json:"sign_in_method"`
+	NeedsTotp            bool               `json:"needs_totp"`
 }
 
 func (q *Queries) GetPendingOIDCBrowserInteraction(ctx context.Context, arg GetPendingOIDCBrowserInteractionParams) (GetPendingOIDCBrowserInteractionRow, error) {
@@ -229,6 +261,8 @@ func (q *Queries) GetPendingOIDCBrowserInteraction(ctx context.Context, arg GetP
 		&i.ClientID,
 		&i.Scope,
 		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.MaxAuthenticationAge,
 		&i.BrowserAttemptID,
 		&i.BrowserSessionID,
 		&i.SsoConnectionID,

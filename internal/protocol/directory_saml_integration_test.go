@@ -554,6 +554,11 @@ func signedSAMLTestResponse(t *testing.T, signing *dsig.SigningContext, connecti
 
 func signedSAMLTestResponseForAudience(t *testing.T, signing *dsig.SigningContext, recipient, audience, requestID, subject string, attributes []samlTestAttribute, tamper bool) string {
 	t.Helper()
+	return signedSAMLTestResponseAt(t, signing, recipient, audience, requestID, subject, attributes, tamper, samlTestAuthenticationTime)
+}
+
+func signedSAMLTestResponseAt(t *testing.T, signing *dsig.SigningContext, recipient, audience, requestID, subject string, attributes []samlTestAttribute, tamper bool, authTime string) string {
+	t.Helper()
 	now := time.Now().UTC()
 	xml := fmt.Sprintf(`<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_response" Version="2.0" IssueInstant="%s" Destination="%s" InResponseTo="%s">
 		<saml:Issuer>https://directory-idp.test/entity</saml:Issuer>
@@ -570,7 +575,7 @@ func signedSAMLTestResponseForAudience(t *testing.T, signing *dsig.SigningContex
 		</saml:Assertion></samlp:Response>`,
 		now.Format(time.RFC3339), recipient, requestID, now.Format(time.RFC3339), recipient, requestID,
 		now.Add(time.Minute).Format(time.RFC3339), now.Add(-time.Minute).Format(time.RFC3339), now.Add(2*time.Minute).Format(time.RFC3339),
-		audience, samlTestAuthenticationTime)
+		audience, authTime)
 	doc := etree.NewDocument()
 	if err := doc.ReadFromString(xml); err != nil {
 		t.Fatal(err)

@@ -129,6 +129,17 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, apierr.New("invalid_scope", "scope must contain OAuth scope tokens separated by a single space"))
 		return
 	}
+	var maxAge *int32
+	if q.Has("max_age") {
+		rawAge := q.Get("max_age")
+		seconds, err := strconv.ParseUint(rawAge, 10, 31)
+		if err != nil || strings.TrimLeft(rawAge, "0123456789") != "" || !containsString(scopes, "openid") {
+			writeErr(w, apierr.New("invalid_request", "max_age must be a nonnegative integer for user sign-in"))
+			return
+		}
+		age := int32(seconds)
+		maxAge = &age
+	}
 	if containsString(scopes, "openid") {
 		if q.Get("resource") != "" {
 			writeErr(w, apierr.New("invalid_target", "user sign-in does not accept a business resource"))
@@ -136,7 +147,7 @@ func (h HTTP) authorize(w http.ResponseWriter, r *http.Request) {
 		}
 		request, err := h.Applications.StartOIDCLogin(r.Context(), application.OIDCLoginRequestInput{
 			ApplicationID: client.ID, ClientID: client.ClientID, RedirectURI: q.Get("redirect_uri"), Scope: scopes,
-			State: q.Get("state"), Nonce: q.Get("nonce"), CodeChallenge: challenge,
+			State: q.Get("state"), Nonce: q.Get("nonce"), CodeChallenge: challenge, MaxAge: maxAge,
 		})
 		if err != nil {
 			writeProtocolErr(w, err)

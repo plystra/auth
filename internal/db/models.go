@@ -483,6 +483,14 @@ type OidcLoginRequest struct {
 	BrowserAttemptID      pgtype.Text        `json:"browser_attempt_id"`
 	BrowserSessionID      pgtype.Text        `json:"browser_session_id"`
 	BrowserSsoStateID     pgtype.Text        `json:"browser_sso_state_id"`
+	MaxAuthenticationAge  pgtype.Int4        `json:"max_authentication_age"`
+}
+
+type OidcSessionAuthenticationEvidence struct {
+	SessionID                 string             `json:"session_id"`
+	SessionAuthenticationTime pgtype.Timestamptz `json:"session_authentication_time"`
+	Upstream                  interface{}        `json:"upstream"`
+	AuthenticationTime        pgtype.Timestamptz `json:"authentication_time"`
 }
 
 type OidcUserinfoToken struct {

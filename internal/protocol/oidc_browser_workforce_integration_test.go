@@ -45,7 +45,7 @@ func workforceBrowser(t *testing.T) (*humanRP, oidcBrowser, *oidcTestProvider, e
 	return rp, newOIDCBrowser(t, rp), upstream, connection
 }
 
-func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTestProvider, connection enterprise.Connection, path string, extra map[string]any) map[string]string {
+func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTestProvider, connection enterprise.Connection, path string, extra map[string]any, maxAge ...string) map[string]string {
 	t.Helper()
 	identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": "password"}, browser.rp.host.URL, "", http.StatusOK)
 	if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
@@ -59,6 +59,9 @@ func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTest
 	if query.Get("client_id") != "workforce-client" || query.Get("redirect_uri") != connection.RedirectURI ||
 		query.Get("code_challenge_method") != "S256" || query.Get("state") == "" || query.Get("nonce") == "" || query.Get("code_challenge") == "" {
 		t.Fatal("the upstream request did not bind the callback, state, nonce and PKCE")
+	}
+	if len(maxAge) != 0 && (len(query["max_age"]) != 1 || query.Get("max_age") != maxAge[0]) {
+		t.Fatal("the IdP did not receive the requested authentication lifetime")
 	}
 	code := oauth2.GenerateVerifier()
 	upstream.addCode(code, oidcTestCode{
@@ -78,9 +81,9 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
-	path, _ := browser.begin(t, verifier, state, nonce)
+	path := browser.beginFromAuthorization(t, verifier, state, nonce, oauth2.SetAuthURLParam("max_age", "7200"))
 	authenticatedAt := time.Now().Add(-time.Hour).Unix()
-	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path, map[string]any{"auth_time": authenticatedAt})
+	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path, map[string]any{"auth_time": authenticatedAt}, "7200")
 	read, _ := browser.request(t, http.MethodGet, path, nil, "", "", http.StatusOK)
 	if read.NextStep != "sso" || read.SSOConnectionID != connection.ID || read.AuthorizationURL != "" {
 		t.Fatal("the interaction did not retain the pending upstream step")
@@ -148,6 +151,34 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT count(*) FROM audit_logs WHERE action='auth.sso.login'
 		AND actor_id=$1 AND user_id=$2 AND outcome='success'`, connection.ID, identity.Subject).Scan(&audited); err != nil || audited != 1 {
 		t.Fatal("enterprise sign-in was not audited once for the signed-in identity")
+	}
+}
+
+func TestOIDCMaxAgeRejectsUnprovenWorkforceAuthentication(t *testing.T) {
+	rp, browser, upstream, connection := workforceBrowser(t)
+	for _, tc := range []struct {
+		name  string
+		proof map[string]any
+	}{
+		{name: "missing"},
+		{name: "malformed", proof: map[string]any{"auth_time": "not a timestamp"}},
+		{name: "stale", proof: map[string]any{"auth_time": time.Now().Add(-time.Hour).Unix()}},
+		{name: "future", proof: map[string]any{"auth_time": time.Now().Add(time.Hour).Unix()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := browser.beginFromAuthorization(t, oauth2.GenerateVerifier(), "state", "nonce", oauth2.SetAuthURLParam("max_age", "0"))
+			callback := startWorkforceBrowser(t, browser, upstream, connection, path, tc.proof, "0")
+			browser.request(t, http.MethodPost, path+"/sso/complete", callback, rp.host.URL, "", http.StatusBadRequest, "login_required")
+			id := strings.TrimPrefix(path, route.OIDCInteractionsPath+"/")
+			var untouched bool
+			if err := rp.st.Pool.QueryRow(t.Context(), `SELECT r.browser_session_id IS NULL AND s.consumed_at IS NULL
+				AND NOT EXISTS (SELECT 1 FROM sessions WHERE sso_connection_id=$2)
+				AND NOT EXISTS (SELECT 1 FROM external_identities WHERE subject='stable-employee')
+				AND NOT EXISTS (SELECT 1 FROM audit_logs WHERE action='auth.sso.login' AND outcome='success')
+				FROM oidc_login_requests r JOIN sso_states s ON s.id=r.browser_sso_state_id WHERE r.id=$1`, id, connection.ID).Scan(&untouched); err != nil || !untouched {
+				t.Fatal("unproven authentication committed a session, identity, state or success audit")
+			}
+		})
 	}
 }
 

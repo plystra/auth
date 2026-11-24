@@ -35,6 +35,7 @@ type oidcBrowserStartInput struct {
 		Nonce               string `json:"nonce" minLength:"1" maxLength:"1024"`
 		CodeChallenge       string `json:"code_challenge" minLength:"43" maxLength:"43"`
 		CodeChallengeMethod string `json:"code_challenge_method" enum:"S256"`
+		MaxAge              *int32 `json:"max_age,omitempty" minimum:"0" maximum:"2147483647"`
 	}
 }
 
@@ -144,7 +145,7 @@ func (a *API) startOIDCBrowserInteraction(ctx context.Context, in *oidcBrowserSt
 	interaction, err := a.Applications.StartOIDCBrowserLogin(ctx, application.OIDCLoginRequestInput{
 		ApplicationID: client.ID, ClientID: in.Body.ClientID, RedirectURI: in.Body.RedirectURI,
 		Scope: strings.Split(in.Body.Scope, " "), State: in.Body.State, Nonce: in.Body.Nonce,
-		CodeChallenge: in.Body.CodeChallenge,
+		CodeChallenge: in.Body.CodeChallenge, MaxAge: in.Body.MaxAge,
 	})
 	if err != nil {
 		return nil, err
@@ -215,6 +216,7 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 			start, err := a.Enterprise.StartOIDCBrowser(ctx, connection, a.HostedOrigin+"/oidc/upstream",
 				a.HostedOrigin+route.SAMLBrowserCallbackPrefix+connection, enterprise.OIDCBrowserBinding{
 					ID: in.ID, RequestHash: sha256.Sum256([]byte(in.Cookie)), ExpiresAt: interaction.ExpiresAt.Time,
+					MaxAuthenticationAge: interaction.MaxAuthenticationAge,
 				})
 			if err != nil {
 				return nil, err

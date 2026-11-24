@@ -56,7 +56,7 @@ func samlWorkforceFixture(t *testing.T, method string, rollover bool) (*humanRP,
 	return rp, newOIDCBrowser(t, rp), connection, signer
 }
 
-func startSAMLBrowser(t *testing.T, browser oidcBrowser, connection enterprise.Connection, path, method string) (requestID, relay string) {
+func startSAMLBrowser(t *testing.T, browser oidcBrowser, connection enterprise.Connection, path, method string, forceAuthn bool) (requestID, relay string) {
 	t.Helper()
 	out, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": "password"}, browser.rp.host.URL, "", http.StatusOK)
 	target, err := url.Parse(out.AuthorizationURL)
@@ -79,11 +79,12 @@ func startSAMLBrowser(t *testing.T, browser oidcBrowser, connection enterprise.C
 		body = inflated
 	}
 	var request struct {
-		XMLName xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:protocol AuthnRequest"`
-		ID      string   `xml:"ID,attr"`
-		ACS     string   `xml:"AssertionConsumerServiceURL,attr"`
+		XMLName    xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:protocol AuthnRequest"`
+		ID         string   `xml:"ID,attr"`
+		ACS        string   `xml:"AssertionConsumerServiceURL,attr"`
+		ForceAuthn bool     `xml:"ForceAuthn,attr"`
 	}
-	if err := xml.NewDecoder(body).Decode(&request); err != nil || request.ID == "" || request.ACS != connection.RedirectURI {
+	if err := xml.NewDecoder(body).Decode(&request); err != nil || request.ID == "" || request.ACS != connection.RedirectURI || request.ForceAuthn != forceAuthn {
 		t.Fatal("the authentication request was not bound to the registered ACS")
 	}
 	return request.ID, relay
@@ -131,7 +132,7 @@ func TestSAMLWorkforceBrowserReturnsToIndependentRelyingParty(t *testing.T) {
 			}
 			verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
 			path := browser.beginFromAuthorization(t, verifier, state, nonce)
-			requestID, relay := startSAMLBrowser(t, browser, connection, path, method)
+			requestID, relay := startSAMLBrowser(t, browser, connection, path, method, false)
 			payload := signedSAMLTestResponseForAudience(t, signer, connection.RedirectURI, rp.host.URL+"/saml/"+connection.ID, requestID, "saml-workforce", nil, false)
 			if rollover {
 				payload = samlTestWithoutKeyInfo(t, payload)
@@ -210,10 +211,63 @@ func TestSAMLWorkforceBrowserReturnsToIndependentRelyingParty(t *testing.T) {
 	}
 }
 
+func TestOIDCMaxAgeForcesAndVerifiesSAMLAuthentication(t *testing.T) {
+	rp, browser, connection, signer := samlWorkforceFixture(t, http.MethodPost, false)
+	verifier, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+	begin := func(authenticatedAt string) string {
+		t.Helper()
+		path := browser.beginFromAuthorization(t, verifier, oauth2.GenerateVerifier(), nonce, oauth2.SetAuthURLParam("max_age", "0"))
+		requestID, relay := startSAMLBrowser(t, browser, connection, path, http.MethodPost, true)
+		if authenticatedAt == "" {
+			authenticatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+		payload := signedSAMLTestResponseAt(t, signer, connection.RedirectURI, rp.host.URL+"/saml/"+connection.ID,
+			requestID, "saml-workforce", nil, false, authenticatedAt)
+		form := url.Values{"RelayState": {relay}, "SAMLResponse": {payload}}
+		postSAMLBrowserForm(t, rp, connection.RedirectURI, form.Encode(), "application/x-www-form-urlencoded", "", http.StatusSeeOther)
+		return path
+	}
+	stale := begin(samlTestAuthenticationTime)
+	browser.request(t, http.MethodPost, stale+"/sso/saml/complete", nil, rp.host.URL, "", http.StatusBadRequest, "login_required")
+	var untouched bool
+	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT NOT EXISTS (SELECT 1 FROM sessions WHERE sso_connection_id=$1)
+		AND NOT EXISTS (SELECT 1 FROM audit_logs WHERE action='auth.sso.login' AND outcome='success')`, connection.ID).Scan(&untouched); err != nil || !untouched {
+		t.Fatal("stale SAML authentication committed a session or success audit")
+	}
+	path := begin("")
+	// The fixture uses a fixed assertion ID. The fresh retry also requires the stale attempt to leave it unused.
+	browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", http.StatusOK)
+	decision, _ := browser.request(t, http.MethodPost, path+"/decision", map[string]string{"decision": "approve"}, rp.host.URL, "", http.StatusOK)
+	target, err := url.Parse(decision.RedirectTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := oidc.ClientContext(t.Context(), rp.host.Client())
+	tokens, err := rp.config.Exchange(ctx, target.Query().Get("code"), oauth2.VerifierOption(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := tokens.Extra("id_token").(string)
+	identity, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(ctx, raw)
+	if err != nil || identity.Nonce != nonce {
+		t.Fatal("the relying party could not verify the SAML-backed identity")
+	}
+	var claims struct {
+		AuthTime int64 `json:"auth_time"`
+	}
+	var source time.Time
+	if err := rp.st.Pool.QueryRow(t.Context(), "SELECT sso_auth_time FROM sessions WHERE sso_connection_id=$1", connection.ID).Scan(&source); err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.Claims(&claims); err != nil || claims.AuthTime != source.Unix() {
+		t.Fatal("the signed ID Token did not preserve the new SAML authentication time")
+	}
+}
+
 func TestSAMLWorkforceBrowserPreservesStagedResponseOnRollbackAndExpiresIt(t *testing.T) {
 	rp, browser, connection, signer := samlWorkforceFixture(t, http.MethodPost, false)
 	path, _ := browser.begin(t, oauth2.GenerateVerifier(), "saml-state", "saml-nonce")
-	requestID, relay := startSAMLBrowser(t, browser, connection, path, http.MethodPost)
+	requestID, relay := startSAMLBrowser(t, browser, connection, path, http.MethodPost, false)
 	payload := signedSAMLTestResponseForAudience(t, signer, connection.RedirectURI, rp.host.URL+"/saml/"+connection.ID, requestID, "saml-workforce", nil, false)
 	form := url.Values{"RelayState": {relay}, "SAMLResponse": {payload}}.Encode()
 	postSAMLBrowserForm(t, rp, connection.RedirectURI, form, "application/x-www-form-urlencoded", "", http.StatusSeeOther)

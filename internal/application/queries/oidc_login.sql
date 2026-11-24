@@ -1,11 +1,11 @@
 -- name: CreateOIDCLoginRequest :one
 INSERT INTO oidc_login_requests (
     id, request_hash, application_id, application_generation, redirect_uri, scope,
-    state, nonce, code_challenge, browser_bound, expires_at
+    state, nonce, code_challenge, browser_bound, max_authentication_age, expires_at
 ) VALUES (
     sqlc.arg(id), sqlc.arg(request_hash), sqlc.arg(application_id), sqlc.arg(application_generation),
     sqlc.arg(redirect_uri), sqlc.arg(scope), sqlc.arg(state), sqlc.arg(nonce),
-    sqlc.arg(code_challenge), sqlc.arg(browser_bound), clock_timestamp() + interval '5 minutes'
+    sqlc.arg(code_challenge), sqlc.arg(browser_bound), sqlc.narg(max_authentication_age), clock_timestamp() + interval '5 minutes'
 ) RETURNING expires_at;
 
 -- name: FindOIDCLoginRequestClient :one
@@ -27,7 +27,12 @@ WHERE request_hash = sqlc.arg(request_hash) AND application_id = sqlc.arg(applic
     AND application_generation = sqlc.arg(application_generation)
     AND browser_bound = sqlc.arg(browser_bound)
     AND status = 'pending' AND expires_at > clock_timestamp()
-RETURNING id, redirect_uri, state, scope, expires_at;
+RETURNING id, redirect_uri, state, scope, expires_at, created_at, max_authentication_age;
+
+-- name: GetOIDCSessionAuthenticationEvidence :one
+SELECT authentication_time, session_authentication_time, upstream::boolean AS upstream
+FROM oidc_session_authentication_evidence
+WHERE session_id = sqlc.arg(session_id);
 
 -- name: IssueOIDCLoginCode :execrows
 INSERT INTO oidc_login_codes (
@@ -42,6 +47,7 @@ WHERE r.id = sqlc.arg(request_id) AND r.status = 'approved' AND r.expires_at > c
 
 -- name: GetPendingOIDCBrowserInteraction :one
 SELECT r.id, r.application_id, a.name AS client_name, a.client_id, r.scope, r.expires_at,
+    r.created_at, r.max_authentication_age,
     r.browser_attempt_id, r.browser_session_id,
     COALESCE(sso.connection_id, '')::text AS sso_connection_id,
     COALESCE(attempt.method, '')::text AS sign_in_method,

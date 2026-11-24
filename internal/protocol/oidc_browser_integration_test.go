@@ -57,7 +57,7 @@ func newOIDCBrowser(t *testing.T, rp *humanRP) oidcBrowser {
 	return oidcBrowser{rp: rp, client: &http.Client{Transport: rp.host.Client().Transport, Jar: jar, Timeout: 10 * time.Second}}
 }
 
-func (b oidcBrowser) request(t *testing.T, method, path string, payload map[string]string, origin, key string, status int) (interactionResponse, []*http.Cookie) {
+func (b oidcBrowser) request(t *testing.T, method, path string, payload any, origin, key string, status int, wantError ...string) (interactionResponse, []*http.Cookie) {
 	t.Helper()
 	var body []byte
 	if payload != nil {
@@ -89,12 +89,14 @@ func (b oidcBrowser) request(t *testing.T, method, path string, payload map[stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.StatusCode != status {
+	if res.StatusCode != status || len(wantError) != 0 {
 		var failure struct {
 			Error struct{ Code string }
 		}
 		_ = json.Unmarshal(data, &failure)
-		t.Fatalf("%s %s returned HTTP %d (%s), want %d", method, path, res.StatusCode, failure.Error.Code, status)
+		if res.StatusCode != status || failure.Error.Code != wantError[0] {
+			t.Fatalf("%s %s returned HTTP %d (%s), want %d %v", method, path, res.StatusCode, failure.Error.Code, status, wantError)
+		}
 	}
 	if res.Header.Get("Cache-Control") != "no-store" {
 		t.Fatal("interaction response can be cached")
@@ -111,7 +113,7 @@ func (b oidcBrowser) request(t *testing.T, method, path string, payload map[stri
 	return envelope.Data, res.Cookies()
 }
 
-func (b oidcBrowser) requestParameters(t *testing.T, verifier, state, nonce string) map[string]string {
+func (b oidcBrowser) requestParameters(t *testing.T, verifier, state, nonce string) map[string]any {
 	t.Helper()
 	cfg := b.rp.config
 	cfg.Scopes = []string{"openid", "email"}
@@ -119,7 +121,7 @@ func (b oidcBrowser) requestParameters(t *testing.T, verifier, state, nonce stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	params := make(map[string]string)
+	params := make(map[string]any)
 	for name, values := range next.Query() {
 		params[name] = values[0]
 	}
@@ -229,23 +231,36 @@ func TestOIDCBrowserInteractionCompletesAtIndependentHTTPSCallback(t *testing.T)
 	}
 }
 
-func (b oidcBrowser) beginFromAuthorization(t *testing.T, verifier, state, nonce string) string {
+func (b oidcBrowser) beginFromAuthorization(t *testing.T, verifier, state, nonce string, options ...oauth2.AuthCodeOption) string {
+	t.Helper()
+	return b.continueAuthorization(t, b.authorization(t, verifier, state, nonce, options...))
+}
+
+type oidcBrowserAuthorization struct {
+	RequestID string    `json:"request_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (b oidcBrowser) authorization(t *testing.T, verifier, state, nonce string, options ...oauth2.AuthCodeOption) oidcBrowserAuthorization {
 	t.Helper()
 	cfg := b.rp.config
 	cfg.Scopes = []string{"openid", "email"}
-	resp, err := b.client.Get(cfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)))
+	options = append([]oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}, options...)
+	resp, err := b.client.Get(cfg.AuthCodeURL(state, options...))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var authorization struct {
-		RequestID string    `json:"request_id"`
-		ExpiresAt time.Time `json:"expires_at"`
-	}
+	var authorization oidcBrowserAuthorization
 	if resp.StatusCode != http.StatusOK || len(resp.Cookies()) != 0 || json.NewDecoder(resp.Body).Decode(&authorization) != nil ||
 		authorization.RequestID == "" {
 		t.Fatal("the standard authorization endpoint did not create an unbound request")
 	}
+	return authorization
+}
+
+func (b oidcBrowser) continueAuthorization(t *testing.T, authorization oidcBrowserAuthorization) string {
+	t.Helper()
 	body := map[string]string{"request_id": authorization.RequestID}
 	endpoint := route.OIDCInteractionsPath + "/from-authorization"
 	b.request(t, http.MethodPost, endpoint, body, "https://other.example.test", "", http.StatusForbidden)
@@ -266,8 +281,14 @@ func (b oidcBrowser) beginFromAuthorization(t *testing.T, verifier, state, nonce
 	path := route.OIDCInteractionsPath + "/" + current.ID
 	other.request(t, http.MethodGet, path, nil, "", "", http.StatusBadRequest)
 
-	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, cfg.Endpoint.AuthURL,
-		strings.NewReader(`{"decision":"approve","request_id":"`+authorization.RequestID+`"}`))
+	b.approveAuthorization(t, authorization.RequestID, http.StatusBadRequest, "invalid_request")
+	return path
+}
+
+func (b oidcBrowser) approveAuthorization(t *testing.T, requestID string, status int, wantError string) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, b.rp.config.Endpoint.AuthURL,
+		strings.NewReader(`{"decision":"approve","request_id":"`+requestID+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,10 +299,80 @@ func (b oidcBrowser) beginFromAuthorization(t *testing.T, verifier, state, nonce
 		t.Fatal(err)
 	}
 	defer func() { _ = consent.Body.Close() }()
-	if consent.StatusCode != http.StatusBadRequest {
-		t.Fatal("the original request handle still authorized bearer consent")
+	var failure struct {
+		Error struct{ Code string }
 	}
-	return path
+	if consent.StatusCode != status || json.NewDecoder(consent.Body).Decode(&failure) != nil || failure.Error.Code != wantError {
+		t.Fatalf("bearer consent returned HTTP %d (%s), want %d (%s)", consent.StatusCode, failure.Error.Code, status, wantError)
+	}
+}
+
+func TestOIDCMaxAgeRequiresFreshAuthenticationAndPreservesBrowserHandoff(t *testing.T) {
+	rp := newHumanRP(t)
+	browser := newOIDCBrowser(t, rp)
+	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+	request := browser.authorization(t, verifier, state, nonce, oauth2.SetAuthURLParam("max_age", "0"))
+	browser.approveAuthorization(t, request.RequestID, http.StatusBadRequest, "login_required")
+	path := browser.continueAuthorization(t, request)
+	browser.signIn(t, path, false)
+	decision, _ := browser.request(t, http.MethodPost, path+"/decision", map[string]string{"decision": "approve"}, rp.host.URL, "", http.StatusOK)
+	redirect, err := url.Parse(decision.RedirectTo)
+	if err != nil || redirect.Query().Get("state") != state {
+		t.Fatal("reauthentication did not preserve the original relying-party state")
+	}
+	ctx := oidc.ClientContext(t.Context(), rp.host.Client())
+	tokens, err := rp.config.Exchange(ctx, redirect.Query().Get("code"), oauth2.VerifierOption(verifier))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := tokens.Extra("id_token").(string)
+	identity, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(ctx, raw)
+	if err != nil || identity.Nonce != nonce || identity.Subject != "usr_human_rp" {
+		t.Fatal("reauthentication did not issue the expected signed ID Token")
+	}
+	var claims struct {
+		AuthTime int64 `json:"auth_time"`
+	}
+	var requestedAt, authenticatedAt time.Time
+	if err := rp.st.Pool.QueryRow(ctx, `SELECT r.created_at, s.auth_time FROM oidc_login_requests r
+		JOIN sessions s ON s.id=r.browser_session_id WHERE r.id=$1`,
+		strings.TrimPrefix(path, route.OIDCInteractionsPath+"/")).Scan(&requestedAt, &authenticatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.Claims(&claims); err != nil || authenticatedAt.Before(requestedAt) || claims.AuthTime != authenticatedAt.Unix() {
+		t.Fatal("the signed token did not preserve the reauthentication time")
+	}
+}
+
+func TestOIDCMaxAgeValidation(t *testing.T) {
+	rp := newHumanRP(t)
+	browser := newOIDCBrowser(t, rp)
+	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+	cfg := rp.config
+	cfg.Scopes = []string{"openid", "email"}
+	endpoint := cfg.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+	for _, query := range []string{"max_age=", "max_age=-1", "max_age=%2B1", "max_age=0.5", "max_age=2147483648", "max_age=0&max_age=60"} {
+		t.Run(query, func(t *testing.T) {
+			response, err := browser.client.Get(endpoint + "&" + query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = response.Body.Close() }()
+			var failure struct {
+				Error struct{ Code string }
+			}
+			if response.StatusCode != http.StatusBadRequest || json.NewDecoder(response.Body).Decode(&failure) != nil || failure.Error.Code != "invalid_request" {
+				t.Fatalf("invalid authorization query returned HTTP %d (%s)", response.StatusCode, failure.Error.Code)
+			}
+		})
+	}
+	params := browser.requestParameters(t, verifier, state, nonce)
+	params["max_age"] = int32(2147483647)
+	interaction, _ := browser.request(t, http.MethodPost, route.OIDCInteractionsPath, params, rp.host.URL, "", http.StatusCreated)
+	var age int32
+	if err := rp.st.Pool.QueryRow(t.Context(), "SELECT max_authentication_age FROM oidc_login_requests WHERE id=$1", interaction.ID).Scan(&age); err != nil || age != 2147483647 {
+		t.Fatal("direct interaction did not persist the requested max_age")
+	}
 }
 
 func TestOIDCBrowserInteractionIsolatedFromBearerAndCrossOriginRequests(t *testing.T) {

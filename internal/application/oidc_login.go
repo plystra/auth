@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/audit"
 	"github.com/plystra/auth/internal/db"
@@ -32,6 +33,7 @@ type OIDCLoginRequestInput struct {
 	State         string
 	Nonce         string
 	CodeChallenge string
+	MaxAge        *int32
 }
 
 type OIDCLoginRequest struct {
@@ -69,6 +71,13 @@ func (s *Service) startOIDCLogin(ctx context.Context, in OIDCLoginRequestInput, 
 	if err != nil || len(challenge) != sha256.Size || len(in.CodeChallenge) != 43 || in.State == "" || in.Nonce == "" {
 		return OIDCLoginRequest{}, apierr.New("invalid_request", "state, nonce and PKCE S256 are required for user sign-in")
 	}
+	var maxAge pgtype.Int4
+	if in.MaxAge != nil {
+		if *in.MaxAge < 0 {
+			return OIDCLoginRequest{}, apierr.New("invalid_request", "max_age must be nonnegative")
+		}
+		maxAge = pgtype.Int4{Int32: *in.MaxAge, Valid: true}
+	}
 	handle, digest := newOIDCLoginCredential(OIDCLoginRequestPrefix)
 	var request OIDCLoginRequest
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
@@ -84,6 +93,7 @@ func (s *Service) startOIDCLogin(ctx context.Context, in OIDCLoginRequestInput, 
 			ID: requestID, RequestHash: digest, ApplicationID: client.ID, BrowserBound: browserBound,
 			ApplicationGeneration: client.HumanOIDCGeneration, RedirectUri: in.RedirectURI,
 			Scope: strings.Join(scopes, " "), State: in.State, Nonce: in.Nonce, CodeChallenge: in.CodeChallenge,
+			MaxAuthenticationAge: maxAge,
 		})
 		if err != nil {
 			return err
@@ -260,6 +270,17 @@ func (s *Service) decideOIDCLogin(ctx context.Context, sessions *session.Service
 		}
 		params := url.Values{"state": {request.State}}
 		if decision == "approve" {
+			if age := request.MaxAuthenticationAge; age.Valid {
+				evidence, err := q.GetOIDCSessionAuthenticationEvidence(ctx, db.GetOIDCSessionAuthenticationEvidenceParams{SessionID: claims.SessionID})
+				if err != nil {
+					return err
+				}
+				if !evidence.AuthenticationTime.Valid ||
+					(age.Int32 == 0 && evidence.SessionAuthenticationTime.Time.Before(request.CreatedAt.Time)) ||
+					!security.OIDCAuthenticationFreshEnough(evidence.AuthenticationTime.Time, request.CreatedAt.Time, age.Int32, evidence.Upstream, time.Now().UTC()) {
+					return apierr.New("login_required", "authenticate again to approve this sign-in")
+				}
+			}
 			code, digest := newOIDCLoginCredential("olc_")
 			inserted, err := q.IssueOIDCLoginCode(ctx, db.IssueOIDCLoginCodeParams{
 				ID: string(ids.New[ids.ID]("lcd")), CodeHash: digest, UserID: claims.Subject,

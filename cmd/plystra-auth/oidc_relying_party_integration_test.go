@@ -282,13 +282,14 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		}
 		return res.StatusCode
 	}
-	startConsent := func(t *testing.T, config oauth2.Config, state, nonce, verifier string) string {
+	startConsent := func(t *testing.T, config oauth2.Config, state, nonce, verifier string, options ...oauth2.AuthCodeOption) string {
 		t.Helper()
 		var pending struct {
 			Handle string   `json:"request_id"`
 			Scopes []string `json:"scopes"`
 		}
-		authorize := config.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier))
+		options = append([]oauth2.AuthCodeOption{oidc.Nonce(nonce), oauth2.S256ChallengeOption(verifier)}, options...)
+		authorize := config.AuthCodeURL(state, options...)
 		request(t, http.MethodGet, authorize, "", nil, &pending)
 		if pending.Handle == "" || !slices.Equal(pending.Scopes, config.Scopes) {
 			t.Fatal("unexpected disclosure request")
@@ -301,6 +302,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			Tokens struct {
 				Access  string `json:"access_token"`
 				Refresh string `json:"refresh_token"`
+				Session string `json:"session_id"`
 			} `json:"tokens"`
 		} `json:"data"`
 	}
@@ -1306,8 +1308,12 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 
 	t.Run("pending login survives primary process exit", func(t *testing.T) {
 		signedIn = passwordSignIn(t, email, password)
+		var authenticatedAt time.Time
+		if err := st.Pool.QueryRow(ctx, "SELECT auth_time FROM sessions WHERE id=$1", signedIn.Data.Tokens.Session).Scan(&authenticatedAt); err != nil {
+			t.Fatal(err)
+		}
 		pendingState, pendingNonce, pendingVerifier := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
-		pending := startConsent(t, config, pendingState, pendingNonce, pendingVerifier)
+		pending := startConsent(t, config, pendingState, pendingNonce, pendingVerifier, oauth2.SetAuthURLParam("max_age", "3600"))
 		previousAccess, previousRefresh := signedIn.Data.Tokens.Access, signedIn.Data.Tokens.Refresh
 		losePrimary(t)
 		if status := request(t, http.MethodGet, rpTestIssuer+"/v1/me/sessions", previousAccess, nil, nil); status != http.StatusOK {
@@ -1328,6 +1334,12 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		identity, err := provider.Verifier(&verification).Verify(ctx, raw)
 		if err != nil || identity.Subject != subject || identity.Nonce != pendingNonce {
 			t.Fatal("the relying party could not verify the user identity after failover")
+		}
+		var claims struct {
+			AuthTime int64 `json:"auth_time"`
+		}
+		if err := identity.Claims(&claims); err != nil || claims.AuthTime != authenticatedAt.Unix() {
+			t.Fatal("failover and refresh did not preserve the original authentication time")
 		}
 		info, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(credentials))
 		if err != nil || info.Subject != subject || info.Email != email || !info.EmailVerified {

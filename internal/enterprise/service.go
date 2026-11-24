@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -773,9 +774,10 @@ func (s *Service) Start(ctx context.Context, connectionID, requestedRedirectURI 
 
 // OIDCBrowserBinding identifies the pending interaction proved by its original cookie.
 type OIDCBrowserBinding struct {
-	ID          string
-	RequestHash [sha256.Size]byte
-	ExpiresAt   time.Time
+	ID                   string
+	RequestHash          [sha256.Size]byte
+	ExpiresAt            time.Time
+	MaxAuthenticationAge pgtype.Int4
 }
 
 // StartOIDCBrowser starts upstream authentication bound to the original interaction.
@@ -864,6 +866,9 @@ func (s *Service) prepareOIDCRequest(ctx context.Context, row db.SsoConnection, 
 	query.Set("nonce", nonce)
 	query.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
 	query.Set("code_challenge_method", "S256")
+	if browser != nil && browser.MaxAuthenticationAge.Valid {
+		query.Set("max_age", strconv.FormatInt(int64(browser.MaxAuthenticationAge.Int32), 10))
+	}
 	return StartResult{AuthorizationURL: provider.Endpoint().AuthURL + "?" + query.Encode(), State: state, ExpiresAt: expiresAt}, stateRecord, nil
 }
 
@@ -883,6 +888,9 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 	document, err := provider.BuildAuthRequestDocumentNoSig()
 	if err != nil {
 		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+	}
+	if browser != nil && browser.MaxAuthenticationAge.Valid {
+		document.Root().CreateAttr("ForceAuthn", "true")
 	}
 	requestBytes, err := document.WriteToBytes()
 	if err != nil {
@@ -1260,6 +1268,21 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	}
 	var tokens session.Tokens
 	err = s.Store.InTx(ctx, func(q *db.Queries) error {
+		if browser != nil {
+			interaction, err := q.GetPendingOIDCBrowserInteraction(ctx, db.GetPendingOIDCBrowserInteractionParams{
+				ID: browser.ID, RequestHash: browser.RequestHash[:],
+			})
+			if errors.Is(err, pgx.ErrNoRows) {
+				return apierr.New("invalid_grant", "the authentication interaction expired or changed")
+			}
+			if err != nil {
+				return err
+			}
+			if age := interaction.MaxAuthenticationAge; age.Valid &&
+				!security.OIDCAuthenticationFreshEnough(claims.authTime, interaction.CreatedAt.Time, age.Int32, true, time.Now().UTC()) {
+				return apierr.New("login_required", "the upstream authentication does not satisfy max_age")
+			}
+		}
 		plan, err := lockSSOLoginTx(ctx, q, connection, claims, hint)
 		if err != nil {
 			return err
