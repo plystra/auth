@@ -177,7 +177,7 @@ func registerKeycloakSAMLConnection(t *testing.T, rp *humanRP, upstream *http.Cl
 		t.Fatal("Auth did not export metadata for the selected SAML connection")
 	}
 	return registerKeycloakSAMLClient(t, upstream, issuer, password, detail.SAMLSPMetadata,
-		rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
+		rp.workforce.Issuer+"/saml/"+connection.ID, connection.RedirectURI)
 }
 
 func fetchKeycloakSAMLMetadata(t *testing.T, client *http.Client, issuer string) string {

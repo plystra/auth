@@ -269,6 +269,10 @@ func TestKeycloakDirectoryEmployeeCompletesAfterIssuerProcessExit(t *testing.T) 
 	testKeycloakDirectoryEmployee(t, "oidc", true)
 }
 
+func TestKeycloakSAMLDirectoryEmployeeCompletesAfterIssuerProcessExit(t *testing.T) {
+	testKeycloakDirectoryEmployee(t, "saml", true)
+}
+
 func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailover bool) {
 	t.Helper()
 	upstream := &http.Client{Timeout: 15 * time.Second,
@@ -276,13 +280,14 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 	rp := newHumanRPWithWorkforce(t, false, upstream)
 	var processProxy *workforceProcessProxy
 	var upstreamHost string
+	publicOrigin := rp.host.URL
 	if processFailover {
 		processProxy = newWorkforceProcessProxy(t)
-		rp.host = processProxy.front
-		rp.workforce.Issuer = rp.host.URL
+		publicOrigin = processProxy.front.URL
+		rp.workforce.Issuer = publicOrigin
 		upstreamHost = workforceUpstreamHost
 	}
-	callback := rp.host.URL + "/oidc/upstream"
+	callback := publicOrigin + "/oidc/upstream"
 	adminPassword := oauth2.GenerateVerifier()
 	idp := startKeycloakFixture(t, callback, upstreamHost, testcontainers.WithEnv(map[string]string{
 		"KC_BOOTSTRAP_ADMIN_USERNAME": keycloakFixtureAdmin,
@@ -313,7 +318,7 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 		input = enterprise.ConnectionInput{
 			Name: "Workforce Keycloak SAML", Provider: "saml",
 			SAMLMetadata: fetchKeycloakSAMLMetadata(t, upstream, issuer),
-			RedirectURI:  rp.host.URL + route.SAMLBrowserCallbackPrefix + "{connection_id}",
+			RedirectURI:  publicOrigin + route.SAMLBrowserCallbackPrefix + "{connection_id}",
 		}
 		claim = keycloakSAMLDirectoryClaim
 	}
@@ -348,6 +353,7 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 	}
 	var exitPrimary func()
 	if processProxy != nil {
+		rp.host = processProxy.front
 		exitPrimary = processProxy.start(t, rp, idp)
 	}
 
@@ -395,7 +401,19 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 		var loggedIn interactionResponse
 		if provider == "saml" {
 			keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, path, identified)
+			// The cross-site ACS has staged the assertion. Only the original browser
+			// may finish the interaction after the staging process exits.
+			failedOver := exitPrimary != nil
+			if failedOver {
+				exitPrimary()
+				exitPrimary = nil
+				foreign := oidcBrowser{rp: rp, client: rp.host.Client()}
+				foreign.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", http.StatusBadRequest)
+			}
 			loggedIn, _ = browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", status)
+			if failedOver {
+				browser.request(t, http.MethodPost, path+"/sso/saml/complete", nil, rp.host.URL, "", http.StatusBadRequest)
+			}
 		} else {
 			returned := keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, "original")
 			payload := map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}
