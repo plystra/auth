@@ -125,7 +125,11 @@ func serveIdempotent(w http.ResponseWriter, r *http.Request, next http.Handler, 
 		_ = r.Body.Close()
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
-	requestHash := sha256.Sum256([]byte(r.Method + "\x00" + r.URL.RequestURI() + "\x00" + string(body)))
+	requestPrefix := r.Method + "\x00" + r.URL.RequestURI() + "\x00"
+	if SCIMDirectoryID(r.Context()) != "" {
+		requestPrefix += r.Header.Get("If-Match") + "\x00"
+	}
+	requestHash := sha256.Sum256([]byte(requestPrefix + string(body)))
 	scopeHash := sha256.Sum256([]byte(string(plane) + "\x00" + requestScope(r)))
 	tx, err := manager.BeginIdempotency(r.Context())
 	if err != nil {
@@ -257,6 +261,10 @@ func copyHeader(destination, source http.Header) {
 
 func writeIdempotencyError(w http.ResponseWriter, ctx context.Context, code, message string, status int) {
 	err := apierr.WithStatus(apierr.New(code, message), status)
+	if SCIMDirectoryID(ctx) != "" {
+		WriteSCIMError(w, err)
+		return
+	}
 	err = apierr.WithRequestID(err, requestinfo.Get(ctx).ID)
 	apierr.Write(w, err)
 }

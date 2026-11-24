@@ -322,11 +322,9 @@ func serve(ctx context.Context) error {
 		Principal: credential.PrincipalParser{Sessions: sessionSvc, Agents: agentSvc},
 		Server:    credential.ServerParser{Applications: apps},
 		Ops:       credential.OpsParser{Operators: opsSvc},
+		Directory: enterpriseSvc,
 	}
 	validateCredential := func(ctx context.Context, plane, raw string) error {
-		if strings.TrimSpace(raw) == "" {
-			return nil
-		}
 		err := parsers.Validate(ctx, plane, raw)
 		if err != nil && credential.Kind(raw) == "application_api_key" && (plane == string(route.Principal) || plane == string(route.Ops)) {
 			slog.Warn("application API key presented on non-server plane", "plane", plane, "credential_type", credential.Kind(raw))

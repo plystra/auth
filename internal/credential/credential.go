@@ -7,7 +7,10 @@ import (
 	"github.com/plystra/auth/internal/agent"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/application"
+	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/operator"
+	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/session"
 )
 
@@ -85,11 +88,22 @@ type Validator struct {
 	Principal PrincipalParser
 	Server    ServerParser
 	Ops       OpsParser
+	Directory *enterprise.Service
 }
 
 func (v Validator) Validate(ctx context.Context, plane, authorization string) error {
 	switch plane {
 	case "principal":
+		if directory := route.SCIMDirectoryID(ctx); directory != "" {
+			raw, err := bearer(authorization)
+			if err != nil {
+				return err
+			}
+			if v.Directory == nil {
+				return apierr.New("UNAVAILABLE", "directory authentication is unavailable")
+			}
+			return v.Directory.ValidateDirectoryToken(ctx, directory, secret.New(raw))
+		}
 		return v.Principal.Parse(ctx, authorization)
 	case "server":
 		return v.Server.Parse(ctx, authorization)

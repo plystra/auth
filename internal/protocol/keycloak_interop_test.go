@@ -13,6 +13,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net"
 	"net/http"
@@ -48,6 +49,7 @@ const (
 	keycloakClientID     = "workforce-rp"
 	keycloakClientSecret = "fixture-workforce-client-secret"
 	keycloakUserPassword = "fixture-workforce-user-password"
+	keycloakEmployeeID   = "0ecc4840-867d-4867-8893-386e38e31839"
 )
 
 func TestKeycloakWorkforceOIDCUsesCurrentRoleMapping(t *testing.T) {
@@ -255,6 +257,158 @@ func TestKeycloakExistingAccountLinksAndSignsInToRelyingParty(t *testing.T) {
 	}
 }
 
+func TestKeycloakDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding(t *testing.T) {
+	upstream := &http.Client{Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	rp := newHumanRPWithWorkforce(t, false, upstream)
+	callback := rp.host.URL + "/oidc/upstream"
+	issuer, transport := keycloakFixture(t, callback)
+	upstream.Transport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+
+	ctx := t.Context()
+	const adminID = "usr_human_rp"
+	const employeeEmail = "original@workforce.example.test"
+	space, owner, err := rp.workforce.Authorization.CreateSpace(ctx, adminID, "Workforce", "workforce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `INSERT INTO authorization_grants (id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
+		VALUES ('grt_keycloak_directory',$1,'["auth.connections:manage"]',$2,'space',$1,$2)`, space.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	admin := authorization.WithHumanActor(ctx, owner.ID, adminID)
+	connection, err := rp.workforce.CreateConnection(admin, owner.ID, space.ID, enterprise.ConnectionInput{
+		Name: "Workforce Keycloak", Provider: "oidc", Issuer: issuer, ClientID: keycloakClientID,
+		ClientSecret: keycloakClientSecret, RedirectURI: callback,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := rp.workforce.CreateDirectory(admin, owner.ID, space.ID, enterprise.DirectoryInput{
+		Name: "Workforce directory", SSOConnectionID: connection.ID, SSOIdentityClaim: "sub",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := rp.workforce.CreateDomain(admin, owner.ID, space.ID,
+		enterprise.DomainInput{Domain: "workforce.example.test", ConnectionID: connection.ID, ForceSSO: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp.workforce.DNSResolver = employeeDomainResolver{domain.VerificationToken}
+	if err := rp.workforce.VerifyDomain(admin, owner.ID, space.ID, domain.ID); err != nil {
+		t.Fatal(err)
+	}
+	app := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	t.Cleanup(app.Close)
+	rp.config.RedirectURL = app.URL + "/callback"
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE applications SET redirect_uris=jsonb_build_array($1::text) WHERE client_id=$2`, rp.config.RedirectURL, rp.config.ClientID); err != nil {
+		t.Fatal(err)
+	}
+
+	client := employeeLifecycleClient{server: rp.host}
+	const scim = "application/scim+json"
+	users := "/scim/v2/" + directory.ID + "/Users"
+	created := client.send(t, http.MethodPost, users, directory.Token.Value(), scim, "", map[string]any{
+		"externalId": keycloakEmployeeID, "userName": employeeEmail, "displayName": "Workforce Employee", "active": true,
+	})
+	created.requireStatus(t, http.StatusCreated)
+	var employee scimTestResource
+	if err := json.Unmarshal(created.body, &employee); err != nil || employee.ID == "" || created.etag == "" {
+		t.Fatal("SCIM did not provision the employee")
+	}
+	setActive := func(active bool, version string) string {
+		t.Helper()
+		result := client.send(t, http.MethodPatch, users+"/"+employee.ID, directory.Token.Value(), scim, version, map[string]any{
+			"schemas":    []string{"urn:ietf:params:scim:api:messages:2.0:PatchOp"},
+			"Operations": []map[string]any{{"op": "replace", "path": "active", "value": active}},
+		})
+		result.requireStatus(t, http.StatusOK)
+		if result.etag == "" || result.etag == version {
+			t.Fatal("SCIM did not advance the employee version")
+		}
+		return result.etag
+	}
+
+	browser := newOIDCBrowser(t, rp)
+	consent := func(status int) (code, verifier, nonce string) {
+		t.Helper()
+		verifier, nonce, state := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+		path := browser.beginFromAuthorization(t, verifier, state, nonce)
+		identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": employeeEmail, "method": "password"}, rp.host.URL, "", http.StatusOK)
+		if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
+			t.Fatal("the employee was not routed to Keycloak")
+		}
+		returned := keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, "original")
+		loggedIn, _ := browser.request(t, http.MethodPost, path+"/sso/complete", map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}, rp.host.URL, "", status)
+		if status != http.StatusOK {
+			return "", "", ""
+		}
+		if loggedIn.NextStep != "consent" || loggedIn.Email != employeeEmail {
+			t.Fatal("the directory employee did not reach application consent")
+		}
+		decision, _ := browser.request(t, http.MethodPost, path+"/decision", map[string]string{"decision": "approve"}, rp.host.URL, "", http.StatusOK)
+		redirect, err := url.Parse(decision.RedirectTo)
+		if err != nil || redirect.Scheme+"://"+redirect.Host+redirect.Path != rp.config.RedirectURL || redirect.Query().Get("state") != state || redirect.Query().Get("code") == "" {
+			t.Fatal("consent did not preserve the application's registered callback and state")
+		}
+		response, err := app.Client().Get(redirect.String())
+		if err != nil {
+			t.Fatal("the registered application callback was unavailable")
+		}
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusNoContent {
+			t.Fatal("the registered application did not accept its callback")
+		}
+		return redirect.Query().Get("code"), verifier, nonce
+	}
+
+	oidcCtx := oidc.ClientContext(ctx, rp.host.Client())
+	signIn := func() (string, *oauth2.Token) {
+		t.Helper()
+		code, verifier, nonce := consent(http.StatusOK)
+		tokens, err := rp.config.Exchange(oidcCtx, code, oauth2.VerifierOption(verifier))
+		if err != nil {
+			t.Fatal("the relying party could not exchange the employee's authorization code")
+		}
+		raw, _ := tokens.Extra("id_token").(string)
+		identity, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(oidcCtx, raw)
+		if err != nil || identity.Nonce != nonce || identity.Subject == "" {
+			t.Fatal("the relying party could not verify the employee identity")
+		}
+		info, err := rp.provider.UserInfo(oidcCtx, oauth2.StaticTokenSource(tokens))
+		if err != nil || info.Subject != identity.Subject || info.Email != employeeEmail {
+			t.Fatal("the relying party could not read the active employee identity")
+		}
+		return identity.Subject, tokens
+	}
+	subject, issued := signIn()
+	pending, proof, _ := consent(http.StatusOK)
+	suspended := setActive(false, created.etag)
+	assertRevoked := func() {
+		t.Helper()
+		_, err := rp.config.Exchange(oidcCtx, pending, oauth2.VerifierOption(proof))
+		var denied *oauth2.RetrieveError
+		if !errors.As(err, &denied) || denied.ErrorCode != "invalid_grant" {
+			t.Fatal("the relying party did not receive invalid_grant for the employee's old code")
+		}
+		client.send(t, http.MethodGet, "/oauth/userinfo", issued.AccessToken, "", "", nil).requireStatus(t, http.StatusUnauthorized)
+	}
+	assertRevoked()
+	consent(http.StatusBadRequest)
+	setActive(true, suspended)
+	if restored, _ := signIn(); restored != subject {
+		t.Fatal("rehire created a different relying-party subject")
+	}
+	assertRevoked()
+	var loginCount, directoryUpdates int
+	if err := rp.st.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='auth.sso.login' AND user_id=$1),
+		count(*) FILTER (WHERE action='scim.user.update' AND actor_id=$2) FROM audit_logs WHERE outcome='success'`, subject, directory.ID).Scan(&loginCount, &directoryUpdates); err != nil || loginCount != 3 || directoryUpdates != 2 {
+		t.Fatal("employee sign-ins and directory updates were not audited")
+	}
+}
+
 func keycloakInteropData[T any](t *testing.T, phase string, response employeeLifecycleResponse) T {
 	t.Helper()
 	if response.status != http.StatusOK {
@@ -332,11 +486,15 @@ func keycloakFixture(t *testing.T, callback string) (string, *http.Transport) {
 func keycloakRealmConfiguration(callback string) map[string]any {
 	users := make([]map[string]any, 0, 2)
 	for _, username := range []string{"original", "newcomer"} {
-		users = append(users, map[string]any{
+		user := map[string]any{
 			"username": username, "enabled": true, "email": username + "@workforce.example.test", "emailVerified": true,
 			"firstName": "Workforce", "lastName": "Employee", "groups": []string{"/engineering"},
 			"credentials": []map[string]any{{"type": "password", "value": keycloakUserPassword, "temporary": false}},
-		})
+		}
+		if username == "original" {
+			user["id"] = keycloakEmployeeID
+		}
+		users = append(users, user)
 	}
 	return map[string]any{
 		"realm": keycloakRealm, "enabled": true, "users": users,

@@ -105,7 +105,10 @@ func newHumanRPWithWorkforce(t *testing.T, managed bool, upstream *http.Client) 
 	originPolicy := func(_ context.Context, origin string) (bool, error) {
 		return origin == issuer || origin == "https://other.example.test", nil
 	}
-	host := httptest.NewUnstartedServer(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, &mux, originPolicy, st, parsers.Validate))
+	host := httptest.NewUnstartedServer(route.MiddlewareWithOriginPolicyAndIdempotency(route.Principal, &mux, originPolicy, st,
+		func(ctx context.Context, plane, authorization string) error {
+			return parsers.Validate(ctx, plane, authorization)
+		}))
 	issuer = "https://" + host.Listener.Addr().String()
 	sessions.Signer, err = security.GenerateSigner(issuer)
 	if err != nil {
@@ -120,6 +123,7 @@ func newHumanRPWithWorkforce(t *testing.T, managed bool, upstream *http.Client) 
 	if upstream != nil {
 		workforce = &enterprise.Service{Store: st, Authorization: authz, Sessions: sessions, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32)), Passwords: accounts.Passwords, HTTPClient: upstream, Issuer: issuer}
 		accounts.SignInPolicy, sessions.SpaceSignInPolicy = workforce, workforce
+		parsers.Directory = workforce
 	}
 	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors, Enterprise: workforce}
 	api.Register(humago.New(&mux, route.HumaConfig("RP publisher", "1")))

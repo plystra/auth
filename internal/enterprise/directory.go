@@ -244,6 +244,12 @@ func (s *Service) DisableDirectory(ctx context.Context, actorMemberID, spaceID, 
 	}))
 }
 
+// ValidateDirectoryToken checks current directory scope before any idempotency replay.
+func (s *Service) ValidateDirectoryToken(ctx context.Context, directoryID string, token secret.String) error {
+	_, err := s.authenticateDirectory(ctx, directoryID, token)
+	return err
+}
+
 func (s *Service) authenticateDirectory(ctx context.Context, directoryID string, token secret.String) (db.Directory, error) {
 	if strings.TrimSpace(token.Value()) == "" {
 		return db.Directory{}, apierr.New("unauthenticated", "SCIM bearer token required")

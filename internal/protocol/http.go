@@ -490,12 +490,12 @@ func (h HTTP) ssoCallback(w http.ResponseWriter, r *http.Request) {
 }
 func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 	if h.Enterprise == nil {
-		writeSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
+		route.WriteSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
 		return
 	}
 	token, err := scimBearerToken(r)
 	if err != nil {
-		writeSCIMError(w, err)
+		route.WriteSCIMError(w, err)
 		return
 	}
 	directoryID := r.PathValue("dir_id")
@@ -503,17 +503,17 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		if resourceID != "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
 			return
 		}
 		var body scimUserBody
 		if err := decodeSCIMJSON(w, r, &body); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		created, err := h.Enterprise.CreateSCIMUser(r.Context(), directoryID, token, body.input(true))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		writeSCIMResource(w, http.StatusCreated, scimUserResource(created, directoryID))
@@ -521,7 +521,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		if resourceID != "" {
 			user, err := h.Enterprise.GetSCIMUser(r.Context(), directoryID, token, resourceID)
 			if err != nil {
-				writeSCIMError(w, err)
+				route.WriteSCIMError(w, err)
 				return
 			}
 			writeSCIMResource(w, http.StatusOK, scimUserResource(user, directoryID))
@@ -529,17 +529,17 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		start, count, err := scimPagination(r)
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		filter, err := parseSCIMUserFilter(r.URL.Query().Get("filter"))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		users, total, err := h.Enterprise.ListSCIMUsers(r.Context(), directoryID, token, filter, start, count)
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		resources := make([]any, 0, len(users))
@@ -549,24 +549,24 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
 	case http.MethodPut, http.MethodPatch:
 		if resourceID == "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
 			return
 		}
 		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		var body scimUserBody
 		if err := decodeSCIMJSON(w, r, &body); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		var updated enterprise.SCIMUser
 		if r.Method == http.MethodPatch {
 			input, inputErr := body.patchInput()
 			if inputErr != nil {
-				writeSCIMError(w, inputErr)
+				route.WriteSCIMError(w, inputErr)
 				return
 			}
 			updated, err = h.Enterprise.PatchSCIMUser(r.Context(), directoryID, token, resourceID, input, version)
@@ -574,60 +574,60 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			updated, err = h.Enterprise.ReplaceSCIMUser(r.Context(), directoryID, token, resourceID, body.input(false), version)
 		}
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		writeSCIMResource(w, http.StatusOK, scimUserResource(updated, directoryID))
 	case http.MethodDelete:
 		if resourceID == "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
 			return
 		}
 		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		if _, err := h.Enterprise.DeleteSCIMUser(r.Context(), directoryID, token, resourceID, version); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		writeSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
+		route.WriteSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
 	}
 }
 
 func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 	if h.Enterprise == nil {
-		writeSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
+		route.WriteSCIMError(w, apierr.New("temporarily_unavailable", "SCIM is unavailable"))
 		return
 	}
 	token, err := scimBearerToken(r)
 	if err != nil {
-		writeSCIMError(w, err)
+		route.WriteSCIMError(w, err)
 		return
 	}
 	directoryID, resourceID := r.PathValue("dir_id"), r.PathValue("id")
 	switch r.Method {
 	case http.MethodPost:
 		if resourceID != "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a collection URL is required"))
 			return
 		}
 		var body scimGroupBody
 		if err := decodeSCIMJSON(w, r, &body); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		input, inputErr := body.input()
 		if inputErr != nil {
-			writeSCIMError(w, inputErr)
+			route.WriteSCIMError(w, inputErr)
 			return
 		}
 		created, err := h.Enterprise.CreateSCIMGroup(r.Context(), directoryID, token, input)
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		writeSCIMResource(w, http.StatusCreated, scimGroupResource(created, directoryID))
@@ -635,24 +635,24 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 		if resourceID != "" {
 			group, err := h.Enterprise.GetSCIMGroup(r.Context(), directoryID, token, resourceID)
 			if err != nil {
-				writeSCIMError(w, err)
+				route.WriteSCIMError(w, err)
 				return
 			}
 			writeSCIMResource(w, http.StatusOK, scimGroupResource(group, directoryID))
 			return
 		}
 		if r.URL.Query().Get("filter") != "" {
-			writeSCIMError(w, apierr.New("invalid_filter", "group filters are not supported"))
+			route.WriteSCIMError(w, apierr.New("invalid_filter", "group filters are not supported"))
 			return
 		}
 		start, count, err := scimPagination(r)
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		groups, total, err := h.Enterprise.ListSCIMGroups(r.Context(), directoryID, token, start, count)
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		resources := make([]any, 0, len(groups))
@@ -662,57 +662,57 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
 	case http.MethodPut, http.MethodPatch:
 		if resourceID == "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
 			return
 		}
 		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		var body scimGroupBody
 		if err := decodeSCIMJSON(w, r, &body); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		var updated enterprise.SCIMGroup
 		if r.Method == http.MethodPatch {
 			operations, inputErr := body.patchOperations()
 			if inputErr != nil {
-				writeSCIMError(w, inputErr)
+				route.WriteSCIMError(w, inputErr)
 				return
 			}
 			updated, err = h.Enterprise.PatchSCIMGroup(r.Context(), directoryID, token, resourceID, operations, version)
 		} else {
 			input, inputErr := body.input()
 			if inputErr != nil {
-				writeSCIMError(w, inputErr)
+				route.WriteSCIMError(w, inputErr)
 				return
 			}
 			updated, err = h.Enterprise.ReplaceSCIMGroup(r.Context(), directoryID, token, resourceID, input, version)
 		}
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		writeSCIMResource(w, http.StatusOK, scimGroupResource(updated, directoryID))
 	case http.MethodDelete:
 		if resourceID == "" {
-			writeSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
+			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
 			return
 		}
 		version, err := parseSCIMIfMatch(r.Header.Get("If-Match"))
 		if err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		if err := h.Enterprise.DeleteSCIMGroup(r.Context(), directoryID, token, resourceID, version); err != nil {
-			writeSCIMError(w, err)
+			route.WriteSCIMError(w, err)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		writeSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
+		route.WriteSCIMError(w, apierr.New("invalid_request", "SCIM method is not supported"))
 	}
 }
 
@@ -1055,23 +1055,6 @@ func writeSCIMResource(w http.ResponseWriter, status int, resource map[string]an
 	_ = json.NewEncoder(w).Encode(resource)
 }
 
-func writeSCIMError(w http.ResponseWriter, err error) {
-	var public *apierr.Error
-	if !errors.As(err, &public) {
-		public = apierr.New("temporarily_unavailable", "SCIM operation is unavailable")
-	}
-	status := apierr.Status(public.Code)
-	scimType := ""
-	if public.Code == "invalid_filter" {
-		status, scimType = http.StatusBadRequest, "invalidFilter"
-	}
-	if public.Code == "precondition_failed" {
-		status = http.StatusPreconditionFailed
-	}
-	w.Header().Set("Content-Type", "application/scim+json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"}, "detail": public.Message, "status": strconv.Itoa(status), "scimType": scimType})
-}
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

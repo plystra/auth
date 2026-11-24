@@ -1,13 +1,33 @@
 package route
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/requestinfo"
 )
+
+// WriteSCIMError preserves the SCIM error document even before route dispatch.
+func WriteSCIMError(w http.ResponseWriter, err error) {
+	var public *apierr.Error
+	if !errors.As(err, &public) {
+		public = apierr.New("temporarily_unavailable", "SCIM operation is unavailable")
+	}
+	status, scimType := public.GetStatus(), ""
+	if public.Code == "invalid_filter" {
+		status, scimType = http.StatusBadRequest, "invalidFilter"
+	}
+	w.Header().Set("Content-Type", "application/scim+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:Error"},
+		"detail":  public.Message, "status": strconv.Itoa(status), "scimType": scimType,
+	})
+}
 
 func init() {
 	// Huma calls these package-level constructors for decoder and validation

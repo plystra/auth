@@ -357,7 +357,14 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 			}
 		}
 		request := r.WithContext(ctx)
-		if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" && !usesProtocolCredential(p, r) {
+		if directoryID := scimDirectory(p, r); validate != nil && directoryID != "" {
+			ctx = context.WithValue(ctx, scimDirectoryKey{}, directoryID)
+			request = request.WithContext(ctx)
+			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
+				WriteSCIMError(w, err)
+				return
+			}
+		} else if validate != nil && strings.TrimSpace(r.Header.Get("Authorization")) != "" && !usesProtocolCredential(p, r) {
 			if err := validate(ctx, string(p), r.Header.Get("Authorization")); err != nil {
 				if auditFailure != nil {
 					if auditErr := auditFailure(ctx, p, credentialType(r.Header.Get("Authorization")), credentialErrorCode(err)); auditErr != nil {
@@ -383,6 +390,42 @@ func middlewareWithAudit(p Plane, next http.Handler, originPolicy OriginPolicy, 
 		}
 		next.ServeHTTP(w, request)
 	})
+}
+
+type scimDirectoryKey struct{}
+
+// SCIMDirectoryID returns the directory scoped to a matched SCIM request.
+func SCIMDirectoryID(ctx context.Context) string {
+	id, _ := ctx.Value(scimDirectoryKey{}).(string)
+	return id
+}
+
+func scimDirectory(plane Plane, r *http.Request) string {
+	path, ok := strings.CutPrefix(r.URL.Path, "/scim/v2/")
+	if plane != Principal || !ok {
+		return ""
+	}
+	directory, resource, ok := strings.Cut(path, "/")
+	if !ok || directory == "" {
+		return ""
+	}
+	collection, id, item := strings.Cut(resource, "/")
+	if collection != "Users" && collection != "Groups" || item && (id == "" || strings.Contains(id, "/")) {
+		return ""
+	}
+	switch r.Method {
+	case http.MethodGet:
+		return directory
+	case http.MethodPost:
+		if !item {
+			return directory
+		}
+	case http.MethodPut, http.MethodPatch, http.MethodDelete:
+		if item {
+			return directory
+		}
+	}
+	return ""
 }
 
 // These credentials are verified by the named protocol handler. Neither
