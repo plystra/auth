@@ -205,7 +205,7 @@ type keycloakAdmin struct {
 	token  string
 }
 
-func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, metadata, entityID, callback string) keycloakAdmin {
+func newKeycloakAdmin(t *testing.T, client *http.Client, issuer, password string) keycloakAdmin {
 	t.Helper()
 	origin := strings.TrimSuffix(issuer, "/realms/"+keycloakRealm)
 	form := url.Values{
@@ -229,14 +229,18 @@ func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, passw
 	if err != nil || credential.AccessToken == "" || res.StatusCode != http.StatusOK {
 		t.Fatalf("Keycloak fixture administrator authentication failed: %d", res.StatusCode)
 	}
+	return keycloakAdmin{client: client, realm: origin + "/admin/realms/" + keycloakRealm, token: credential.AccessToken}
+}
 
+func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, metadata, entityID, callback string) keycloakAdmin {
+	t.Helper()
+	admin := newKeycloakAdmin(t, client, issuer, password)
 	mapper := func(name, kind string) map[string]any {
 		return map[string]any{
 			"name": name, "protocol": "saml", "protocolMapper": kind,
 			"config": map[string]string{"user.attribute": name, "attribute.name": name, "attribute.nameformat": "Basic"},
 		}
 	}
-	admin := keycloakAdmin{client: client, realm: origin + "/admin/realms/" + keycloakRealm, token: credential.AccessToken}
 	var converted map[string]any
 	admin.exchange(t, http.MethodPost, "/client-description-converter", "application/xml",
 		strings.NewReader(metadata), &converted, http.StatusOK)

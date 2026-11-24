@@ -271,16 +271,11 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
 	rp := newHumanRPWithWorkforce(t, false, upstream)
 	callback := rp.host.URL + "/oidc/upstream"
-	var options []testcontainers.ContainerCustomizer
-	adminPassword := ""
-	if provider == "saml" {
-		adminPassword = oauth2.GenerateVerifier()
-		options = append(options, testcontainers.WithEnv(map[string]string{
-			"KC_BOOTSTRAP_ADMIN_USERNAME": keycloakFixtureAdmin,
-			"KC_BOOTSTRAP_ADMIN_PASSWORD": adminPassword,
-		}))
-	}
-	issuer, transport := keycloakFixture(t, callback, options...)
+	adminPassword := oauth2.GenerateVerifier()
+	issuer, transport := keycloakFixture(t, callback, testcontainers.WithEnv(map[string]string{
+		"KC_BOOTSTRAP_ADMIN_USERNAME": keycloakFixtureAdmin,
+		"KC_BOOTSTRAP_ADMIN_PASSWORD": adminPassword,
+	}))
 	upstream.Transport = transport
 	t.Cleanup(transport.CloseIdleConnections)
 
@@ -452,6 +447,64 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 				t.Fatal("changing the Keycloak signing key changed the relying-party subject")
 			}
 		}, active.AccessToken)
+	} else {
+		replaceSecret := rotateKeycloakOIDCClientSecret(t, newKeycloakAdmin(t, upstream, issuer, adminPassword))
+		consent(http.StatusBadRequest)
+		updateKeycloakOIDCConnectionSecret(t, rp, space.ID, connection, replaceSecret)
+		if after, _ := signIn(); after != subject {
+			t.Fatal("changing the Keycloak client secret changed the relying-party subject")
+		}
+		client.send(t, http.MethodGet, "/oauth/userinfo", active.AccessToken, "", "", nil).requireStatus(t, http.StatusOK)
+		assertRevoked()
+	}
+}
+
+func rotateKeycloakOIDCClientSecret(t *testing.T, admin keycloakAdmin) secret.String {
+	t.Helper()
+	var clients []struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}
+	admin.call(t, http.MethodGet, "/clients?clientId="+url.QueryEscape(keycloakClientID)+"&exact=true", nil, &clients, http.StatusOK)
+	if len(clients) != 1 || clients[0].ID == "" || clients[0].ClientID != keycloakClientID {
+		t.Fatal("exact Keycloak client was not found")
+	}
+	var replacement struct{ Value string }
+	admin.call(t, http.MethodPost, "/clients/"+url.PathEscape(clients[0].ID)+"/client-secret", nil, &replacement, http.StatusOK)
+	if replacement.Value == "" || replacement.Value == keycloakClientSecret {
+		t.Fatal("Keycloak did not issue a replacement client secret")
+	}
+	return secret.New(replacement.Value)
+}
+
+func updateKeycloakOIDCConnectionSecret(t *testing.T, rp *humanRP, spaceID string, connection enterprise.Connection, replacement secret.String) {
+	t.Helper()
+	rp.workforce.Sessions.Factors = &factor.Service{Store: rp.st, DataKey: secret.New(strings.Repeat("d", 32))}
+	enrollment, err := rp.workforce.Sessions.Factors.BeginTOTP(t.Context(), "usr_human_rp", "rp@example.test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mfa, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := employeeLifecycleClient{server: rp.host}
+	const jsonType = "application/json"
+	client.send(t, http.MethodPost, "/v1/auth/step-up", rp.session.AccessToken, jsonType, "", map[string]any{
+		"operation": enterprise.SSOConnectionUpdateOperation, "mfa_code": mfa,
+		"request": enterprise.OIDCClientSecretUpdateRequest(spaceID, connection.ID, connection.ETag(), replacement),
+	}).requireStatus(t, http.StatusOK)
+	updated := client.send(t, http.MethodPatch, "/v1/spaces/"+spaceID+"/sso-connections/"+connection.ID,
+		rp.session.AccessToken, jsonType, connection.ETag(), map[string]string{"client_secret": replacement.Value()})
+	updated.requireStatus(t, http.StatusOK)
+	if updated.etag == "" || updated.etag == connection.ETag() || bytes.Contains(updated.body, []byte(replacement.Value())) {
+		t.Fatal("connection rotation did not advance the version or exposed the credential")
+	}
+	var auditBody string
+	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT metadata::text FROM audit_logs
+		WHERE action='sso.connection.oidc_client_secret.update' AND resource_id=$1 AND outcome='success'`, connection.ID).
+		Scan(&auditBody); err != nil || strings.Contains(auditBody, replacement.Value()) || strings.Contains(auditBody, keycloakClientSecret) {
+		t.Fatal("connection rotation lacked a redacted audit event")
 	}
 }
 
