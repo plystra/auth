@@ -304,7 +304,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			} `json:"tokens"`
 		} `json:"data"`
 	}
-	passwordSignIn := func(t *testing.T) accountSignIn {
+	passwordSignIn := func(t *testing.T, email, password string) accountSignIn {
 		t.Helper()
 		var attempt struct {
 			Data struct {
@@ -323,13 +323,13 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		}
 		return signedIn
 	}
-	signedIn := passwordSignIn(t)
-	approve := func(t *testing.T, handle, state string) *url.URL {
+	signedIn := passwordSignIn(t, email, password)
+	approveAs := func(t *testing.T, handle, state, accessToken string) *url.URL {
 		t.Helper()
 		var consent struct {
 			Redirect string `json:"redirect_to"`
 		}
-		request(t, http.MethodPost, endpoint.AuthURL, signedIn.Data.Tokens.Access, map[string]string{"request_id": handle, "decision": "approve"}, &consent)
+		request(t, http.MethodPost, endpoint.AuthURL, accessToken, map[string]string{"request_id": handle, "decision": "approve"}, &consent)
 		callback, err := url.Parse(consent.Redirect)
 		if err != nil || callback.Query().Get("state") != state || callback.Query().Get("code") == "" {
 			t.Fatal("consent did not return a code bound to the RP state")
@@ -340,6 +340,10 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			t.Fatal("unexpected consent callback")
 		}
 		return callback
+	}
+	approve := func(t *testing.T, handle, state string) *url.URL {
+		t.Helper()
+		return approveAs(t, handle, state, signedIn.Data.Tokens.Access)
 	}
 	t.Run("consent denial is final across issuer instances", func(t *testing.T) {
 		deniedState := oauth2.GenerateVerifier()
@@ -487,6 +491,19 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 
 	t.Run("verified account drives a live decision in the installed Space", func(t *testing.T) {
 		const installedClientID = "app_oidc_workforce"
+		const workforceSubject, workforceEmail = "usr_workforce_oidc", "workforce-relying-party@example.test"
+		workforcePassword := oauth2.GenerateVerifier()
+		hash, err := security.DefaultPasswordHasher().Hash(workforcePassword)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `INSERT INTO users
+			(id,email,email_normalized,password_hash,email_verified_at,status,display_name)
+			VALUES ($1,$2,$2,$3,now(),'active','Workforce RP account')`,
+			workforceSubject, workforceEmail, hash); err != nil {
+			t.Fatal(err)
+		}
+		workforceSession := passwordSignIn(t, workforceEmail, workforcePassword)
 		installedClient := config
 		installedClient.ClientID = installedClientID
 		installedClient.ClientSecret = oauth2.GenerateVerifier()
@@ -498,14 +515,15 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 			t.Fatal(err)
 		}
 		state, nonce, verifier := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
-		callback := approve(t, startConsent(t, installedClient, state, nonce, verifier), state)
+		callback := approveAs(t, startConsent(t, installedClient, state, nonce, verifier), state,
+			workforceSession.Data.Tokens.Access)
 		credentials, err := installedClient.Exchange(ctx, callback.Query().Get("code"), oauth2.VerifierOption(verifier))
 		if err != nil {
 			t.Fatal("installed relying party could not redeem its login code")
 		}
 		token, _ := credentials.Extra("id_token").(string)
 		identity, err := provider.Verifier(&oidc.Config{ClientID: installedClientID, SupportedSigningAlgs: []string{oidc.ES256}}).Verify(ctx, token)
-		if err != nil || identity.Subject != subject || identity.Nonce != nonce {
+		if err != nil || identity.Subject != workforceSubject || identity.Nonce != nonce {
 			t.Fatal("installed relying party could not verify the signed account identity")
 		}
 
@@ -565,14 +583,13 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 
 		// Leave the selected Space through the public API without changing
 		// the relying party's verified identity or the other Space's binding.
-		signIn := passwordSignIn(t)
 		var selected struct {
 			Data struct {
 				Access string `json:"access_token"`
 			}
 		}
 		request(t, http.MethodPost, rpTestIssuer+"/v1/auth/refresh", "", map[string]string{
-			"refresh_token": signIn.Data.Tokens.Refresh, "member_id": workforce.Resource.ID,
+			"refresh_token": workforceSession.Data.Tokens.Refresh, "member_id": workforce.Resource.ID,
 		}, &selected)
 		if selected.Data.Access == "" {
 			t.Fatal("Space selection did not return an access token")
@@ -1288,7 +1305,7 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 	})
 
 	t.Run("pending login survives primary process exit", func(t *testing.T) {
-		signedIn = passwordSignIn(t)
+		signedIn = passwordSignIn(t, email, password)
 		pendingState, pendingNonce, pendingVerifier := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
 		pending := startConsent(t, config, pendingState, pendingNonce, pendingVerifier)
 		previousAccess, previousRefresh := signedIn.Data.Tokens.Access, signedIn.Data.Tokens.Refresh
