@@ -518,6 +518,16 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	directoryID := r.PathValue("dir_id")
 	resourceID := r.PathValue("id")
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		route.WriteSCIMError(w, apierr.New("invalid_request", "SCIM query is invalid"))
+		return
+	}
+	projection, err := parseSCIMUserProjection(query)
+	if err != nil {
+		route.WriteSCIMError(w, err)
+		return
+	}
 	switch r.Method {
 	case http.MethodPost:
 		if resourceID != "" {
@@ -534,7 +544,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		writeSCIMResource(w, http.StatusCreated, scimUserResource(created, directoryID))
+		projection.write(w, http.StatusCreated, created, directoryID)
 	case http.MethodGet:
 		if resourceID != "" {
 			user, err := h.Enterprise.GetSCIMUser(r.Context(), directoryID, token, resourceID)
@@ -542,7 +552,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 				route.WriteSCIMError(w, err)
 				return
 			}
-			writeSCIMResource(w, http.StatusOK, scimUserResource(user, directoryID))
+			projection.write(w, http.StatusOK, user, directoryID)
 			return
 		}
 		start, count, err := scimPagination(r)
@@ -550,7 +560,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		filter, err := parseSCIMCollectionFilter(r.URL.Query().Get("filter"), "userName")
+		filter, err := parseSCIMCollectionFilter(query.Get("filter"), "userName")
 		if err != nil {
 			route.WriteSCIMError(w, err)
 			return
@@ -562,7 +572,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		resources := make([]any, 0, len(users))
 		for _, user := range users {
-			resources = append(resources, scimUserResource(user, directoryID))
+			resources = append(resources, projection.apply(scimUserResource(user, directoryID)))
 		}
 		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
 	case http.MethodPut, http.MethodPatch:
@@ -595,7 +605,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		writeSCIMResource(w, http.StatusOK, scimUserResource(updated, directoryID))
+		projection.write(w, http.StatusOK, updated, directoryID)
 	case http.MethodDelete:
 		if resourceID == "" {
 			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
@@ -1190,6 +1200,11 @@ func scimMeta(resourceType string, version int64, createdAt, updatedAt time.Time
 }
 
 func writeSCIMResource(w http.ResponseWriter, status int, resource map[string]any) {
+	writeSCIMResourceHeaders(w, resource)
+	writeSCIMJSON(w, status, resource)
+}
+
+func writeSCIMResourceHeaders(w http.ResponseWriter, resource map[string]any) {
 	if meta, ok := resource["meta"].(map[string]any); ok {
 		if location, ok := meta["location"].(string); ok {
 			w.Header().Set("Location", location)
@@ -1198,6 +1213,9 @@ func writeSCIMResource(w http.ResponseWriter, status int, resource map[string]an
 			w.Header().Set("ETag", version)
 		}
 	}
+}
+
+func writeSCIMJSON(w http.ResponseWriter, status int, resource map[string]any) {
 	w.Header().Set("Content-Type", "application/scim+json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(resource)
