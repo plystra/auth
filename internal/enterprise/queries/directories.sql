@@ -106,6 +106,15 @@ FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.
 -- name: IsDirectoryBackedGroup :one
 SELECT EXISTS (SELECT 1 FROM directory_groups WHERE group_id = sqlc.arg(group_id));
 
+-- name: ListDirectoryGroupMappings :many
+SELECT dg.id, dg.group_id, dg.display_name
+FROM directory_groups dg
+JOIN groups g ON g.id = dg.group_id AND g.space_id = sqlc.arg(space_id) AND g.status = 'active'
+WHERE dg.directory_id = sqlc.arg(directory_id) AND dg.deleted_at IS NULL
+  AND dg.id > sqlc.arg(after_id)
+ORDER BY dg.id
+LIMIT sqlc.arg(limit_count);
+
 -- name: LockDirectoryGroup :one
 SELECT id, directory_id, external_id, group_id, display_name, version, created_at, updated_at, deleted_at
 FROM directory_groups WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND deleted_at IS NULL FOR UPDATE;

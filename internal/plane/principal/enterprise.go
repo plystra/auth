@@ -144,6 +144,15 @@ type deleteDirectoryInput struct {
 	DirectoryID   string `path:"dir_id"`
 }
 
+type directoryGroupListInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	ID            string `path:"id"`
+	DirectoryID   string `path:"dir_id"`
+	Cursor        string `query:"cursor" maxLength:"31"`
+	Limit         int    `query:"limit" default:"50" minimum:"1" maximum:"100"`
+}
+
 type createDirectoryGroupGrantInput struct {
 	Authorization    string `header:"Authorization"`
 	ApprovalID       string `header:"Approval-Id"`
@@ -177,6 +186,7 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec("directories.create", "POST", "/v1/spaces/{id}/directories", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectory)
 	route.Register(api, route.NewSpec("directories.update", "PATCH", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDirectory)
 	route.Register(api, route.NewSpec("directories.delete", "DELETE", "/v1/spaces/{id}/directories/{dir_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDirectory)
+	route.Register(api, route.NewSpec(enterprise.DirectoryGroupListOperation, "GET", "/v1/spaces/{id}/directories/{dir_id}/groups", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDirectoryGroups)
 	route.Register(api, route.NewSpec(authorization.DirectoryGroupGrantOperation, "POST", "/v1/spaces/{id}/directories/{dir_id}/groups/{directory_group_id}/grants", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.grants:assign"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectoryGroupGrant)
 	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDomains)
 	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
@@ -197,6 +207,27 @@ func (a *API) enterpriseSettingsListActor(ctx context.Context, in *enterpriseSet
 	}
 	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
 	return actor.ID, ctx, err
+}
+
+func (a *API) listDirectoryGroups(ctx context.Context, in *directoryGroupListInput) (*struct{ Body enterprise.DirectoryGroupPage }, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise directory service is unavailable")
+	}
+	input := enterprise.DirectoryGroupList{SpaceID: in.ID, DirectoryID: in.DirectoryID, Cursor: in.Cursor, Limit: in.Limit}
+	operation, request := enterprise.DirectoryGroupListOperation, input.Request()
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
+	if err != nil {
+		return nil, err
+	}
+	page, err := a.Enterprise.ListDirectoryGroups(ctx, actor.ID, input)
+	if err != nil {
+		return nil, err
+	}
+	return &struct{ Body enterprise.DirectoryGroupPage }{Body: page}, nil
 }
 
 func (a *API) createDirectoryGroupGrant(ctx context.Context, in *createDirectoryGroupGrantInput) (*authorizationDataOutput[authorization.Grant], error) {

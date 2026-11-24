@@ -698,6 +698,54 @@ func (q *Queries) ListDirectoryBackedGroupMembers(ctx context.Context, arg ListD
 	return items, nil
 }
 
+const listDirectoryGroupMappings = `-- name: ListDirectoryGroupMappings :many
+SELECT dg.id, dg.group_id, dg.display_name
+FROM directory_groups dg
+JOIN groups g ON g.id = dg.group_id AND g.space_id = $1 AND g.status = 'active'
+WHERE dg.directory_id = $2 AND dg.deleted_at IS NULL
+  AND dg.id > $3
+ORDER BY dg.id
+LIMIT $4
+`
+
+type ListDirectoryGroupMappingsParams struct {
+	SpaceID     string `json:"space_id"`
+	DirectoryID string `json:"directory_id"`
+	AfterID     string `json:"after_id"`
+	LimitCount  int32  `json:"limit_count"`
+}
+
+type ListDirectoryGroupMappingsRow struct {
+	ID          string `json:"id"`
+	GroupID     string `json:"group_id"`
+	DisplayName string `json:"display_name"`
+}
+
+func (q *Queries) ListDirectoryGroupMappings(ctx context.Context, arg ListDirectoryGroupMappingsParams) ([]ListDirectoryGroupMappingsRow, error) {
+	rows, err := q.db.Query(ctx, listDirectoryGroupMappings,
+		arg.SpaceID,
+		arg.DirectoryID,
+		arg.AfterID,
+		arg.LimitCount,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDirectoryGroupMappingsRow{}
+	for rows.Next() {
+		var i ListDirectoryGroupMappingsRow
+		if err := rows.Scan(&i.ID, &i.GroupID, &i.DisplayName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listDirectoryGroupMemberIDs = `-- name: ListDirectoryGroupMemberIDs :many
 SELECT member_id FROM directory_group_members WHERE directory_group_id = $1 ORDER BY member_id
 `

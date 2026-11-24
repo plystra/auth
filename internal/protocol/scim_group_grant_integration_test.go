@@ -1,9 +1,11 @@
 package protocol
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -13,8 +15,103 @@ import (
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/stepup"
 	"github.com/pquerna/otp/totp"
 )
+
+func TestDirectoryGroupDiscoveryBindsProofToEachPage(t *testing.T) {
+	const adminUser = "usr_sso_http_owner"
+	const scimType = "application/scim+json"
+	ctx := t.Context()
+	st, authz, svc, owner, spaceID, _ := newSSOHTTPFixture(t)
+	sessions := svc.Sessions
+	svc.StepUp = sessions
+	adminCtx := authorization.WithHumanActor(ctx, owner.ID, adminUser)
+	newDirectory := func(name string) enterprise.Directory {
+		t.Helper()
+		directory, err := svc.CreateDirectory(adminCtx, owner.ID, spaceID, enterprise.DirectoryInput{Name: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return directory
+	}
+	directory, other := newDirectory("Staff"), newDirectory("Partners")
+	admin, err := sessions.CreateForMember(ctx, adminUser, owner.ID, nil, "directory list test", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	(&principal.API{Authorization: authz, Sessions: sessions, Enterprise: svc}).Register(humago.New(mux, route.HumaConfig("Directory discovery", "1")))
+	(HTTP{Enterprise: svc}).Register(mux)
+	host := httptest.NewTLSServer(route.Middleware(route.Principal, mux))
+	t.Cleanup(host.Close)
+	client := employeeLifecycleClient{server: host}
+	provision := func(directory enterprise.Directory, name string) scimTestResource {
+		t.Helper()
+		res := client.send(t, http.MethodPost, "/scim/v2/"+directory.ID+"/Groups", directory.Token.Value(), scimType, "", map[string]string{"displayName": name, "externalId": name})
+		res.requireStatus(t, http.StatusCreated)
+		var group scimTestResource
+		if err := json.Unmarshal(res.body, &group); err != nil || group.ID == "" {
+			t.Fatal("directory did not create a group")
+		}
+		return group
+	}
+	alpha, beta := provision(directory, "Alpha"), provision(directory, "Beta")
+	removed := provision(directory, "Removed")
+	provision(other, "Partner only")
+	client.send(t, http.MethodDelete, "/scim/v2/"+directory.ID+"/Groups/"+removed.ID, directory.Token.Value(), scimType, removed.Meta.Version, nil).requireStatus(t, http.StatusNoContent)
+	input := enterprise.DirectoryGroupList{SpaceID: spaceID, DirectoryID: directory.ID, Limit: 1}
+	get := func(in enterprise.DirectoryGroupList, token string, status int) enterprise.DirectoryGroupPage {
+		t.Helper()
+		path := "/v1/spaces/" + in.SpaceID + "/directories/" + in.DirectoryID + "/groups?limit=1"
+		if in.Cursor != "" {
+			path += "&cursor=" + url.QueryEscape(in.Cursor)
+		}
+		res := client.send(t, http.MethodGet, path, token, "", "", nil)
+		res.requireStatus(t, status)
+		var page enterprise.DirectoryGroupPage
+		if status == http.StatusOK {
+			if err := json.Unmarshal(res.body, &page); err != nil || bytes.Contains(res.body, []byte(directory.Token.Value())) {
+				t.Fatal("group discovery returned invalid or secret-bearing data")
+			}
+		}
+		return page
+	}
+	prove := func(in enterprise.DirectoryGroupList) {
+		t.Helper()
+		digest, err := stepup.DigestValue(in.Request())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Pool.Exec(ctx, `UPDATE sessions SET step_up_operation=$2, step_up_digest=$3,
+			step_up_method='totp',step_up_expires_at=clock_timestamp()+interval '5 minutes' WHERE id=$1`, admin.SessionID, enterprise.DirectoryGroupListOperation, digest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get(input, admin.AccessToken, http.StatusForbidden)
+	get(input, directory.Token.Value(), http.StatusUnauthorized)
+	prove(input)
+	wrongDirectory := input
+	wrongDirectory.DirectoryID = other.ID
+	get(wrongDirectory, admin.AccessToken, http.StatusForbidden)
+	first := get(input, admin.AccessToken, http.StatusOK)
+	if len(first.Data) != 1 || first.Data[0].GroupID == "" || first.NextCursor != first.Data[0].ID {
+		t.Fatal("first page did not return a usable group and continuation")
+	}
+	input.Cursor = first.NextCursor
+	get(input, admin.AccessToken, http.StatusForbidden)
+	prove(input)
+	last := get(input, admin.AccessToken, http.StatusOK)
+	if len(last.Data) != 1 || last.NextCursor != "" || last.Data[0].ID <= first.Data[0].ID ||
+		!(first.Data[0].ID == alpha.ID && last.Data[0].ID == beta.ID || first.Data[0].ID == beta.ID && last.Data[0].ID == alpha.ID) {
+		t.Fatal("discovery leaked a foreign or removed group, or paginated incorrectly")
+	}
+	if _, err := st.Pool.Exec(ctx, `UPDATE directories SET status='disabled' WHERE id=$1`, directory.ID); err != nil {
+		t.Fatal(err)
+	}
+	prove(input)
+	get(input, admin.AccessToken, http.StatusNotFound)
+}
 
 func TestDirectoryGroupRoleGrantAuthorizesFutureSCIMMembership(t *testing.T) {
 	const adminUser = "usr_sso_http_owner"
