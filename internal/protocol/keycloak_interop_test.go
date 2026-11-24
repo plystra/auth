@@ -24,18 +24,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
 	"github.com/plystra/auth/internal/route"
+	"github.com/plystra/auth/internal/secret"
 	"github.com/plystra/auth/internal/stepup"
+	"github.com/pquerna/otp/totp"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/net/html"
+	"golang.org/x/oauth2"
 )
 
 const (
@@ -132,6 +137,122 @@ func TestKeycloakWorkforceOIDCUsesCurrentRoleMapping(t *testing.T) {
 		t.Fatal("repeat Keycloak login did not reuse the original identity")
 	}
 	assertRole(again, oldRole, newRole)
+}
+
+func TestKeycloakExistingAccountLinksAndSignsInToRelyingParty(t *testing.T) {
+	ctx := t.Context()
+	upstream := &http.Client{Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	rp := newHumanRPWithWorkforce(t, false, upstream)
+	callback := rp.host.URL + "/oidc/upstream"
+	issuer, transport := keycloakFixture(t, callback)
+	upstream.Transport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+
+	const userID, username, email = "usr_human_rp", "original", "original@workforce.example.test"
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE users SET email=$2,email_normalized=$2 WHERE id=$1`, userID, email); err != nil {
+		t.Fatal(err)
+	}
+	authz := rp.workforce.Authorization
+	space, owner, err := authz.CreateSpace(ctx, userID, "Workforce", "workforce")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `INSERT INTO authorization_grants (id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
+		VALUES ('grt_keycloak_link',$1,'["auth.connections:manage"]',$2,'space',$1,$2)`, space.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	connection, err := rp.workforce.CreateConnection(authorization.WithHumanActor(ctx, owner.ID, userID), owner.ID, space.ID, enterprise.ConnectionInput{
+		Name: "Workforce Keycloak", Provider: "oidc", Issuer: issuer, ClientID: keycloakClientID,
+		ClientSecret: keycloakClientSecret, RedirectURI: callback,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `INSERT INTO sso_domains (id,space_id,domain,verification_token_hash,connection_id,force_sso,status,verified_at)
+		VALUES ('dom_keycloak_link',$1,'workforce.example.test',decode(repeat('00',32),'hex'),$2,true,'verified',clock_timestamp())`, space.ID, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	client := employeeLifecycleClient{server: rp.host}
+	post := func(path, bearer string, payload any) employeeLifecycleResponse {
+		t.Helper()
+		return client.send(t, http.MethodPost, path, bearer, "application/json", "", payload)
+	}
+	sso := "/v1/sso/" + connection.ID
+	before := keycloakInteropData[enterprise.StartResult](t, "pre-link start", client.send(t, http.MethodGet, sso+"/start", "", "", "", nil))
+	login := keycloakAuthorize(t, transport, before.AuthorizationURL, callback, username)
+	post(sso+"/callback", "", map[string]string{"state": login.Get("state"), "code": login.Get("code")}).requireError(t, http.StatusConflict, "conflict")
+
+	rp.workforce.Sessions.Factors = &factor.Service{Store: rp.st, DataKey: secret.New(strings.Repeat("d", 32))}
+	enrollment, err := rp.workforce.Sessions.Factors.BeginTOTP(ctx, userID, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := "/v1/me/sso-links/" + connection.ID
+	started := keycloakInteropData[enterprise.StartResult](t, "link start", post(link+"/start", rp.session.AccessToken, nil))
+	returned := keycloakAuthorize(t, transport, started.AuthorizationURL, callback, username)
+	state, code := returned.Get("state"), returned.Get("code")
+	if state != started.State || code == "" {
+		t.Fatal("Keycloak did not return the requested linking state")
+	}
+	mfa, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	post("/v1/auth/step-up", rp.session.AccessToken, map[string]any{"operation": enterprise.CompleteIdentityLinkOperation,
+		"request": enterprise.IdentityLinkProofRequest(connection.ID, state, code), "mfa_code": mfa}).requireStatus(t, http.StatusOK)
+	confirmed := keycloakInteropData[struct{ Linked bool }](t, "link completion", post(link+"/complete", rp.session.AccessToken,
+		map[string]string{"state": state, "code": code}))
+	if !confirmed.Linked {
+		t.Fatal("binding was not confirmed")
+	}
+
+	app := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+	t.Cleanup(app.Close)
+	rp.config.RedirectURL = app.URL + "/callback"
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE applications SET redirect_uris=jsonb_build_array($1::text) WHERE client_id=$2`, rp.config.RedirectURL, rp.config.ClientID); err != nil {
+		t.Fatal(err)
+	}
+	browser := newOIDCBrowser(t, rp)
+	verifier, appState, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
+	path := browser.beginFromAuthorization(t, verifier, appState, nonce)
+	identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": email, "method": "password"}, rp.host.URL, "", http.StatusOK)
+	if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
+		t.Fatal("application did not route to the required enterprise connection")
+	}
+	returned = keycloakAuthorize(t, transport, identified.AuthorizationURL, callback, username)
+	view, _ := browser.request(t, http.MethodPost, path+"/sso/complete", map[string]string{"state": returned.Get("state"), "code": returned.Get("code")}, rp.host.URL, "", http.StatusOK)
+	if view.NextStep != "consent" || view.Email != email {
+		t.Fatal("enterprise login did not continue to application consent")
+	}
+	decision, _ := browser.request(t, http.MethodPost, path+"/decision", map[string]string{"decision": "approve"}, rp.host.URL, "", http.StatusOK)
+	redirect, err := url.Parse(decision.RedirectTo)
+	if err != nil || redirect.Query().Get("state") != appState || redirect.Scheme+"://"+redirect.Host+redirect.Path != rp.config.RedirectURL {
+		t.Fatal("application redirect changed the registered callback or state")
+	}
+	response, err := app.Client().Get(decision.RedirectTo)
+	if err != nil {
+		t.Fatal("application callback was unavailable")
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatal("application callback failed")
+	}
+	oidcContext := oidc.ClientContext(ctx, rp.host.Client())
+	tokens, err := rp.config.Exchange(oidcContext, redirect.Query().Get("code"), oauth2.VerifierOption(verifier))
+	if err != nil {
+		t.Fatal("relying party could not redeem the authorization code")
+	}
+	raw, _ := tokens.Extra("id_token").(string)
+	verified, err := rp.provider.Verifier(&oidc.Config{ClientID: rp.config.ClientID}).Verify(oidcContext, raw)
+	if err != nil || verified.Subject != userID || verified.Nonce != nonce {
+		t.Fatal("relying party could not verify the original local account and nonce")
+	}
+	var linked, signedIn int
+	if err := rp.st.Pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE action='auth.sso.identity.link'),count(*) FILTER (WHERE action='auth.sso.login')
+		FROM audit_logs WHERE user_id=$1 AND member_id=$2 AND outcome='success'`, userID, owner.ID).Scan(&linked, &signedIn); err != nil || linked != 1 || signedIn != 1 {
+		t.Fatal("link and application login were not audited for the original member")
+	}
 }
 
 func keycloakInteropData[T any](t *testing.T, phase string, response employeeLifecycleResponse) T {

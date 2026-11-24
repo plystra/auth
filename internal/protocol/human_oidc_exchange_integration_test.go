@@ -56,6 +56,15 @@ func humanRPWithAuthMethod(t *testing.T, managed bool) *humanRP {
 
 func newConfiguredHumanRP(t *testing.T, managed bool, upstream *oidcTestProvider) *humanRP {
 	t.Helper()
+	var client *http.Client
+	if upstream != nil {
+		client = upstream.server.Client()
+	}
+	return newHumanRPWithWorkforce(t, managed, client)
+}
+
+func newHumanRPWithWorkforce(t *testing.T, managed bool, upstream *http.Client) *humanRP {
+	t.Helper()
 	ctx := t.Context()
 	database, err := protocolDB.Clone(ctx)
 	if err != nil {
@@ -109,7 +118,7 @@ func newConfiguredHumanRP(t *testing.T, managed bool, upstream *oidcTestProvider
 	accounts := &account.Service{Store: st, Sessions: sessions, Passwords: security.DefaultPasswordHasher(), Authorization: authz}
 	var workforce *enterprise.Service
 	if upstream != nil {
-		workforce = &enterprise.Service{Store: st, Authorization: authz, Sessions: sessions, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32)), Passwords: accounts.Passwords, HTTPClient: upstream.server.Client(), Issuer: issuer}
+		workforce = &enterprise.Service{Store: st, Authorization: authz, Sessions: sessions, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32)), Passwords: accounts.Passwords, HTTPClient: upstream, Issuer: issuer}
 		accounts.SignInPolicy, sessions.SpaceSignInPolicy = workforce, workforce
 	}
 	api := &principal.API{HostedOrigin: issuer, Accounts: accounts, Authorization: authz, Applications: apps, Sessions: sessions, Signer: sessions.Signer, Factors: sessions.Factors, Enterprise: workforce}
