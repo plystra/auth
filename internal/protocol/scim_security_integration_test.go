@@ -539,6 +539,38 @@ func TestSCIMGroupMembershipPatchReconcilesWithoutWritingNoOps(t *testing.T) {
 	}
 }
 
+func TestSCIMGroupPatchRequiresUnambiguousUserReferences(t *testing.T) {
+	f := newSCIMFixture(t)
+	user := f.user(t, "worker", true)
+	group := scimResource(t, f.request(t, http.MethodPost, "Groups",
+		`{"externalId":"audit","displayName":"Audit"}`, "", http.StatusCreated))
+	path := "Groups/" + group.ID
+	memberOperation := func(op string, member map[string]any) map[string]any {
+		return map[string]any{"op": op, "path": "members", "value": []any{member}}
+	}
+	for _, member := range []map[string]any{
+		{"value": user.ID, "type": "Group"},
+		{"value": user.ID, "type": nil},
+		{"value": user.ID, "type": "User", "Type": "User"},
+		{"value": user.ID, "Value": user.ID},
+	} {
+		f.request(t, http.MethodPatch, path, scimPatch(memberOperation("add", member)), group.Meta.Version, http.StatusBadRequest)
+	}
+	admitted := scimResource(t, f.request(t, http.MethodPatch, path,
+		scimPatch(memberOperation("add", map[string]any{"Value": user.ID, "TYPE": "uSeR"})),
+		group.Meta.Version, http.StatusOK))
+	if len(admitted.Members) != 1 || admitted.Members[0].Value != user.ID {
+		t.Fatal("the SCIM group did not include its referenced directory user")
+	}
+	f.request(t, http.MethodPatch, path,
+		scimPatch(memberOperation("remove", map[string]any{"value": user.ID, "type": "Group"})),
+		admitted.Meta.Version, http.StatusBadRequest)
+	current := scimResource(t, f.request(t, http.MethodGet, path, "", "", http.StatusOK))
+	if len(current.Members) != 1 || current.Members[0].Value != user.ID || current.Meta.Version != admitted.Meta.Version {
+		t.Fatal("an invalid reference removed a directory member")
+	}
+}
+
 func TestSCIMGroupSyncRequiresCurrentConfiguratorAuthority(t *testing.T) {
 	for _, kind := range []string{"permissions", "binding_rights", "reactivation", "missing_configurator", "self_escalation"} {
 		t.Run(kind, func(t *testing.T) {

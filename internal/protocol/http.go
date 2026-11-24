@@ -1042,8 +1042,25 @@ func scimMemberValues(raw any) ([]string, bool) {
 		if !ok {
 			return nil, false
 		}
-		value, ok := object["value"].(string)
-		if !ok || strings.TrimSpace(value) == "" {
+		var value string
+		var hasType bool
+		for name, raw := range object {
+			switch strings.ToLower(name) {
+			case "value":
+				id, ok := raw.(string)
+				if value != "" || !ok || strings.TrimSpace(id) == "" {
+					return nil, false
+				}
+				value = id
+			case "type":
+				kind, ok := raw.(string)
+				if hasType || !ok || !strings.EqualFold(kind, "User") {
+					return nil, false
+				}
+				hasType = true
+			}
+		}
+		if value == "" {
 			return nil, false
 		}
 		out = append(out, value)
