@@ -821,7 +821,7 @@ const listDirectoryGroupUserIDs = `-- name: ListDirectoryGroupUserIDs :many
 SELECT du.id
 FROM directory_group_members dgm
 JOIN directory_users du ON du.directory_id = $1 AND du.member_id = dgm.member_id
-WHERE dgm.directory_group_id = $2
+WHERE dgm.directory_group_id = $2 AND du.deleted_at IS NULL
 ORDER BY du.id
 `
 
@@ -1171,6 +1171,36 @@ type RemoveDirectoryBackedGroupParams struct {
 
 func (q *Queries) RemoveDirectoryBackedGroup(ctx context.Context, arg RemoveDirectoryBackedGroupParams) error {
 	_, err := q.db.Exec(ctx, removeDirectoryBackedGroup, arg.GroupID, arg.SpaceID)
+	return err
+}
+
+const removeTombstonedUserDirectoryMemberships = `-- name: RemoveTombstonedUserDirectoryMemberships :exec
+WITH removed AS (
+    DELETE FROM directory_group_members dgm
+    USING directory_groups dg
+    WHERE dgm.directory_group_id = dg.id
+      AND dg.directory_id = $1 AND dg.deleted_at IS NULL
+      AND dgm.member_id = $2
+    RETURNING dgm.directory_group_id
+), removed_directory_sources AS (
+    DELETE FROM group_members gm
+    USING directory_groups dg, removed r
+    WHERE dg.id = r.directory_group_id AND gm.group_id = dg.group_id
+      AND gm.member_id = $2 AND gm.space_id = $3
+      AND gm.source = 'directory'
+)
+UPDATE directory_groups dg SET version = dg.version + 1, updated_at = clock_timestamp()
+WHERE dg.id IN (SELECT directory_group_id FROM removed)
+`
+
+type RemoveTombstonedUserDirectoryMembershipsParams struct {
+	DirectoryID string `json:"directory_id"`
+	MemberID    string `json:"member_id"`
+	SpaceID     string `json:"space_id"`
+}
+
+func (q *Queries) RemoveTombstonedUserDirectoryMemberships(ctx context.Context, arg RemoveTombstonedUserDirectoryMembershipsParams) error {
+	_, err := q.db.Exec(ctx, removeTombstonedUserDirectoryMemberships, arg.DirectoryID, arg.MemberID, arg.SpaceID)
 	return err
 }
 

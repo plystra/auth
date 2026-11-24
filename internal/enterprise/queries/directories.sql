@@ -153,6 +153,24 @@ ON CONFLICT DO NOTHING;
 -- name: DeleteDirectoryGroupMembers :exec
 DELETE FROM directory_group_members WHERE directory_group_id = sqlc.arg(directory_group_id);
 
+-- name: RemoveTombstonedUserDirectoryMemberships :exec
+WITH removed AS (
+    DELETE FROM directory_group_members dgm
+    USING directory_groups dg
+    WHERE dgm.directory_group_id = dg.id
+      AND dg.directory_id = sqlc.arg(directory_id) AND dg.deleted_at IS NULL
+      AND dgm.member_id = sqlc.arg(member_id)
+    RETURNING dgm.directory_group_id
+), removed_directory_sources AS (
+    DELETE FROM group_members gm
+    USING directory_groups dg, removed r
+    WHERE dg.id = r.directory_group_id AND gm.group_id = dg.group_id
+      AND gm.member_id = sqlc.arg(member_id) AND gm.space_id = sqlc.arg(space_id)
+      AND gm.source = 'directory'
+)
+UPDATE directory_groups dg SET version = dg.version + 1, updated_at = clock_timestamp()
+WHERE dg.id IN (SELECT directory_group_id FROM removed);
+
 -- name: DeleteDirectoryManagedGroupMembers :exec
 DELETE FROM group_members
 WHERE group_id = sqlc.arg(group_id) AND space_id = sqlc.arg(space_id) AND source = 'directory';
@@ -174,7 +192,7 @@ SELECT member_id FROM directory_group_members WHERE directory_group_id = sqlc.ar
 SELECT du.id
 FROM directory_group_members dgm
 JOIN directory_users du ON du.directory_id = sqlc.arg(directory_id) AND du.member_id = dgm.member_id
-WHERE dgm.directory_group_id = sqlc.arg(directory_group_id)
+WHERE dgm.directory_group_id = sqlc.arg(directory_group_id) AND du.deleted_at IS NULL
 ORDER BY du.id;
 
 -- name: ListSCIMUserGroups :many

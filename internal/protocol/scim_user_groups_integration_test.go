@@ -129,3 +129,57 @@ func TestSCIMDiscoveryDeclaresUserGroupsReadOnly(t *testing.T) {
 	}
 	t.Fatal("the User schema omitted groups")
 }
+
+func TestSCIMDirectoryGroupSyncContinuesThroughOffboarding(t *testing.T) {
+	f := newSCIMFixture(t)
+	departed, incoming := f.user(t, "departed-worker", true), f.user(t, "incoming-worker", true)
+	group := scimResource(t, f.request(t, http.MethodPost, "Groups", fmt.Sprintf(
+		`{"externalId":"desk","displayName":"Desk","members":[{"value":%q}]}`, departed.ID), "", http.StatusCreated))
+	other := scimResource(t, f.request(t, http.MethodPost, "Groups", `{"externalId":"other","displayName":"Other"}`, "", http.StatusCreated))
+	userPath, groupPath := "Users/"+departed.ID, "Groups/"+group.ID
+	current := scimResource(t, f.request(t, http.MethodGet, userPath, "", "", http.StatusOK))
+	disabled := f.request(t, http.MethodPatch, userPath,
+		scimPatch(map[string]any{"op": "replace", "path": "active", "value": false}), current.Meta.Version, http.StatusOK)
+	disabledVersion := disabled.Header().Get("ETag")
+	if !strings.Contains(disabled.Body.String(), fmt.Sprintf(`"value":%q`, group.ID)) {
+		t.Fatal("disabling the user discarded the desired directory relationship")
+	}
+	add := func(id string) string {
+		return scimPatch(map[string]any{
+			"op": "add", "path": "members", "value": []map[string]string{{"value": id}},
+		})
+	}
+	f.request(t, http.MethodPatch, "Groups/"+other.ID, add(departed.ID), other.Meta.Version, http.StatusBadRequest)
+	updated := scimResource(t, f.request(t, http.MethodPatch, groupPath, add(incoming.ID), group.Meta.Version, http.StatusOK))
+	if len(updated.Members) != 2 {
+		t.Fatal("adding an active employee discarded the existing disabled employee's directory relationship")
+	}
+	if _, err := f.store.Pool.Exec(f.ctx, `CREATE FUNCTION reject_offboarding_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN IF NEW.action='scim.user.delete' THEN RAISE EXCEPTION 'owned audit fixture'; END IF; RETURN NEW; END $$;
+		CREATE TRIGGER reject_offboarding_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_offboarding_audit()`); err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, http.MethodDelete, userPath, "", disabledVersion, http.StatusServiceUnavailable)
+	unchanged := scimResource(t, f.request(t, http.MethodGet, groupPath, "", "", http.StatusOK))
+	if unchanged.Meta.Version != updated.Meta.Version || len(unchanged.Members) != 2 {
+		t.Fatal("a failed delete changed the group's membership or version")
+	}
+	if _, err := f.store.Pool.Exec(f.ctx, `DROP TRIGGER reject_offboarding_audit ON audit_logs`); err != nil {
+		t.Fatal(err)
+	}
+	f.request(t, http.MethodDelete, userPath, "", disabledVersion, http.StatusNoContent)
+	f.request(t, http.MethodGet, userPath, "", "", http.StatusNotFound)
+	remaining := scimResource(t, f.request(t, http.MethodGet, groupPath, "", "", http.StatusOK))
+	if remaining.Meta.Version == updated.Meta.Version || len(remaining.Members) != 1 || remaining.Members[0].Value != incoming.ID {
+		t.Fatal("deleting the departed employee did not version and remove only their directory group relationship")
+	}
+	f.request(t, http.MethodPatch, groupPath, add(incoming.ID), updated.Meta.Version, http.StatusPreconditionFailed)
+	f.request(t, http.MethodPatch, groupPath, add(departed.ID), remaining.Meta.Version, http.StatusBadRequest)
+	var sources int
+	if err := f.store.Pool.QueryRow(f.ctx, `SELECT count(*) FROM group_members gm
+		JOIN directory_groups dg ON dg.group_id=gm.group_id
+		JOIN directory_users du ON du.member_id=gm.member_id AND du.directory_id=dg.directory_id
+		WHERE dg.id=$1 AND du.id=$2 AND gm.source='directory'`, group.ID, departed.ID).Scan(&sources); err != nil || sources != 0 {
+		t.Fatal("deletion retained the departed employee's native directory source")
+	}
+}

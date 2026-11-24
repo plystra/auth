@@ -267,6 +267,11 @@ func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID string, token 
 		if err != nil {
 			return err
 		}
+		if err := q.RemoveTombstonedUserDirectoryMemberships(ctx, db.RemoveTombstonedUserDirectoryMembershipsParams{
+			DirectoryID: directory.ID, MemberID: row.MemberID, SpaceID: directory.SpaceID,
+		}); err != nil {
+			return err
+		}
 		policyVersion, err := q.BumpPolicyVersion(ctx, db.BumpPolicyVersionParams{ID: directory.SpaceID})
 		if err != nil {
 			return err
@@ -419,34 +424,18 @@ func revokeDirectoryBindingTx(ctx context.Context, q *db.Queries, directory db.D
 	return nil
 }
 
-func syncDirectoryGroupMembersTx(ctx context.Context, q *db.Queries, directoryID, spaceID, directoryGroupID, groupID string, userIDs []string) error {
+func syncDirectoryGroupMembersTx(ctx context.Context, q *db.Queries, spaceID, directoryGroupID, groupID string, memberIDs []string) error {
 	if err := q.DeleteDirectoryGroupMembers(ctx, db.DeleteDirectoryGroupMembersParams{DirectoryGroupID: directoryGroupID}); err != nil {
 		return err
 	}
 	if err := q.DeleteDirectoryManagedGroupMembers(ctx, db.DeleteDirectoryManagedGroupMembersParams{GroupID: groupID, SpaceID: spaceID}); err != nil {
 		return err
 	}
-	seen := make(map[string]struct{}, len(userIDs))
-	for _, userID := range userIDs {
-		userID = strings.TrimSpace(userID)
-		if userID == "" {
-			continue
-		}
-		if _, ok := seen[userID]; ok {
-			continue
-		}
-		seen[userID] = struct{}{}
-		user, err := q.GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directoryID, ID: userID})
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && !user.Active {
-			return apierr.New("invalid_request", "group members must reference active users in this directory")
-		}
-		if err != nil {
+	for _, memberID := range memberIDs {
+		if err := q.AddDirectoryGroupMember(ctx, db.AddDirectoryGroupMemberParams{DirectoryGroupID: directoryGroupID, MemberID: memberID}); err != nil {
 			return err
 		}
-		if err := q.AddDirectoryGroupMember(ctx, db.AddDirectoryGroupMemberParams{DirectoryGroupID: directoryGroupID, MemberID: user.MemberID}); err != nil {
-			return err
-		}
-		if err := q.AddDirectoryManagedGroupMember(ctx, db.AddDirectoryManagedGroupMemberParams{GroupID: groupID, MemberID: user.MemberID, SpaceID: spaceID}); err != nil {
+		if err := q.AddDirectoryManagedGroupMember(ctx, db.AddDirectoryManagedGroupMemberParams{GroupID: groupID, MemberID: memberID, SpaceID: spaceID}); err != nil {
 			return err
 		}
 	}

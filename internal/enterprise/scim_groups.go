@@ -267,20 +267,31 @@ func (s *Service) syncDirectoryMembersTx(ctx context.Context, q *db.Queries, dir
 	if err != nil {
 		return err
 	}
+	desired := make([]string, 0, len(userIDs))
+	seen := make(map[string]bool, len(userIDs))
 	for _, id := range userIDs {
-		user, err := q.GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directory.ID, ID: strings.TrimSpace(id)})
-		if errors.Is(err, pgx.ErrNoRows) || err == nil && !user.Active {
-			return apierr.New("invalid_request", "group members must reference active users in this directory")
+		id = strings.TrimSpace(id)
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		user, err := q.GetDirectoryUserByID(ctx, db.GetDirectoryUserByIDParams{DirectoryID: directory.ID, ID: id})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return apierr.New("invalid_request", "group members must belong to this directory")
 		}
 		if err != nil {
 			return err
 		}
+		if !user.Active && !slices.Contains(previous, id) {
+			return apierr.New("invalid_request", "only active users can establish a new directory group membership")
+		}
+		desired = append(desired, user.MemberID)
 		members = append(members, user.MemberID)
 	}
 	slices.Sort(members)
 	members = slices.Compact(members)
 	if err := s.Authorization.ApplyDirectoryAuthorityTx(ctx, q, directory.ConfiguredByMemberID.String, directory.SpaceID, group.GroupID, members, func() error {
-		if err := syncDirectoryGroupMembersTx(ctx, q, directory.ID, directory.SpaceID, group.ID, group.GroupID, userIDs); err != nil {
+		if err := syncDirectoryGroupMembersTx(ctx, q, directory.SpaceID, group.ID, group.GroupID, desired); err != nil {
 			return err
 		}
 		if deleting {
