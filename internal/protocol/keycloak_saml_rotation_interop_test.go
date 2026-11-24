@@ -48,15 +48,8 @@ func (a keycloakAdmin) signingKeys(t *testing.T) (keycloakSigningKey, []keycloak
 	return keycloakSigningKey{}, nil
 }
 
-func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, issuer string, transport *http.Transport, spaceID string, connection enterprise.Connection, login func(), priorAccess string) {
+func (admin keycloakAdmin) stageRSASigner(t *testing.T) (keycloakSigningKey, keycloakSigningKey, string) {
 	t.Helper()
-	oldBrowser := newOIDCBrowser(t, rp)
-	oldPath := oldBrowser.beginFromAuthorization(t, oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier())
-	identified, _ := oldBrowser.request(t, http.MethodPost, oldPath+"/identify", map[string]string{
-		"email": "original@workforce.example.test", "method": "password",
-	}, rp.host.URL, "", http.StatusOK)
-	keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, oldPath, "original", identified)
-
 	original, _ := admin.signingKeys(t)
 	var realm struct{ ID string }
 	admin.call(t, http.MethodGet, "", nil, &realm, http.StatusOK)
@@ -79,7 +72,6 @@ func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, 
 	if nextProvider.ID == "" || strings.Contains(nextProvider.ID, "/") {
 		t.Fatal("Keycloak returned an invalid key provider identifier")
 	}
-	nextPath := "/components/" + url.PathEscape(nextProvider.ID)
 	active, keys := admin.signingKeys(t)
 	var successor keycloakSigningKey
 	for _, key := range keys {
@@ -91,7 +83,39 @@ func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, 
 	if active.KID != original.KID || successor.KID == "" || successor.KID == original.KID || successor.Certificate == "" {
 		t.Fatal("Keycloak did not publish a distinct standby certificate while keeping the original signer")
 	}
+	return original, successor, "/components/" + url.PathEscape(nextProvider.ID)
+}
 
+func (admin keycloakAdmin) activateRSASigner(t *testing.T, path string, successor keycloakSigningKey) {
+	t.Helper()
+	var provider keycloakKeyProvider
+	admin.call(t, http.MethodGet, path, nil, &provider, http.StatusOK)
+	provider.Config["active"] = []string{"true"}
+	admin.call(t, http.MethodPut, path, provider, nil, http.StatusNoContent)
+	if current, _ := admin.signingKeys(t); current.KID != successor.KID {
+		t.Fatal("Keycloak did not elect the replacement signing key")
+	}
+}
+
+func (admin keycloakAdmin) retireRSASigner(t *testing.T, original keycloakSigningKey) {
+	t.Helper()
+	path := "/components/" + url.PathEscape(original.ProviderID)
+	var provider keycloakKeyProvider
+	admin.call(t, http.MethodGet, path, nil, &provider, http.StatusOK)
+	provider.Config["enabled"] = []string{"false"}
+	admin.call(t, http.MethodPut, path, provider, nil, http.StatusNoContent)
+}
+
+func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, issuer string, transport *http.Transport, spaceID string, connection enterprise.Connection, login func(), priorAccess string) {
+	t.Helper()
+	oldBrowser := newOIDCBrowser(t, rp)
+	oldPath := oldBrowser.beginFromAuthorization(t, oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier())
+	identified, _ := oldBrowser.request(t, http.MethodPost, oldPath+"/identify", map[string]string{
+		"email": "original@workforce.example.test", "method": "password",
+	}, rp.host.URL, "", http.StatusOK)
+	keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, oldPath, "original", identified)
+
+	original, successor, nextPath := admin.stageRSASigner(t)
 	rp.workforce.Sessions.Factors = &factor.Service{Store: rp.st, DataKey: secret.New(strings.Repeat("d", 32))}
 	enrollment, err := rp.workforce.Sessions.Factors.BeginTOTP(t.Context(), "usr_human_rp", "rp@example.test")
 	if err != nil {
@@ -141,19 +165,10 @@ func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, 
 		t.Fatal("the IdP metadata did not publish both signing certificates")
 	}
 	importMetadata(overlap)
-	admin.call(t, http.MethodGet, nextPath, nil, &nextProvider, http.StatusOK)
-	nextProvider.Config["active"] = []string{"true"}
-	admin.call(t, http.MethodPut, nextPath, nextProvider, nil, http.StatusNoContent)
-	if current, _ := admin.signingKeys(t); current.KID != successor.KID {
-		t.Fatal("Keycloak did not elect the replacement signing key")
-	}
+	admin.activateRSASigner(t, nextPath, successor)
 	login()
 
-	oldProviderPath := "/components/" + url.PathEscape(original.ProviderID)
-	var oldProvider keycloakKeyProvider
-	admin.call(t, http.MethodGet, oldProviderPath, nil, &oldProvider, http.StatusOK)
-	oldProvider.Config["enabled"] = []string{"false"}
-	admin.call(t, http.MethodPut, oldProviderPath, oldProvider, nil, http.StatusNoContent)
+	admin.retireRSASigner(t, original)
 	retired := fetchKeycloakSAMLMetadata(t, admin.client, issuer)
 	retiredCerts := strings.Join(strings.Fields(retired), "")
 	if strings.Contains(retiredCerts, original.Certificate) || !strings.Contains(retiredCerts, successor.Certificate) {

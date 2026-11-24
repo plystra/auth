@@ -26,5 +26,5 @@ jobs:
         run: make check
       - name: Verify workforce login failover and SAML role mapping
         run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak((SAML)?DirectoryEmployeeCompletesAfterIssuerProcessExit|WorkforceSAMLUsesCurrentRoleMapping)$' -count=1
-      - name: Verify SAML launch and directory offboarding
-        run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak(IdPInitiatedSAMLLoginAndDirectoryOffboarding|SAMLDirectoryEmployeeLosesRelyingPartyAccessOnOffboarding)$' -count=1
+      - name: Verify directory offboarding and upstream credential rotation
+        run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak(IdPInitiatedSAMLLoginAndDirectoryOffboarding|(SAML)?DirectoryEmployeeLosesRelyingPartyAccessOnOffboarding)$' -count=1

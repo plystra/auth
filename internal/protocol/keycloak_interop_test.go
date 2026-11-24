@@ -503,15 +503,62 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 			}
 		}, active.AccessToken)
 	} else {
-		replaceSecret := rotateKeycloakOIDCClientSecret(t, newKeycloakAdmin(t, upstream, issuer, adminPassword))
+		admin := newKeycloakAdmin(t, upstream, issuer, adminPassword)
+		replaceSecret := rotateKeycloakOIDCClientSecret(t, admin)
 		consent(http.StatusBadRequest)
 		updateKeycloakOIDCConnectionSecret(t, rp, space.ID, connection, replaceSecret)
 		if after, _ := signIn(); after != subject {
 			t.Fatal("changing the Keycloak client secret changed the relying-party subject")
 		}
+		verifyKeycloakOIDCSigningRollover(t, admin, issuer, func() {
+			if after, _ := signIn(); after != subject {
+				t.Fatal("changing the upstream KID changed the relying-party subject")
+			}
+		})
 		client.send(t, http.MethodGet, "/oauth/userinfo", active.AccessToken, "", "", nil).requireStatus(t, http.StatusOK)
 		assertRevoked()
 	}
+}
+
+func verifyKeycloakOIDCSigningRollover(t *testing.T, admin keycloakAdmin, issuer string, signIn func()) {
+	t.Helper()
+	original, successor, nextPath := admin.stageRSASigner(t)
+	assertPublished := func(wantOriginal bool) {
+		t.Helper()
+		request, err := http.NewRequestWithContext(t.Context(), http.MethodGet, issuer+"/protocol/openid-connect/certs", nil)
+		if err != nil {
+			t.Fatal("could not construct upstream JWKS request")
+		}
+		response, err := admin.client.Do(request)
+		if err != nil {
+			t.Fatal("could not read upstream JWKS")
+		}
+		defer func() { _ = response.Body.Close() }()
+		var document struct {
+			Keys []struct {
+				KID string `json:"kid"`
+				Use string `json:"use"`
+			}
+		}
+		if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&document) != nil {
+			t.Fatal("upstream did not return a valid JWKS")
+		}
+		ids := make(map[string]bool, len(document.Keys))
+		for _, key := range document.Keys {
+			if key.Use == "sig" {
+				ids[key.KID] = true
+			}
+		}
+		if ids[original.KID] != wantOriginal || !ids[successor.KID] {
+			t.Fatal("upstream JWKS did not publish the expected signing keys")
+		}
+	}
+	assertPublished(true)
+	admin.activateRSASigner(t, nextPath, successor)
+	signIn()
+	admin.retireRSASigner(t, original)
+	assertPublished(false)
+	signIn()
 }
 
 func rotateKeycloakOIDCClientSecret(t *testing.T, admin keycloakAdmin) secret.String {
