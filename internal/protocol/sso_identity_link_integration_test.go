@@ -88,6 +88,37 @@ func TestExistingAccountLinksEnterpriseOIDCAndSignsInToApplication(t *testing.T)
 	seedProof(rp.session.SessionID, mismatched.State, wrongCode)
 	post(base+"/complete", rp.session.AccessToken, map[string]string{"state": mismatched.State, "code": wrongCode}).requireError(t, http.StatusBadRequest, "invalid_grant")
 
+	claimed := start()
+	claimedCode := codeFor(claimed, browserEmployee)
+	seedProof(rp.session.SessionID, claimed.State, claimedCode)
+	if _, err := rp.st.Pool.Exec(ctx, `INSERT INTO users(id,email,email_normalized,password_hash,status)
+		VALUES ('usr_link_other','other@example.test','other@example.test','unused','active')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `INSERT INTO external_identities(id,user_id,issuer,subject)
+		VALUES ('ext_link_other','usr_link_other',$1,$2)`, upstream.issuer, upstreamSubject); err != nil {
+		t.Fatal(err)
+	}
+	post(base+"/complete", rp.session.AccessToken, map[string]string{"state": claimed.State, "code": claimedCode}).requireError(t, http.StatusBadRequest, "invalid_grant")
+	var actualOwner string
+	if err := rp.st.Pool.QueryRow(ctx, `SELECT user_id FROM external_identities WHERE id='ext_link_other'`).Scan(&actualOwner); err != nil || actualOwner != "usr_link_other" {
+		t.Fatal("linking changed the owner of another account's upstream identity")
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `DELETE FROM external_identities WHERE id='ext_link_other'`); err != nil {
+		t.Fatal(err)
+	}
+
+	withdrawn := start()
+	withdrawnCode := codeFor(withdrawn, browserEmployee)
+	seedProof(rp.session.SessionID, withdrawn.State, withdrawnCode)
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE user_members SET status='revoked',revoked_at=clock_timestamp() WHERE user_id=$1 AND member_id=$2`, userID, memberID); err != nil {
+		t.Fatal(err)
+	}
+	post(base+"/complete", rp.session.AccessToken, map[string]string{"state": withdrawn.State, "code": withdrawnCode}).requireError(t, http.StatusBadRequest, "invalid_grant")
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE user_members SET status='active',revoked_at=NULL WHERE user_id=$1 AND member_id=$2`, userID, memberID); err != nil {
+		t.Fatal(err)
+	}
+
 	failed := start()
 	failedCode := codeFor(failed, browserEmployee)
 	seedProof(rp.session.SessionID, failed.State, failedCode)
