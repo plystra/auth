@@ -41,12 +41,15 @@ type oidcTestCode struct {
 
 type oidcTestProvider struct {
 	discoveryRequests atomic.Int32
+	tokenRequests     atomic.Int32
 	server            *httptest.Server
 	issuer            string
 	key               *rsa.PrivateKey
 	mu                sync.Mutex
 	codes             map[string]oidcTestCode
 	clientSecret      string
+	authMethods       []string
+	requiredMethod    string
 }
 
 func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
@@ -64,24 +67,34 @@ func newOIDCTestProvider(t *testing.T) *oidcTestProvider {
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			provider.discoveryRequests.Add(1)
-			writeOIDCTestJSON(w, map[string]any{
+			doc := map[string]any{
 				"issuer": provider.issuer, "authorization_endpoint": provider.issuer + "/authorize",
 				"token_endpoint": provider.issuer + "/token", "jwks_uri": provider.issuer + "/jwks",
-			})
+			}
+			provider.mu.Lock()
+			if provider.authMethods != nil {
+				doc["token_endpoint_auth_methods_supported"] = provider.authMethods
+			}
+			provider.mu.Unlock()
+			writeOIDCTestJSON(w, doc)
 		case "/jwks":
 			writeOIDCTestJSON(w, map[string]any{"keys": []any{rsaPublicJWK(&provider.key.PublicKey)}})
 		case "/token":
+			provider.tokenRequests.Add(1)
 			if err := r.ParseForm(); err != nil {
 				http.Error(w, "invalid form", http.StatusBadRequest)
 				return
 			}
 			audience, password := r.Form.Get("client_id"), r.Form.Get("client_secret")
+			method := "client_secret_post"
 			if basicID, basicPassword, ok := r.BasicAuth(); ok {
+				method = "client_secret_basic"
 				audience, _ = url.QueryUnescape(basicID)
 				password, _ = url.QueryUnescape(basicPassword)
 			}
 			provider.mu.Lock()
-			if provider.clientSecret != "" && password != provider.clientSecret {
+			if (provider.clientSecret != "" && password != provider.clientSecret) ||
+				(provider.requiredMethod != "" && method != provider.requiredMethod) {
 				provider.mu.Unlock()
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -121,6 +134,13 @@ func (p *oidcTestProvider) useClientSecret(value string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.clientSecret = value
+}
+
+func (p *oidcTestProvider) setTokenAuth(required string, advertised ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.requiredMethod = required
+	p.authMethods = advertised
 }
 
 func (p *oidcTestProvider) addCode(code string, value oidcTestCode) {
@@ -219,6 +239,78 @@ func newSSOHTTPFixture(t *testing.T) (*store.Store, *authorization.Service, *ent
 		Passwords: security.DefaultPasswordHasher(), HTTPClient: provider.server.Client(),
 	}
 	return st, authorizer, svc, owner, space.ID, provider
+}
+
+func TestOIDCSSOUsesConfiguredUpstreamClientAuthenticationWithoutRetry(t *testing.T) {
+	const basic, post = "client_secret_basic", "client_secret_post"
+	_, _, svc, owner, spaceID, provider := newSSOHTTPFixture(t)
+	ctx := authorization.WithHumanActor(t.Context(), owner.ID, "usr_sso_http_owner")
+	provider.useClientSecret("fixture :+ client secret")
+	provider.setTokenAuth(post, basic, post)
+	connection, err := svc.CreateConnection(ctx, owner.ID, spaceID, enterprise.ConnectionInput{
+		Name: "Post-authenticated Workforce", Provider: "oidc", Issuer: provider.issuer, ClientID: "post-client",
+		ClientSecret: "fixture :+ client secret", TokenEndpointAuthMethod: post,
+		RedirectURI: "https://auth.example.test/v1/sso/{connection_id}/callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if connection.TokenEndpointAuthMethod != post {
+		t.Fatal("the configured authentication method was not retained")
+	}
+	var mux http.ServeMux
+	(HTTP{Enterprise: svc}).Register(&mux)
+	path := "/v1/sso/" + connection.ID
+	start := func(want int) *httptest.ResponseRecorder {
+		t.Helper()
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, path+"/start", nil))
+		if res.Code != want {
+			t.Fatalf("start HTTP status = %d, want %d", res.Code, want)
+		}
+		return res
+	}
+	prepare := func(code string) []byte {
+		t.Helper()
+		var started struct{ Data enterprise.StartResult }
+		if err := json.Unmarshal(start(http.StatusOK).Body.Bytes(), &started); err != nil {
+			t.Fatal(err)
+		}
+		target, err := url.Parse(started.Data.AuthorizationURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		provider.addCode(code, oidcTestCode{
+			nonce: target.Query().Get("nonce"), subject: "oidc-method-user",
+			email: "oidc-method-user@example.test", emailVerified: true,
+			challenge: target.Query().Get("code_challenge"), redirectURI: connection.RedirectURI,
+		})
+		body, err := json.Marshal(map[string]string{"state": started.Data.State, "code": code, "redirect_uri": connection.RedirectURI})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+	callback := func(body []byte, want int, calls int32) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, path+"/callback", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		mux.ServeHTTP(res, req)
+		if res.Code != want || provider.tokenRequests.Load() != calls {
+			t.Fatalf("callback status = %d and upstream requests = %d, want %d and %d", res.Code, provider.tokenRequests.Load(), want, calls)
+		}
+		if want == http.StatusOK && !strings.Contains(res.Body.String(), `"access_token"`) {
+			t.Fatal("successful POST authentication did not issue an employee session")
+		}
+	}
+	callback(prepare("post-valid"), http.StatusOK, 1)
+	inFlight := prepare("method-removed")
+	provider.setTokenAuth(basic, basic)
+	start(http.StatusServiceUnavailable)
+	callback(inFlight, http.StatusServiceUnavailable, 1)
+	provider.setTokenAuth(basic, basic, post)
+	callback(prepare("post-rejected"), http.StatusBadRequest, 2)
 }
 
 func TestOIDCSSOHTTPEnforcesReplayCrossConnectionUnverifiedEmailAndDisable(t *testing.T) {

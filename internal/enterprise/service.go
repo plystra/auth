@@ -94,32 +94,34 @@ type Domain struct {
 }
 
 type ConnectionInput struct {
-	Name          string
-	Provider      string
-	Issuer        string
-	ClientID      string
-	ClientSecret  string
-	RedirectURI   string
-	GroupsClaim   string
-	RoleMappings  map[string]string
-	SAMLMetadata  string
-	CoversSubtree bool
+	Name                    string
+	Provider                string
+	Issuer                  string
+	ClientID                string
+	ClientSecret            string
+	TokenEndpointAuthMethod string
+	RedirectURI             string
+	GroupsClaim             string
+	RoleMappings            map[string]string
+	SAMLMetadata            string
+	CoversSubtree           bool
 }
 
 type Connection struct {
-	ID            string            `json:"id"`
-	SpaceID       string            `json:"space_id"`
-	Name          string            `json:"name"`
-	Provider      string            `json:"provider"`
-	Issuer        string            `json:"issuer"`
-	ClientID      string            `json:"client_id"`
-	RedirectURI   string            `json:"redirect_uri"`
-	GroupsClaim   string            `json:"groups_claim"`
-	RoleMappings  map[string]string `json:"role_mappings"`
-	Status        string            `json:"status"`
-	CoversSubtree bool              `json:"covers_subtree"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
+	ID                      string            `json:"id"`
+	SpaceID                 string            `json:"space_id"`
+	Name                    string            `json:"name"`
+	Provider                string            `json:"provider"`
+	Issuer                  string            `json:"issuer"`
+	ClientID                string            `json:"client_id"`
+	TokenEndpointAuthMethod string            `json:"token_endpoint_auth_method,omitempty"`
+	RedirectURI             string            `json:"redirect_uri"`
+	GroupsClaim             string            `json:"groups_claim"`
+	RoleMappings            map[string]string `json:"role_mappings"`
+	Status                  string            `json:"status"`
+	CoversSubtree           bool              `json:"covers_subtree"`
+	CreatedAt               time.Time         `json:"created_at"`
+	UpdatedAt               time.Time         `json:"updated_at"`
 }
 
 type ConnectionDetail struct {
@@ -179,6 +181,7 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		return Connection{}, apierr.New("validation_failed", "SSO connection fields are invalid")
 	}
 	var samlDetails *samlConnectionDetails
+	tokenAuthMethod := in.TokenEndpointAuthMethod
 	switch in.Provider {
 	case "oidc":
 		if in.ClientID == "" || len(in.ClientID) > 512 || in.ClientSecret == "" || len(in.ClientSecret) > 4096 {
@@ -187,7 +190,17 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		if err := validateIssuer(in.Issuer); err != nil {
 			return Connection{}, err
 		}
+		if tokenAuthMethod == "" {
+			tokenAuthMethod = oidcClientSecretBasic
+		}
+		if tokenAuthMethod != oidcClientSecretBasic && tokenAuthMethod != oidcClientSecretPost {
+			return Connection{}, apierr.New("validation_failed", "OIDC token endpoint authentication method is unsupported")
+		}
 	case "saml":
+		if tokenAuthMethod != "" {
+			return Connection{}, apierr.New("validation_failed", "token endpoint authentication applies only to OIDC")
+		}
+		tokenAuthMethod = oidcClientSecretBasic
 		if in.ClientSecret != "" || in.SAMLMetadata == "" || len(in.SAMLMetadata) > 1024*1024 {
 			return Connection{}, apierr.New("validation_failed", "SAML connection metadata is required")
 		}
@@ -253,7 +266,8 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 		params := db.CreateSSOConnectionParams{
 			ID: connectionID, SpaceID: spaceID, Name: in.Name, Provider: in.Provider,
 			Issuer: in.Issuer, ClientID: in.ClientID, ClientSecretCiphertext: ciphertext,
-			RedirectUri: redirectURI, GroupsClaim: in.GroupsClaim, RoleMappings: mappings,
+			TokenEndpointAuthMethod: tokenAuthMethod,
+			RedirectUri:             redirectURI, GroupsClaim: in.GroupsClaim, RoleMappings: mappings,
 			CoversSubtree: in.CoversSubtree, ConfiguredByMemberID: optionalDirectoryText(actorMemberID), ConfiguredByUserID: actorUserID(ctx, actorMemberID),
 		}
 		if samlDetails != nil {
@@ -810,7 +824,7 @@ func (s *Service) start(ctx context.Context, connectionID, requestedRedirectURI,
 }
 
 func (s *Service) prepareOIDCRequest(ctx context.Context, row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, db.CreateSSOStateParams, error) {
-	provider, err := s.discovery(ctx, row.Issuer)
+	provider, err := s.discovery(ctx, row.Issuer, row.TokenEndpointAuthMethod)
 	if err != nil {
 		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
@@ -1019,7 +1033,7 @@ func (s *Service) exchangeOIDCCode(ctx context.Context, row db.SsoConnection, st
 	if err != nil {
 		return idTokenClaims{}, apierr.New("temporarily_unavailable", "SSO state is unavailable")
 	}
-	provider, err := s.discovery(ctx, row.Issuer)
+	provider, err := s.discovery(ctx, row.Issuer, row.TokenEndpointAuthMethod)
 	if err != nil {
 		return idTokenClaims{}, err
 	}
@@ -1027,7 +1041,12 @@ func (s *Service) exchangeOIDCCode(ctx context.Context, row db.SsoConnection, st
 	if err != nil {
 		return idTokenClaims{}, apierr.New("temporarily_unavailable", "SSO connection is unavailable")
 	}
-	config := oauth2.Config{ClientID: row.ClientID, ClientSecret: string(clientSecret), Endpoint: provider.Endpoint(), RedirectURL: state.RedirectUri, Scopes: []string{"openid", "email", "profile"}}
+	endpoint := provider.Endpoint()
+	endpoint.AuthStyle = oauth2.AuthStyleInHeader
+	if row.TokenEndpointAuthMethod == oidcClientSecretPost {
+		endpoint.AuthStyle = oauth2.AuthStyleInParams
+	}
+	config := oauth2.Config{ClientID: row.ClientID, ClientSecret: string(clientSecret), Endpoint: endpoint, RedirectURL: state.RedirectUri, Scopes: []string{"openid", "email", "profile"}}
 	exchangeCtx := context.WithValue(ctx, oauth2.HTTPClient, s.httpClient())
 	token, err := config.Exchange(exchangeCtx, code, oauth2.SetAuthURLParam("code_verifier", string(verifier)))
 	if err != nil {
@@ -1444,7 +1463,12 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 	return account.AuthResult{User: account.User{ID: userID, Email: userEmail, EmailVerified: true, Status: userStatus, DisplayName: userName, CreatedAt: userCreated}, Tokens: &tokens}, nil
 }
 
-func (s *Service) discovery(ctx context.Context, issuer string) (*oidc.Provider, error) {
+const (
+	oidcClientSecretBasic = "client_secret_basic"
+	oidcClientSecretPost  = "client_secret_post"
+)
+
+func (s *Service) discovery(ctx context.Context, issuer, tokenAuthMethod string) (*oidc.Provider, error) {
 	if err := validateIssuer(issuer); err != nil {
 		return nil, err
 	}
@@ -1467,9 +1491,19 @@ func (s *Service) discovery(ctx context.Context, issuer string) (*oidc.Provider,
 	if err != nil || len(body) > maxDiscoveryBytes {
 		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
 	}
-	var doc oidc.ProviderConfig
+	var doc struct {
+		oidc.ProviderConfig
+		TokenEndpointAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+	}
 	if err := json.Unmarshal(body, &doc); err != nil || doc.IssuerURL != issuer {
 		return nil, apierr.New("temporarily_unavailable", "OIDC discovery is invalid")
+	}
+	methods := doc.TokenEndpointAuthMethods
+	if methods == nil {
+		methods = []string{oidcClientSecretBasic}
+	}
+	if !slices.Contains(methods, tokenAuthMethod) {
+		return nil, apierr.New("temporarily_unavailable", "OIDC provider does not advertise the configured client authentication method")
 	}
 	for _, endpoint := range []string{doc.AuthURL, doc.TokenURL, doc.JWKSURL} {
 		if err := validateEndpoint(endpoint, issuer); err != nil {
@@ -1745,10 +1779,15 @@ func connectionFromPublicRow(row db.ListSSOConnectionsRow) (Connection, error) {
 	if err := json.Unmarshal(row.RoleMappings, &mappings); err != nil || mappings == nil {
 		return Connection{}, apierr.New("UNAVAILABLE", "SSO connection configuration is unavailable")
 	}
+	var tokenAuthMethod string
+	if row.Provider == "oidc" {
+		tokenAuthMethod = row.TokenEndpointAuthMethod
+	}
 	return Connection{
 		ID: row.ID, SpaceID: row.SpaceID, Name: row.Name, Provider: row.Provider,
 		Issuer: row.Issuer, ClientID: row.ClientID, RedirectURI: row.RedirectUri,
-		GroupsClaim: row.GroupsClaim, RoleMappings: mappings, Status: row.Status,
+		TokenEndpointAuthMethod: tokenAuthMethod,
+		GroupsClaim:             row.GroupsClaim, RoleMappings: mappings, Status: row.Status,
 		CoversSubtree: row.CoversSubtree, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time,
 	}, nil
 }

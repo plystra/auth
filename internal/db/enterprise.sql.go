@@ -111,7 +111,8 @@ const createSSOConnection = `-- name: CreateSSOConnection :one
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id
+    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id,
+    token_endpoint_auth_method
 )
 VALUES (
     $1, $2, $3, $4,
@@ -119,46 +120,48 @@ VALUES (
     $8, $9, $10, 'active',
     $11, $12, $13,
     $14, $15,
-    $16, $17
+    $16, $17, $18
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 `
 
 type CreateSSOConnectionParams struct {
-	ID                     string      `json:"id"`
-	SpaceID                string      `json:"space_id"`
-	Name                   string      `json:"name"`
-	Provider               string      `json:"provider"`
-	Issuer                 string      `json:"issuer"`
-	ClientID               string      `json:"client_id"`
-	ClientSecretCiphertext []byte      `json:"client_secret_ciphertext"`
-	RedirectUri            string      `json:"redirect_uri"`
-	GroupsClaim            string      `json:"groups_claim"`
-	RoleMappings           []byte      `json:"role_mappings"`
-	SamlEntityID           pgtype.Text `json:"saml_entity_id"`
-	SamlSsoUrl             pgtype.Text `json:"saml_sso_url"`
-	SamlSsoBinding         pgtype.Text `json:"saml_sso_binding"`
-	SamlIdpCertificate     pgtype.Text `json:"saml_idp_certificate"`
-	CoversSubtree          bool        `json:"covers_subtree"`
-	ConfiguredByMemberID   pgtype.Text `json:"configured_by_member_id"`
-	ConfiguredByUserID     pgtype.Text `json:"configured_by_user_id"`
+	ID                      string      `json:"id"`
+	SpaceID                 string      `json:"space_id"`
+	Name                    string      `json:"name"`
+	Provider                string      `json:"provider"`
+	Issuer                  string      `json:"issuer"`
+	ClientID                string      `json:"client_id"`
+	ClientSecretCiphertext  []byte      `json:"client_secret_ciphertext"`
+	RedirectUri             string      `json:"redirect_uri"`
+	GroupsClaim             string      `json:"groups_claim"`
+	RoleMappings            []byte      `json:"role_mappings"`
+	SamlEntityID            pgtype.Text `json:"saml_entity_id"`
+	SamlSsoUrl              pgtype.Text `json:"saml_sso_url"`
+	SamlSsoBinding          pgtype.Text `json:"saml_sso_binding"`
+	SamlIdpCertificate      pgtype.Text `json:"saml_idp_certificate"`
+	CoversSubtree           bool        `json:"covers_subtree"`
+	ConfiguredByMemberID    pgtype.Text `json:"configured_by_member_id"`
+	ConfiguredByUserID      pgtype.Text `json:"configured_by_user_id"`
+	TokenEndpointAuthMethod string      `json:"token_endpoint_auth_method"`
 }
 
 type CreateSSOConnectionRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnectionParams) (CreateSSOConnectionRow, error) {
@@ -180,6 +183,7 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		arg.CoversSubtree,
 		arg.ConfiguredByMemberID,
 		arg.ConfiguredByUserID,
+		arg.TokenEndpointAuthMethod,
 	)
 	var i CreateSSOConnectionRow
 	err := row.Scan(
@@ -196,6 +200,7 @@ func (q *Queries) CreateSSOConnection(ctx context.Context, arg CreateSSOConnecti
 		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
@@ -310,7 +315,7 @@ const getSSOConnection = `-- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id, role_mapping_authority
+    configured_by_member_id, configured_by_user_id, role_mapping_authority, token_endpoint_auth_method
 FROM sso_connections WHERE id = $1
 `
 
@@ -343,13 +348,14 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
 		&i.RoleMappingAuthority,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
 
 const getSSOConnectionInSpace = `-- name: GetSSOConnectionInSpace :one
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 FROM sso_connections WHERE space_id = $1 AND id = $2
 `
 
@@ -359,19 +365,20 @@ type GetSSOConnectionInSpaceParams struct {
 }
 
 type GetSSOConnectionInSpaceRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) GetSSOConnectionInSpace(ctx context.Context, arg GetSSOConnectionInSpaceParams) (GetSSOConnectionInSpaceRow, error) {
@@ -391,6 +398,7 @@ func (q *Queries) GetSSOConnectionInSpace(ctx context.Context, arg GetSSOConnect
 		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
@@ -513,7 +521,7 @@ func (q *Queries) ListSAMLSigningTrust(ctx context.Context, arg ListSAMLSigningT
 
 const listSSOConnections = `-- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 FROM sso_connections WHERE space_id = $1
 ORDER BY created_at, id
 `
@@ -523,19 +531,20 @@ type ListSSOConnectionsParams struct {
 }
 
 type ListSSOConnectionsRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnectionsParams) ([]ListSSOConnectionsRow, error) {
@@ -561,6 +570,7 @@ func (q *Queries) ListSSOConnections(ctx context.Context, arg ListSSOConnections
 			&i.CoversSubtree,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.TokenEndpointAuthMethod,
 		); err != nil {
 			return nil, err
 		}
@@ -576,7 +586,7 @@ const lockSSOConnection = `-- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id, role_mapping_authority
+    configured_by_member_id, configured_by_user_id, role_mapping_authority, token_endpoint_auth_method
 FROM sso_connections WHERE id = $1 FOR UPDATE
 `
 
@@ -609,6 +619,7 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
 		&i.RoleMappingAuthority,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
@@ -708,7 +719,7 @@ SET client_secret_ciphertext = $1,
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = $2 AND space_id = $3
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 `
 
 type ReplaceOIDCClientSecretParams struct {
@@ -718,19 +729,20 @@ type ReplaceOIDCClientSecretParams struct {
 }
 
 type ReplaceOIDCClientSecretRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) ReplaceOIDCClientSecret(ctx context.Context, arg ReplaceOIDCClientSecretParams) (ReplaceOIDCClientSecretRow, error) {
@@ -750,6 +762,7 @@ func (q *Queries) ReplaceOIDCClientSecret(ctx context.Context, arg ReplaceOIDCCl
 		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
@@ -760,7 +773,7 @@ SET saml_idp_certificate = $1,
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = $2 AND space_id = $3
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 `
 
 type ReplaceSAMLSigningCertificatesParams struct {
@@ -770,19 +783,20 @@ type ReplaceSAMLSigningCertificatesParams struct {
 }
 
 type ReplaceSAMLSigningCertificatesRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) ReplaceSAMLSigningCertificates(ctx context.Context, arg ReplaceSAMLSigningCertificatesParams) (ReplaceSAMLSigningCertificatesRow, error) {
@@ -802,6 +816,7 @@ func (q *Queries) ReplaceSAMLSigningCertificates(ctx context.Context, arg Replac
 		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }
@@ -813,7 +828,7 @@ SET role_mappings = $1,
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = $3 AND space_id = $4
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 `
 
 type ReplaceSSORoleMappingsParams struct {
@@ -824,19 +839,20 @@ type ReplaceSSORoleMappingsParams struct {
 }
 
 type ReplaceSSORoleMappingsRow struct {
-	ID            string             `json:"id"`
-	SpaceID       string             `json:"space_id"`
-	Name          string             `json:"name"`
-	Provider      string             `json:"provider"`
-	Issuer        string             `json:"issuer"`
-	ClientID      string             `json:"client_id"`
-	RedirectUri   string             `json:"redirect_uri"`
-	GroupsClaim   string             `json:"groups_claim"`
-	RoleMappings  []byte             `json:"role_mappings"`
-	Status        string             `json:"status"`
-	CoversSubtree bool               `json:"covers_subtree"`
-	CreatedAt     pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 func (q *Queries) ReplaceSSORoleMappings(ctx context.Context, arg ReplaceSSORoleMappingsParams) (ReplaceSSORoleMappingsRow, error) {
@@ -861,6 +877,7 @@ func (q *Queries) ReplaceSSORoleMappings(ctx context.Context, arg ReplaceSSORole
 		&i.CoversSubtree,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.TokenEndpointAuthMethod,
 	)
 	return i, err
 }

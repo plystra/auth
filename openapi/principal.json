@@ -870,6 +870,9 @@
           "status": {
             "type": "string"
           },
+          "token_endpoint_auth_method": {
+            "type": "string"
+          },
           "updated_at": {
             "format": "date-time",
             "type": "string"
@@ -936,6 +939,9 @@
             "type": "string"
           },
           "status": {
+            "type": "string"
+          },
+          "token_endpoint_auth_method": {
             "type": "string"
           },
           "updated_at": {
@@ -1264,6 +1270,13 @@
             "type": "object"
           },
           "saml_metadata": {
+            "type": "string"
+          },
+          "token_endpoint_auth_method": {
+            "enum": [
+              "client_secret_basic",
+              "client_secret_post"
+            ],
             "type": "string"
           }
         },

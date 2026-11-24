@@ -77,6 +77,12 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 Migration `0068` revokes existing enterprise SSO sessions whose original binding was unrecorded.
 Deploy updated Auth binaries with the migration and plan for those users to sign in again.
 
+Register the upstream OIDC client with `client_secret_basic`, or set the connection's
+`token_endpoint_auth_method` to `client_secret_post` if the client was registered for
+POST authentication. Auth checks the selected method against discovery before requesting
+an authorization code or exchanging it. Migration `0085` defaults existing connections
+to Basic. Re-create an existing connection configured to authenticate with POST.
+
 ### Register a SAML service provider
 
 After creating the active SAML connection from the IdP's metadata, complete request-bound

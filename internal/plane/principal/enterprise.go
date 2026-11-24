@@ -27,16 +27,17 @@ type createSSOConnectionInput struct {
 	ApprovalID    string `header:"Approval-Id"`
 	ID            string `path:"id"`
 	Body          struct {
-		Name          string            `json:"name"`
-		Provider      string            `json:"provider"`
-		Issuer        string            `json:"issuer"`
-		ClientID      string            `json:"client_id"`
-		ClientSecret  secret.String     `json:"client_secret"`
-		RedirectURI   string            `json:"redirect_uri"`
-		GroupsClaim   string            `json:"groups_claim,omitempty"`
-		RoleMappings  map[string]string `json:"role_mappings,omitempty"`
-		SAMLMetadata  string            `json:"saml_metadata,omitempty"`
-		CoversSubtree bool              `json:"covers_subtree,omitempty"`
+		Name                    string            `json:"name"`
+		Provider                string            `json:"provider"`
+		Issuer                  string            `json:"issuer"`
+		ClientID                string            `json:"client_id"`
+		ClientSecret            secret.String     `json:"client_secret"`
+		TokenEndpointAuthMethod string            `json:"token_endpoint_auth_method,omitempty" enum:"client_secret_basic,client_secret_post"`
+		RedirectURI             string            `json:"redirect_uri"`
+		GroupsClaim             string            `json:"groups_claim,omitempty"`
+		RoleMappings            map[string]string `json:"role_mappings,omitempty"`
+		SAMLMetadata            string            `json:"saml_metadata,omitempty"`
+		CoversSubtree           bool              `json:"covers_subtree,omitempty"`
 	}
 }
 
@@ -581,6 +582,9 @@ func (a *API) createSSOConnection(ctx context.Context, in *createSSOConnectionIn
 		"client_secret_digest": hex.EncodeToString(secretDigest[:]), "saml_metadata_digest": hex.EncodeToString(metadataDigest[:]),
 		"covers_subtree": in.Body.CoversSubtree,
 	}
+	if in.Body.TokenEndpointAuthMethod != "" {
+		request["token_endpoint_auth_method"] = in.Body.TokenEndpointAuthMethod
+	}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", "sso_connections.create", request)
 	if err != nil {
 		return nil, err
@@ -592,7 +596,8 @@ func (a *API) createSSOConnection(ctx context.Context, in *createSSOConnectionIn
 	connection, err := a.Enterprise.CreateConnection(ctx, actor.ID, in.ID, enterprise.ConnectionInput{
 		Name: in.Body.Name, Provider: in.Body.Provider, Issuer: in.Body.Issuer, ClientID: in.Body.ClientID,
 		ClientSecret: in.Body.ClientSecret.Value(), RedirectURI: in.Body.RedirectURI,
-		GroupsClaim: in.Body.GroupsClaim, RoleMappings: in.Body.RoleMappings, SAMLMetadata: in.Body.SAMLMetadata, CoversSubtree: in.Body.CoversSubtree,
+		TokenEndpointAuthMethod: in.Body.TokenEndpointAuthMethod,
+		GroupsClaim:             in.Body.GroupsClaim, RoleMappings: in.Body.RoleMappings, SAMLMetadata: in.Body.SAMLMetadata, CoversSubtree: in.Body.CoversSubtree,
 	})
 	if err != nil {
 		return nil, err

@@ -2,7 +2,8 @@
 INSERT INTO sso_connections (
     id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, saml_entity_id, saml_sso_url,
-    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id
+    saml_sso_binding, saml_idp_certificate, covers_subtree, configured_by_member_id, configured_by_user_id,
+    token_endpoint_auth_method
 )
 VALUES (
     sqlc.arg(id), sqlc.arg(space_id), sqlc.arg(name), sqlc.arg(provider),
@@ -10,26 +11,26 @@ VALUES (
     sqlc.arg(redirect_uri), sqlc.arg(groups_claim), sqlc.arg(role_mappings), 'active',
     sqlc.narg(saml_entity_id), sqlc.narg(saml_sso_url), sqlc.narg(saml_sso_binding),
     sqlc.narg(saml_idp_certificate), sqlc.arg(covers_subtree),
-    sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id)
+    sqlc.arg(configured_by_member_id), sqlc.narg(configured_by_user_id), sqlc.arg(token_endpoint_auth_method)
 )
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at;
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method;
 
 -- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id, role_mapping_authority
+    configured_by_member_id, configured_by_user_id, role_mapping_authority, token_endpoint_auth_method
 FROM sso_connections WHERE id = sqlc.arg(id);
 
 -- name: GetSSOConnectionInSpace :one
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 FROM sso_connections WHERE space_id = sqlc.arg(space_id) AND id = sqlc.arg(id);
 
 -- name: ListSSOConnections :many
 SELECT id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method
 FROM sso_connections WHERE space_id = sqlc.arg(space_id)
 ORDER BY created_at, id;
 
@@ -44,7 +45,7 @@ LIMIT 32;
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id, role_mapping_authority
+    configured_by_member_id, configured_by_user_id, role_mapping_authority, token_endpoint_auth_method
 FROM sso_connections WHERE id = sqlc.arg(id) FOR UPDATE;
 
 -- name: DisableSSOConnection :exec
@@ -64,7 +65,7 @@ SET saml_idp_certificate = sqlc.arg(saml_idp_certificate),
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at;
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method;
 
 -- name: ReplaceOIDCClientSecret :one
 UPDATE sso_connections
@@ -72,7 +73,7 @@ SET client_secret_ciphertext = sqlc.arg(client_secret_ciphertext),
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at;
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method;
 
 -- name: ReplaceSSORoleMappings :one
 UPDATE sso_connections
@@ -81,7 +82,7 @@ SET role_mappings = sqlc.arg(role_mappings),
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
-    role_mappings, status, covers_subtree, created_at, updated_at;
+    role_mappings, status, covers_subtree, created_at, updated_at, token_endpoint_auth_method;
 
 -- name: CreateSSOState :one
 INSERT INTO sso_states (

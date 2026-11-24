@@ -2161,3 +2161,8 @@ ALTER TABLE directory_users ADD COLUMN scim_name jsonb NOT NULL DEFAULT '{}'
 
 ALTER TABLE directory_users ADD COLUMN scim_emails jsonb NOT NULL DEFAULT '[]'
     CHECK (jsonb_typeof(scim_emails) = 'array' AND jsonb_array_length(scim_emails) <= 16);
+
+ALTER TABLE sso_connections
+    ADD COLUMN token_endpoint_auth_method text NOT NULL DEFAULT 'client_secret_basic'
+    CHECK (token_endpoint_auth_method = 'client_secret_basic'
+           OR (provider = 'oidc' AND token_endpoint_auth_method = 'client_secret_post'));

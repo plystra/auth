@@ -96,16 +96,22 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 			map[string]any{"operation": operation, "request": request, "mfa_code": code}).requireStatus(t, http.StatusOK)
 	}
 	const idpClientSecret = "workforce-fixture-client-secret"
+	const authMethod = "client_secret_basic"
 	const redirectURI = "https://auth.test/v1/sso/{connection_id}/callback"
 	secretDigest, metadataDigest := sha256.Sum256([]byte(idpClientSecret)), sha256.Sum256(nil)
 	stepUp("sso_connections.create", map[string]any{
 		"operation": "sso_connections.create", "space_id": spaceID, "name": "Workforce OIDC", "provider": "oidc",
 		"issuer": provider.issuer, "client_id": "workforce", "redirect_uri": redirectURI, "groups_claim": "", "role_mappings": nil,
 		"client_secret_digest": hex.EncodeToString(secretDigest[:]), "saml_metadata_digest": hex.EncodeToString(metadataDigest[:]), "covers_subtree": false,
+		"token_endpoint_auth_method": authMethod,
 	})
 	spacePath := "/v1/spaces/" + spaceID
 	connection := employeeLifecycleData[enterprise.Connection](t, client.send(t, http.MethodPost, spacePath+"/sso-connections", admin.AccessToken, "application/json", "",
-		map[string]any{"name": "Workforce OIDC", "provider": "oidc", "issuer": provider.issuer, "client_id": "workforce", "client_secret": idpClientSecret, "redirect_uri": redirectURI}))
+		map[string]any{"name": "Workforce OIDC", "provider": "oidc", "issuer": provider.issuer, "client_id": "workforce", "client_secret": idpClientSecret,
+			"redirect_uri": redirectURI, "token_endpoint_auth_method": authMethod}))
+	if connection.TokenEndpointAuthMethod != authMethod {
+		t.Fatal("connection registration omitted the approved token endpoint authentication method")
+	}
 	stepUp("directories.create", map[string]any{
 		"operation": "directories.create", "space_id": spaceID, "name": "Workforce", "sso_connection_id": connection.ID, "sso_identity_claim": "oid",
 	})

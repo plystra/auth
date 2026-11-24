@@ -93,7 +93,7 @@ func TestOIDCDiscoveryRequiresBoundedUsableMetadata(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 			svc := &Service{HTTPClient: server.Client()}
-			provider, err := svc.discovery(t.Context(), server.URL)
+			provider, err := svc.discovery(t.Context(), server.URL, oidcClientSecretBasic)
 			if (err == nil) != tc.wantOK {
 				t.Fatalf("discovery error = %v, want success = %v", err, tc.wantOK)
 			}

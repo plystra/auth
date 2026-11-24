@@ -710,27 +710,28 @@ type SpaceEnvelopeEntry struct {
 }
 
 type SsoConnection struct {
-	ID                     string             `json:"id"`
-	SpaceID                string             `json:"space_id"`
-	Name                   string             `json:"name"`
-	Provider               string             `json:"provider"`
-	Issuer                 string             `json:"issuer"`
-	ClientID               string             `json:"client_id"`
-	ClientSecretCiphertext []byte             `json:"client_secret_ciphertext"`
-	RedirectUri            string             `json:"redirect_uri"`
-	GroupsClaim            string             `json:"groups_claim"`
-	RoleMappings           []byte             `json:"role_mappings"`
-	Status                 string             `json:"status"`
-	CreatedAt              pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt              pgtype.Timestamptz `json:"updated_at"`
-	SamlEntityID           pgtype.Text        `json:"saml_entity_id"`
-	SamlSsoUrl             pgtype.Text        `json:"saml_sso_url"`
-	SamlSsoBinding         pgtype.Text        `json:"saml_sso_binding"`
-	SamlIdpCertificate     pgtype.Text        `json:"saml_idp_certificate"`
-	CoversSubtree          bool               `json:"covers_subtree"`
-	ConfiguredByMemberID   pgtype.Text        `json:"configured_by_member_id"`
-	ConfiguredByUserID     pgtype.Text        `json:"configured_by_user_id"`
-	RoleMappingAuthority   []byte             `json:"role_mapping_authority"`
+	ID                      string             `json:"id"`
+	SpaceID                 string             `json:"space_id"`
+	Name                    string             `json:"name"`
+	Provider                string             `json:"provider"`
+	Issuer                  string             `json:"issuer"`
+	ClientID                string             `json:"client_id"`
+	ClientSecretCiphertext  []byte             `json:"client_secret_ciphertext"`
+	RedirectUri             string             `json:"redirect_uri"`
+	GroupsClaim             string             `json:"groups_claim"`
+	RoleMappings            []byte             `json:"role_mappings"`
+	Status                  string             `json:"status"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt               pgtype.Timestamptz `json:"updated_at"`
+	SamlEntityID            pgtype.Text        `json:"saml_entity_id"`
+	SamlSsoUrl              pgtype.Text        `json:"saml_sso_url"`
+	SamlSsoBinding          pgtype.Text        `json:"saml_sso_binding"`
+	SamlIdpCertificate      pgtype.Text        `json:"saml_idp_certificate"`
+	CoversSubtree           bool               `json:"covers_subtree"`
+	ConfiguredByMemberID    pgtype.Text        `json:"configured_by_member_id"`
+	ConfiguredByUserID      pgtype.Text        `json:"configured_by_user_id"`
+	RoleMappingAuthority    []byte             `json:"role_mapping_authority"`
+	TokenEndpointAuthMethod string             `json:"token_endpoint_auth_method"`
 }
 
 type SsoDomain struct {
