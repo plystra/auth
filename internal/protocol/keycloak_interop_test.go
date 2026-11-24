@@ -315,7 +315,24 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string) {
 	}
 	var keycloak keycloakAdmin
 	if provider == "saml" {
-		keycloak = registerKeycloakSAMLClient(t, upstream, issuer, adminPassword, rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
+		digest, err := stepup.DigestValue(enterprise.ConnectionDetailRequest(space.ID, connection.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := rp.st.Pool.Exec(ctx, `UPDATE sessions SET step_up_operation='sso_connections.get',
+			step_up_digest=$2, step_up_method='totp', step_up_expires_at=clock_timestamp()+interval '5 minutes'
+			WHERE id=$1`, rp.session.SessionID, digest); err != nil {
+			t.Fatal(err)
+		}
+		management := employeeLifecycleClient{server: rp.host}
+		path := "/v1/spaces/" + space.ID + "/sso-connections/" + connection.ID
+		detail := keycloakInteropData[enterprise.ConnectionDetail](t, "SP metadata export",
+			management.send(t, http.MethodGet, path, rp.session.AccessToken, "", "", nil))
+		if detail.ID != connection.ID || detail.SAMLSPMetadata == "" {
+			t.Fatal("Auth did not export metadata for the selected SAML connection")
+		}
+		keycloak = registerKeycloakSAMLClient(t, upstream, issuer, adminPassword, detail.SAMLSPMetadata,
+			rp.host.URL+"/saml/"+connection.ID, connection.RedirectURI)
 	}
 	directory, err := rp.workforce.CreateDirectory(admin, owner.ID, space.ID, enterprise.DirectoryInput{
 		Name: "Workforce directory", SSOConnectionID: connection.ID, SSOIdentityClaim: claim,

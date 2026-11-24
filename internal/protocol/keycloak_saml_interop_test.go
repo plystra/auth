@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -46,7 +47,7 @@ type keycloakAdmin struct {
 	token  string
 }
 
-func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, entityID, callback string) keycloakAdmin {
+func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, password, metadata, entityID, callback string) keycloakAdmin {
 	t.Helper()
 	origin := strings.TrimSuffix(issuer, "/realms/"+keycloakRealm)
 	form := url.Values{
@@ -78,20 +79,36 @@ func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, passw
 		}
 	}
 	admin := keycloakAdmin{client: client, realm: origin + "/admin/realms/" + keycloakRealm, token: credential.AccessToken}
-	admin.call(t, http.MethodPost, "/clients", map[string]any{
-		"clientId": entityID, "protocol": "saml", "enabled": true, "adminUrl": callback,
-		"redirectUris": []string{callback},
-		"attributes": map[string]string{
-			"saml_assertion_consumer_url_post": callback, "saml.force.post.binding": "true",
-			"saml.client.signature": "false", "saml.server.signature": "true",
-			"saml.assertion.signature": "true", "saml.signature.algorithm": "RSA_SHA256",
-			"saml.authnstatement": "true", "saml_name_id_format": "persistent",
-		},
-		"protocolMappers": []map[string]any{
-			mapper("email", "saml-user-property-mapper"),
-			mapper(keycloakSAMLDirectoryClaim, "saml-user-attribute-mapper"),
-		},
-	}, nil, http.StatusCreated)
+	var converted map[string]any
+	admin.exchange(t, http.MethodPost, "/client-description-converter", "application/xml",
+		strings.NewReader(metadata), &converted, http.StatusOK)
+	attributes, ok := converted["attributes"].(map[string]any)
+	redirects, _ := converted["redirectUris"].([]any)
+	entityMatches := converted["clientId"] == entityID
+	protocolMatches := converted["protocol"] == "saml"
+	redirectMatches := slices.Contains(redirects, any(callback))
+	postCallbackMatches := attributes["saml_assertion_consumer_url_post"] == callback
+	assertionSigning := attributes["saml.assertion.signature"] == "true"
+	// Keycloak leaves the client signature setting unset when the descriptor has no signing key.
+	clientSignature := attributes["saml.client.signature"]
+	unsignedRequests := clientSignature == nil || clientSignature == "false"
+	if !ok || !entityMatches || !protocolMatches || !redirectMatches || !postCallbackMatches || !assertionSigning || !unsignedRequests {
+		t.Fatalf("Keycloak import mismatch: attributes=%t entity=%t protocol=%t redirect=%t post_callback=%t signed_assertions=%t unsigned_requests=%t",
+			ok, entityMatches, protocolMatches, redirectMatches, postCallbackMatches, assertionSigning, unsignedRequests)
+	}
+	// Client creation defaults an omitted signature setting to true. Set the SP's declared policy explicitly.
+	attributes["saml.client.signature"] = "false"
+	attributes["saml.force.post.binding"] = "true"
+	attributes["saml.server.signature"] = "true"
+	attributes["saml.signature.algorithm"] = "RSA_SHA256"
+	attributes["saml.authnstatement"] = "true"
+	attributes["saml_name_id_format"] = "persistent"
+	converted["enabled"] = true
+	converted["protocolMappers"] = []map[string]any{
+		mapper("email", "saml-user-property-mapper"),
+		mapper(keycloakSAMLDirectoryClaim, "saml-user-attribute-mapper"),
+	}
+	admin.call(t, http.MethodPost, "/clients", converted, nil, http.StatusCreated)
 	return admin
 }
 
@@ -105,11 +122,16 @@ func (a keycloakAdmin) call(t *testing.T, method, path string, input, output any
 			t.Fatal(err)
 		}
 	}
-	req, err := http.NewRequestWithContext(t.Context(), method, a.realm+path, bytes.NewReader(body))
+	return a.exchange(t, method, path, "application/json", bytes.NewReader(body), output, status)
+}
+
+func (a keycloakAdmin) exchange(t *testing.T, method, path, contentType string, body io.Reader, output any, status int) string {
+	t.Helper()
+	req, err := http.NewRequestWithContext(t.Context(), method, a.realm+path, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentType)
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	res, err := a.client.Do(req)
 	if err != nil {

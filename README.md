@@ -57,6 +57,8 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 
 1. A Space administrator creates an OIDC or SAML connection at
    `POST /v1/spaces/{id}/sso-connections` with request-bound step-up.
+   For SAML, register the active connection with the IdP using the
+   [service provider metadata](#register-a-saml-service-provider).
 2. The administrator creates a directory at `POST /v1/spaces/{id}/directories`, selects
    `sso_connection_id` and the IdP's stable `sso_identity_claim`, and stores the SCIM
    token returned once. Provision the employee through `/scim/v2/{dir_id}/Users`.
@@ -74,6 +76,22 @@ see the [Invoice SaaS backend](examples/invoice-saas/README.md).
 
 Migration `0068` revokes existing enterprise SSO sessions whose original binding was unrecorded.
 Deploy updated Auth binaries with the migration and plan for those users to sign in again.
+
+### Register a SAML service provider
+
+After creating the active SAML connection from the IdP's metadata, obtain request-bound
+step-up for `sso_connections.get` with the Space and connection IDs. Read
+`GET /v1/spaces/{id}/sso-connections/{conn_id}` using the same administrator session
+and the step-up proof. Save the decoded `data.saml_sp_metadata` string as an XML file
+and import it in the IdP's SAML application settings. The XML carries the SP entity ID
+and the exact HTTP-POST assertion consumer URL.
+
+Configure the IdP to sign the SAML Response and Assertion, using SHA-256 or stronger.
+Allow unsigned AuthnRequests as declared in the XML. In Keycloak, review **Client signature
+required** after import and set it off if the import defaulted it on. Enable **Force POST
+binding**, **Sign documents** and **Sign assertions**. When using SCIM, configure the stable
+attribute selected on the directory and use a stable NameID. Verify a fresh sign-in as a
+provisioned user before enforcing SSO for the Space.
 
 ### Monitor SAML certificate coverage
 

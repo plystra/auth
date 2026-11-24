@@ -122,6 +122,11 @@ type Connection struct {
 	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
+type ConnectionDetail struct {
+	Connection
+	SAMLSPMetadata string `json:"saml_sp_metadata,omitempty"`
+}
+
 type StartResult struct {
 	AuthorizationURL    string    `json:"authorization_url"`
 	AuthorizationMethod string    `json:"authorization_method,omitempty"`
@@ -347,8 +352,8 @@ func (s *Service) authorizeSettingsTx(ctx context.Context, q *db.Queries, actorM
 	return s.consumeStepUp(ctx, q)
 }
 
-func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (Connection, error) {
-	var out Connection
+func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, connectionID string) (ConnectionDetail, error) {
+	var out ConnectionDetail
 	err := s.Store.InTx(ctx, func(q *db.Queries) error {
 		if err := s.authorizeSettingsTx(ctx, q, actorMemberID, ConnectionDetailRequest(spaceID, connectionID)); err != nil {
 			return err
@@ -360,11 +365,17 @@ func (s *Service) GetConnection(ctx context.Context, actorMemberID, spaceID, con
 		if err != nil {
 			return err
 		}
-		out, err = connectionFromPublicRow(db.ListSSOConnectionsRow(row))
+		out.Connection, err = connectionFromPublicRow(db.ListSSOConnectionsRow(row))
+		if err != nil {
+			return err
+		}
+		if out.Provider == "saml" && out.Status == "active" {
+			out.SAMLSPMetadata, err = s.samlSPMetadata(out.Connection)
+		}
 		return err
 	})
 	if err != nil {
-		return Connection{}, normalizeConnectionError(err)
+		return ConnectionDetail{}, normalizeConnectionError(err)
 	}
 	return out, nil
 }
@@ -1149,6 +1160,28 @@ func (s *Service) samlEntityID(connectionID string) string {
 		base = "https://auth.example.com"
 	}
 	return base + "/saml/" + connectionID
+}
+
+func (s *Service) samlSPMetadata(connection Connection) (string, error) {
+	metadata := struct {
+		XMLName    xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:metadata EntityDescriptor"`
+		EntityID   string   `xml:"entityID,attr"`
+		Descriptor types.SPSSODescriptor
+	}{
+		EntityID: s.samlEntityID(connection.ID),
+		Descriptor: types.SPSSODescriptor{
+			WantAssertionsSigned:       true,
+			ProtocolSupportEnumeration: saml2.SAMLProtocolNamespace,
+			AssertionConsumerServices: []types.IndexedEndpoint{{
+				Binding: saml2.BindingHttpPost, Location: connection.RedirectURI, Index: 1,
+			}},
+		},
+	}
+	written, err := xml.Marshal(metadata)
+	if err != nil {
+		return "", err
+	}
+	return xml.Header + string(written), nil
 }
 
 func firstSAMLValue(values saml2.Values, names ...string) string {

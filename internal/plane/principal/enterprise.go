@@ -66,6 +66,13 @@ type ssoConnectionOutput struct {
 	}
 }
 
+type ssoConnectionDetailOutput struct {
+	ETag string `header:"ETag"`
+	Body struct {
+		Data enterprise.ConnectionDetail `json:"data"`
+	}
+}
+
 type ssoConnectionsOutput struct {
 	Body struct {
 		Data []enterprise.Connection `json:"data"`
@@ -450,7 +457,7 @@ func (a *API) deleteSSOConnection(ctx context.Context, in *ssoConnectionPathInpu
 	return acceptedResponse(), nil
 }
 
-func (a *API) getSSOConnection(ctx context.Context, in *ssoConnectionPathInput) (*ssoConnectionOutput, error) {
+func (a *API) getSSOConnection(ctx context.Context, in *ssoConnectionPathInput) (*ssoConnectionDetailOutput, error) {
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
 	}
@@ -467,7 +474,9 @@ func (a *API) getSSOConnection(ctx context.Context, in *ssoConnectionPathInput) 
 	if err != nil {
 		return nil, err
 	}
-	return connectionResponse(connection), nil
+	out := &ssoConnectionDetailOutput{ETag: connection.ETag()}
+	out.Body.Data = connection
+	return out, nil
 }
 
 func (a *API) listSSOConnections(ctx context.Context, in *enterpriseSettingsListInput) (*ssoConnectionsOutput, error) {

@@ -892,6 +892,74 @@
         ],
         "type": "object"
       },
+      "ConnectionDetail": {
+        "additionalProperties": false,
+        "properties": {
+          "client_id": {
+            "type": "string"
+          },
+          "covers_subtree": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "groups_claim": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          },
+          "role_mappings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "saml_sp_metadata": {
+            "type": "string"
+          },
+          "space_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "space_id",
+          "name",
+          "provider",
+          "issuer",
+          "client_id",
+          "redirect_uri",
+          "groups_claim",
+          "role_mappings",
+          "status",
+          "covers_subtree",
+          "created_at",
+          "updated_at"
+        ],
+        "type": "object"
+      },
       "CreateApplicationKeyInputBody": {
         "additionalProperties": false,
         "properties": {
@@ -3433,6 +3501,18 @@
           "slug",
           "status",
           "policy_version"
+        ],
+        "type": "object"
+      },
+      "SsoConnectionDetailOutputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "data": {
+            "$ref": "#/components/schemas/ConnectionDetail"
+          }
+        },
+        "required": [
+          "data"
         ],
         "type": "object"
       },
@@ -8776,7 +8856,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/SsoConnectionOutputBody"
+                  "$ref": "#/components/schemas/SsoConnectionDetailOutputBody"
                 }
               }
             },

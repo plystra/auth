@@ -3,6 +3,7 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/stepup"
+	saml2 "github.com/russellhaering/gosaml2"
+	"github.com/russellhaering/gosaml2/types"
 	dsig "github.com/russellhaering/goxmldsig"
 )
 
@@ -49,11 +52,11 @@ func TestSAMLSigningMetadataUpdatesOnlineAndPreservesIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	admin := func(method, tag, xml string, status int) (enterprise.Connection, string) {
+	admin := func(method, tag, metadataXML string, status int) (enterprise.Connection, string) {
 		t.Helper()
 		var body []byte
-		if xml != "" {
-			body, _ = json.Marshal(map[string]string{"saml_metadata": xml})
+		if metadataXML != "" {
+			body, _ = json.Marshal(map[string]string{"saml_metadata": metadataXML})
 		}
 		request, err := http.NewRequestWithContext(ctx, method, rp.host.URL+path, bytes.NewReader(body))
 		if err != nil {
@@ -70,7 +73,7 @@ func TestSAMLSigningMetadataUpdatesOnlineAndPreservesIdentity(t *testing.T) {
 		}
 		defer func() { _ = response.Body.Close() }()
 		var result struct {
-			Data  enterprise.Connection
+			Data  enterprise.ConnectionDetail
 			Error struct{ Code string }
 		}
 		wire, err := io.ReadAll(response.Body)
@@ -83,7 +86,20 @@ func TestSAMLSigningMetadataUpdatesOnlineAndPreservesIdentity(t *testing.T) {
 		if bytes.Contains(wire, []byte("BEGIN CERTIFICATE")) || bytes.Contains(wire, []byte(`"saml_metadata"`)) {
 			t.Fatal("SSO management disclosed signing metadata")
 		}
-		return result.Data, response.Header.Get("ETag")
+		if method == http.MethodGet && status == http.StatusOK && result.Data.Status == "active" {
+			var document types.EntityDescriptor
+			err := xml.Unmarshal([]byte(result.Data.SAMLSPMetadata), &document)
+			sp := document.SPSSODescriptor
+			if err != nil || document.EntityID != rp.host.URL+"/saml/"+connection.ID || document.IDPSSODescriptor != nil ||
+				sp == nil || sp.AuthnRequestsSigned || !sp.WantAssertionsSigned || sp.ProtocolSupportEnumeration != saml2.SAMLProtocolNamespace ||
+				len(sp.KeyDescriptors) != 0 || len(sp.SingleLogoutServices) != 0 || len(sp.AssertionConsumerServices) != 1 ||
+				sp.AssertionConsumerServices[0].Binding != saml2.BindingHttpPost || sp.AssertionConsumerServices[0].Location != connection.RedirectURI {
+				t.Fatal("export did not match this connection's SP profile and exact ACS")
+			}
+		} else if result.Data.SAMLSPMetadata != "" {
+			t.Fatal("the SP metadata must only be present on the protected detail read")
+		}
+		return result.Data.Connection, response.Header.Get("ETag")
 	}
 	var protocol http.ServeMux
 	(HTTP{Enterprise: rp.workforce}).Register(&protocol)
@@ -159,5 +175,13 @@ func TestSAMLSigningMetadataUpdatesOnlineAndPreservesIdentity(t *testing.T) {
 		AND resource_id=$1 AND member_id=$2 AND length(metadata->>'new_trust_sha256')=64
 		AND length(metadata->>'previous_trust_sha256')=64`, connection.ID, owner.ID).Scan(&audited); err != nil || audited != 2 {
 		t.Fatalf("expected atomic digest-only audit for two updates, records=%d err=%v", audited, err)
+	}
+	actor := authorization.WithHumanActor(ctx, owner.ID, operatorID)
+	if err := rp.workforce.DisableConnection(actor, owner.ID, space.ID, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	prove("sso_connections.get", enterprise.ConnectionDetailRequest(space.ID, connection.ID))
+	if disabled, _ := admin(http.MethodGet, "", "", http.StatusOK); disabled.Status != "disabled" {
+		t.Fatal("management GET did not return the disabled connection")
 	}
 }
