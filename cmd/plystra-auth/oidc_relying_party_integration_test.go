@@ -510,49 +510,82 @@ func TestHumanOIDCIndependentRelyingPartyWithAuthProcess(t *testing.T) {
 		}
 
 		authz := &authorization.Service{Store: st}
-		space, member, err := authz.CreateSpace(ctx, identity.Subject, "Relying party workforce", "rp-workforce")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants
-			(id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
-			VALUES ('grt_rp_workforce_app_manage',$1,'["auth.applications:manage"]',$2,'space',$1,$2)`,
-			space.ID, member.ID); err != nil {
-			t.Fatal(err)
-		}
 		apps := &application.Service{Store: st, Authorization: authz, HMACKeys: [][]byte{[]byte(hmacKey)}}
-		if _, err := apps.InstallSpace(ctx, member.ID, installedClientID, space.ID); err != nil {
-			t.Fatal(err)
+		install := func(slug string) (string, server.CheckBody) {
+			t.Helper()
+			space, member, err := authz.CreateSpace(ctx, identity.Subject, "Relying party "+slug, slug)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants
+				(id,space_id,permission_keys,grantee_member_id,scope,anchor_space_id,granted_by)
+				VALUES ($1,$2,'["auth.applications:manage"]',$3,'space',$2,$3)`,
+				"grt_"+slug, space.ID, member.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := apps.InstallSpace(ctx, member.ID, installedClientID, space.ID); err != nil {
+				t.Fatal(err)
+			}
+			expires := time.Now().Add(time.Hour)
+			apiKey, err := apps.CreateKey(ctx, installedClientID, slug, []string{"auth.authz:check"}, &expires)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allow_subject_assertion=true,
+				restrict_to=jsonb_build_array(jsonb_build_object('space_id',$1::text,'include_descendants',false))
+				WHERE application_id=$2 AND name=$3`, space.ID, installedClientID, slug); err != nil {
+				t.Fatal(err)
+			}
+			return apiKey, server.CheckBody{
+				Subject: server.CheckSubject{UserID: identity.Subject},
+				Action:  "self:read",
+				Resource: server.CheckResource{
+					Type: "member", ID: member.ID, SpaceID: space.ID,
+				},
+			}
 		}
-		expires := time.Now().Add(time.Hour)
-		apiKey, err := apps.CreateKey(ctx, installedClientID, "workforce-decision", []string{"auth.authz:check"}, &expires)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := st.Pool.Exec(ctx, `UPDATE api_keys SET allow_subject_assertion=true,
-			restrict_to=jsonb_build_array(jsonb_build_object('space_id',$1::text,'include_descendants',false))
-			WHERE application_id=$2 AND name='workforce-decision'`, space.ID, installedClientID); err != nil {
-			t.Fatal(err)
-		}
+		workforceKey, workforce := install("rp-workforce")
+		partnerKey, partner := install("rp-partner")
 		target := serverPlane.URL + "/server/v1/authz/check"
-		body := server.CheckBody{Subject: server.CheckSubject{UserID: identity.Subject}, Action: "self:read",
-			Resource: server.CheckResource{Type: "member", ID: member.ID, SpaceID: space.ID}}
-		var result struct {
-			Data server.CheckDecision `json:"data"`
+		check := func(apiKey string, body server.CheckBody, decision, denyCode string) {
+			t.Helper()
+			var result struct {
+				Data server.CheckDecision `json:"data"`
+			}
+			request(t, http.MethodPost, target, apiKey, body, &result)
+			if result.Data.Decision != decision || result.Data.DenyCode != denyCode || result.Data.DecisionID == "" {
+				t.Fatalf("Space %s: decision=%q deny_code=%q, want %q %q with a decision ID",
+					body.Resource.SpaceID, result.Data.Decision, result.Data.DenyCode, decision, denyCode)
+			}
 		}
-		request(t, http.MethodPost, target, apiKey, body, &result)
-		if result.Data.Decision != "allow" || result.Data.DecisionID == "" {
-			t.Fatal("the installed application did not receive an allow decision for the signed account")
+		check(workforceKey, workforce, "allow", "")
+		check(partnerKey, partner, "allow", "")
+		check(workforceKey, partner, "deny", "KEY_SCOPE_EXCLUDED")
+		check(partnerKey, workforce, "deny", "KEY_SCOPE_EXCLUDED")
+
+		// Leave the selected Space through the public API without changing
+		// the relying party's verified identity or the other Space's binding.
+		signIn := passwordSignIn(t)
+		var selected struct {
+			Data struct {
+				Access string `json:"access_token"`
+			}
 		}
-		if _, err := st.Pool.Exec(ctx, `UPDATE user_members SET status='revoked',revoked_at=clock_timestamp()
-			WHERE user_id=$1 AND member_id=$2`, identity.Subject, member.ID); err != nil {
-			t.Fatal(err)
+		request(t, http.MethodPost, rpTestIssuer+"/v1/auth/refresh", "", map[string]string{
+			"refresh_token": signIn.Data.Tokens.Refresh, "member_id": workforce.Resource.ID,
+		}, &selected)
+		if selected.Data.Access == "" {
+			t.Fatal("Space selection did not return an access token")
+		}
+		if status := request(t, http.MethodDelete, rpTestIssuer+"/v1/me/member", selected.Data.Access, nil, nil); status != http.StatusOK {
+			t.Fatalf("account could not leave the workforce Space: HTTP %d", status)
 		}
 		switchBackend()
 		defer switchBackend()
-		if status := request(t, http.MethodPost, target, apiKey, body, nil); status != http.StatusNotFound {
+		if status := request(t, http.MethodPost, target, workforceKey, workforce, nil); status != http.StatusNotFound {
 			t.Fatalf("peer did not reject a withdrawn binding: HTTP %d", status)
 		}
+		check(partnerKey, partner, "allow", "")
 	})
 
 	t.Run("discovery advertises supported client authentication methods", func(t *testing.T) {
