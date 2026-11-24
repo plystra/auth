@@ -737,12 +737,13 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type scimUserBody struct {
-	Schemas     []string        `json:"schemas,omitempty"`
-	ExternalID  string          `json:"externalId,omitempty"`
-	UserName    string          `json:"userName,omitempty"`
-	DisplayName *string         `json:"displayName,omitempty"`
-	Active      *bool           `json:"active,omitempty"`
-	Operations  []scimOperation `json:"Operations,omitempty"`
+	Schemas     []string            `json:"schemas,omitempty"`
+	ExternalID  string              `json:"externalId,omitempty"`
+	UserName    string              `json:"userName,omitempty"`
+	DisplayName *string             `json:"displayName,omitempty"`
+	Name        enterprise.SCIMName `json:"name,omitempty"`
+	Active      *bool               `json:"active,omitempty"`
+	Operations  []scimOperation     `json:"Operations,omitempty"`
 }
 
 func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
@@ -755,7 +756,7 @@ func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
 	if b.DisplayName != nil {
 		displayName = *b.DisplayName
 	}
-	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: displayName, DisplayNameSet: b.DisplayName != nil, Active: active, ActiveSet: activeSet || !patch}
+	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: displayName, DisplayNameSet: b.DisplayName != nil, Name: b.Name, Active: active, ActiveSet: activeSet || !patch}
 }
 
 func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
@@ -800,6 +801,12 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 						return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "active must be a boolean")
 					}
 					input.Active, input.ActiveSet = v, true
+				case "name":
+					value, err := scimNamePatch(op, name, value)
+					if err != nil {
+						return enterprise.SCIMUserInput{}, err
+					}
+					input.NamePatches = append(input.NamePatches, value)
 				default:
 					return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH attribute is unsupported")
 				}
@@ -837,10 +844,37 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 			}
 			input.Active, input.ActiveSet = value, true
 		default:
-			return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH path is unsupported")
+			if path != "name" && !strings.HasPrefix(path, "name.") {
+				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH path is unsupported")
+			}
+			value, err := scimNamePatch(op, path, operation.Value)
+			if err != nil {
+				return enterprise.SCIMUserInput{}, err
+			}
+			input.NamePatches = append(input.NamePatches, value)
 		}
 	}
 	return input, nil
+}
+
+func scimNamePatch(op, path string, value any) (enterprise.SCIMName, error) {
+	if op == "remove" {
+		if path == "name" {
+			return nil, nil
+		}
+		value = nil
+	}
+	if field, ok := strings.CutPrefix(path, "name."); ok {
+		value = map[string]any{field: value}
+	} else if _, ok := value.(map[string]any); !ok {
+		return nil, apierr.New("invalid_request", "SCIM name must be an object")
+	}
+	var name enterprise.SCIMName
+	data, err := json.Marshal(value)
+	if err != nil || json.Unmarshal(data, &name) != nil {
+		return nil, apierr.New("invalid_request", "SCIM name is invalid")
+	}
+	return name, nil
 }
 
 type scimGroupBody struct {
@@ -1112,7 +1146,11 @@ func parseSCIMIfMatch(raw string) (int64, error) {
 }
 
 func scimUserResource(user enterprise.SCIMUser, directoryID string) map[string]any {
-	return map[string]any{"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:User"}, "id": user.ID, "externalId": user.ExternalID, "userName": user.UserName, "displayName": user.DisplayName, "active": user.Active, "meta": scimMeta("User", user.Version, user.CreatedAt, user.UpdatedAt, "/scim/v2/"+directoryID+"/Users/"+user.ID)}
+	resource := map[string]any{"schemas": []string{scimUser}, "id": user.ID, "externalId": user.ExternalID, "userName": user.UserName, "displayName": user.DisplayName, "active": user.Active, "meta": scimMeta("User", user.Version, user.CreatedAt, user.UpdatedAt, "/scim/v2/"+directoryID+"/Users/"+user.ID)}
+	if len(user.Name) > 0 {
+		resource["name"] = user.Name
+	}
+	return resource
 }
 
 func scimGroupResource(group enterprise.SCIMGroup, directoryID string, includeMembers bool) map[string]any {

@@ -289,6 +289,7 @@ type DirectoryUser struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+	ScimName    []byte             `json:"scim_name"`
 }
 
 type EmailVerificationToken struct {

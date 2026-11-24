@@ -71,9 +71,11 @@ func newSCIMFixture(t *testing.T) scimFixture {
 }
 
 type scimTestResource struct {
-	ID          string `json:"id"`
-	DisplayName string `json:"displayName"`
-	Active      bool   `json:"active"`
+	ID          string            `json:"id"`
+	UserName    string            `json:"userName"`
+	DisplayName string            `json:"displayName"`
+	Name        map[string]string `json:"name"`
+	Active      bool              `json:"active"`
 	Members     []struct {
 		Value string `json:"value"`
 	} `json:"members"`

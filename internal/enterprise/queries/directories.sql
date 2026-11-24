@@ -42,24 +42,24 @@ WHERE id = sqlc.arg(id) AND status = 'active' AND version = sqlc.arg(version)
 RETURNING *;
 
 -- name: CreateDirectoryUser :one
-INSERT INTO directory_users (id, directory_id, external_id, user_id, member_id, user_name, display_name, active)
-VALUES (sqlc.arg(id), sqlc.arg(directory_id), sqlc.arg(external_id), sqlc.arg(user_id), sqlc.arg(member_id), sqlc.arg(user_name), sqlc.arg(display_name), sqlc.arg(active))
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at;
+INSERT INTO directory_users (id, directory_id, external_id, user_id, member_id, user_name, display_name, active, scim_name)
+VALUES (sqlc.arg(id), sqlc.arg(directory_id), sqlc.arg(external_id), sqlc.arg(user_id), sqlc.arg(member_id), sqlc.arg(user_name), sqlc.arg(display_name), sqlc.arg(active), sqlc.arg(scim_name))
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name;
 
 -- name: GetDirectoryUserByExternalID :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
 FROM directory_users WHERE directory_id = sqlc.arg(directory_id) AND external_id = sqlc.arg(external_id);
 
 -- name: GetDirectoryUserByID :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
 FROM directory_users WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND deleted_at IS NULL;
 
 -- name: LockDirectoryUser :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
 FROM directory_users WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND deleted_at IS NULL FOR UPDATE;
 
 -- name: ListDirectoryUsers :many
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
 FROM directory_users
 WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name))
@@ -74,10 +74,10 @@ WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id));
 
 -- name: UpdateDirectoryUser :one
-UPDATE directory_users SET user_name = sqlc.arg(user_name), display_name = sqlc.arg(display_name),
+UPDATE directory_users SET user_name = sqlc.arg(user_name), display_name = sqlc.arg(display_name), scim_name = sqlc.arg(scim_name),
     active = sqlc.arg(active), version = version + 1, updated_at = now()
 WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND version = sqlc.arg(version)
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at;
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name;
 
 -- name: UpdateDirectoryUserEmail :exec
 UPDATE users SET email = sqlc.arg(email), email_normalized = sqlc.arg(email_normalized), updated_at = now()
@@ -88,9 +88,9 @@ UPDATE users SET display_name = sqlc.arg(display_name), updated_at = now()
 WHERE users.id = (SELECT user_id FROM directory_users WHERE directory_id = sqlc.arg(directory_id) AND directory_users.id = sqlc.arg(id));
 
 -- name: TombstoneDirectoryUser :one
-UPDATE directory_users SET active = false, deleted_at = now(), version = version + 1, updated_at = now()
+UPDATE directory_users SET active = false, deleted_at = now(), scim_name = '{}', version = version + 1, updated_at = now()
 WHERE directory_id = sqlc.arg(directory_id) AND id = sqlc.arg(id) AND version = sqlc.arg(version)
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at;
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name;
 
 -- name: CreateDirectoryGroup :one
 INSERT INTO directory_groups (id, directory_id, external_id, group_id, display_name)

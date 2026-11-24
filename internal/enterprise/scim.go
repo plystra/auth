@@ -2,6 +2,7 @@ package enterprise
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -26,6 +27,8 @@ type SCIMUserInput struct {
 	Active         bool
 	ActiveSet      bool
 	DisplayNameSet bool
+	Name           SCIMName
+	NamePatches    []SCIMName // A nil patch clears the entire name.
 }
 
 type SCIMUser struct {
@@ -33,6 +36,7 @@ type SCIMUser struct {
 	ExternalID  string
 	UserName    string
 	DisplayName string
+	Name        SCIMName
 	Active      bool
 	Version     int64
 	CreatedAt   time.Time
@@ -70,6 +74,10 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 	in.DisplayName = strings.TrimSpace(in.DisplayName)
 	if in.ExternalID == "" || len(in.ExternalID) > 512 || !ValidSCIMUserName(in.UserName) || len(in.DisplayName) > 256 {
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM user fields are invalid")
+	}
+	name, err := encodeSCIMName(in.Name, nil)
+	if err != nil {
+		return SCIMUser{}, apierr.New("invalid_request", "SCIM name is invalid")
 	}
 	var out SCIMUser
 	err = s.withDirectoryTx(ctx, directory, token, true, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
@@ -116,7 +124,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 		}
 		created, err := q.CreateDirectoryUser(ctx, db.CreateDirectoryUserParams{
 			ID: string(ids.New[ids.ID]("dusr")), DirectoryID: directory.ID, ExternalID: in.ExternalID,
-			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active,
+			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, ScimName: name,
 		})
 		if err != nil {
 			return err
@@ -126,7 +134,10 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 				return err
 			}
 		}
-		out = scimUserFromRow(created)
+		out, err = scimUserFromRow(created)
+		if err != nil {
+			return err
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: memberRow.ID, Action: "scim.user.create", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: created.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"external_id": in.ExternalID, "active": boolString(in.Active), "space_id": directory.SpaceID}})
 	})
 	if err != nil {
@@ -160,7 +171,11 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 			return e
 		}
 		for _, row := range rows {
-			users = append(users, scimUserFromRow(row))
+			user, err := scimUserFromRow(row)
+			if err != nil {
+				return err
+			}
+			users = append(users, user)
 		}
 		return nil
 	})
@@ -184,8 +199,8 @@ func (s *Service) GetSCIMUser(ctx context.Context, directoryID string, token sec
 		if err != nil {
 			return err
 		}
-		out = scimUserFromRow(row)
-		return nil
+		out, err = scimUserFromRow(row)
+		return err
 	})
 	if err != nil {
 		return SCIMUser{}, err
@@ -231,7 +246,10 @@ func (s *Service) DeleteSCIMUser(ctx context.Context, directoryID string, token 
 		if err != nil {
 			return err
 		}
-		out = scimUserFromRow(deleted)
+		out, err = scimUserFromRow(deleted)
+		if err != nil {
+			return err
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: row.MemberID, Action: "scim.user.delete", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: row.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"space_id": directory.SpaceID}})
 	})
 	if err != nil {
@@ -262,6 +280,16 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 		}
 		if row.Version != version {
 			return apierr.New("precondition_failed", "SCIM resource version does not match")
+		}
+		initialName := in.Name
+		if patch {
+			if err := json.Unmarshal(row.ScimName, &initialName); err != nil {
+				return err
+			}
+		}
+		name, err := encodeSCIMName(initialName, in.NamePatches)
+		if err != nil {
+			return apierr.New("invalid_request", "SCIM name is invalid")
 		}
 		if in.ExternalID == "" {
 			in.ExternalID = row.ExternalID
@@ -308,7 +336,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 				return err
 			}
 		}
-		updated, err := q.UpdateDirectoryUser(ctx, db.UpdateDirectoryUserParams{DirectoryID: directory.ID, ID: row.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, Version: row.Version})
+		updated, err := q.UpdateDirectoryUser(ctx, db.UpdateDirectoryUserParams{DirectoryID: directory.ID, ID: row.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, Version: row.Version, ScimName: name})
 		if err != nil {
 			return err
 		}
@@ -316,7 +344,10 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 		if err != nil {
 			return err
 		}
-		out = scimUserFromRow(updated)
+		out, err = scimUserFromRow(updated)
+		if err != nil {
+			return err
+		}
 		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{ActorType: "directory", ActorID: directory.ID, MemberID: row.MemberID, Action: "scim.user.update", Outcome: "success", PolicyVersion: policyVersion, Resource: audit.Resource{Type: "directory_user", ID: row.ID, SpaceID: directory.SpaceID}, Metadata: map[string]string{"active": boolString(in.Active), "space_id": directory.SpaceID}})
 	})
 	if err != nil {
@@ -396,8 +427,12 @@ func (in SCIMUserInput) DisplayNameOrUserName() string {
 	return in.UserName
 }
 
-func scimUserFromRow(row db.DirectoryUser) SCIMUser {
-	return SCIMUser{ID: row.ID, ExternalID: row.ExternalID, UserName: row.UserName, DisplayName: row.DisplayName, Active: row.Active, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+func scimUserFromRow(row db.DirectoryUser) (SCIMUser, error) {
+	var name SCIMName
+	if err := json.Unmarshal(row.ScimName, &name); err != nil {
+		return SCIMUser{}, err
+	}
+	return SCIMUser{ID: row.ID, ExternalID: row.ExternalID, UserName: row.UserName, DisplayName: row.DisplayName, Name: name, Active: row.Active, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}, nil
 }
 
 func scimGroupFromRow(row db.DirectoryGroup, members []string) SCIMGroup {

@@ -2155,3 +2155,6 @@ CREATE TABLE saml_assertion_uses (
 );
 
 CREATE INDEX saml_assertion_uses_expiry_idx ON saml_assertion_uses(expires_at);
+
+ALTER TABLE directory_users ADD COLUMN scim_name jsonb NOT NULL DEFAULT '{}'
+    CHECK (jsonb_typeof(scim_name) = 'object' AND octet_length(scim_name::text) <= 4096);
