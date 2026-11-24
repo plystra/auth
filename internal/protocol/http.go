@@ -51,12 +51,14 @@ func (h HTTP) Register(mux route.HandlerMux) {
 	h.registerSCIMDiscovery(mux)
 	route.RegisterNonJSON(mux, route.NewSpec("scim.users.create", "POST", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.users", "GET", "/scim/v2/{dir_id}/Users", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.users.search", "POST", "/scim/v2/{dir_id}/Users/.search", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(scimSearchLimit)), h.scimSearch("userName", scimUser))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.user.get", "GET", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.user.replace", "PUT", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.user.patch", "PATCH", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.user.delete", "DELETE", "/scim/v2/{dir_id}/Users/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimUsers))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.groups.create", "POST", "/scim/v2/{dir_id}/Groups", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.groups", "GET", "/scim/v2/{dir_id}/Groups", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
+	route.RegisterNonJSON(mux, route.NewSpec("scim.groups.search", "POST", "/scim/v2/{dir_id}/Groups/.search", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(scimSearchLimit)), h.scimSearch("displayName", scimGroup))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.group.get", "GET", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON()), http.HandlerFunc(h.scimGroups))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.group.replace", "PUT", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
 	route.RegisterNonJSON(mux, route.NewSpec("scim.group.patch", "PATCH", "/scim/v2/{dir_id}/Groups/{id}", route.Principal, "", []route.Subject{route.Public}, route.WithNonJSON(), route.WithMaxBodyBytes(256<<10)), http.HandlerFunc(h.scimGroups))
@@ -523,7 +525,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 		route.WriteSCIMError(w, apierr.New("invalid_request", "SCIM query is invalid"))
 		return
 	}
-	projection, err := parseSCIMUserProjection(query)
+	projection, err := parseSCIMProjection(query, scimUser)
 	if err != nil {
 		route.WriteSCIMError(w, err)
 		return
@@ -565,16 +567,7 @@ func (h HTTP) scimUsers(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		users, total, err := h.Enterprise.ListSCIMUsers(r.Context(), directoryID, token, filter, start, count)
-		if err != nil {
-			route.WriteSCIMError(w, err)
-			return
-		}
-		resources := make([]any, 0, len(users))
-		for _, user := range users {
-			resources = append(resources, projection.apply(scimUserResource(user, directoryID)))
-		}
-		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
+		h.listSCIMUsers(w, r, token, scimListQuery{filter, projection, start, count})
 	case http.MethodPut, http.MethodPatch:
 		if resourceID == "" {
 			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
@@ -680,16 +673,7 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 			route.WriteSCIMError(w, err)
 			return
 		}
-		groups, total, err := h.Enterprise.ListSCIMGroups(r.Context(), directoryID, token, filter, includeMembers, start, count)
-		if err != nil {
-			route.WriteSCIMError(w, err)
-			return
-		}
-		resources := make([]any, 0, len(groups))
-		for _, group := range groups {
-			resources = append(resources, scimGroupResource(group, directoryID, includeMembers))
-		}
-		writeSCIMResource(w, http.StatusOK, map[string]any{"schemas": []string{"urn:ietf:params:scim:api:messages:2.0:ListResponse"}, "totalResults": total, "startIndex": start, "itemsPerPage": len(resources), "Resources": resources})
+		h.listSCIMGroups(w, r, token, scimListQuery{filter: filter, start: start, count: count}, includeMembers)
 	case http.MethodPut, http.MethodPatch:
 		if resourceID == "" {
 			route.WriteSCIMError(w, apierr.New("invalid_request", "a resource URL is required"))
@@ -1054,11 +1038,15 @@ func scimBearerToken(r *http.Request) (secret.String, error) {
 }
 
 func decodeSCIMJSON(w http.ResponseWriter, r *http.Request, value any) error {
+	return decodeSCIMJSONWithin(w, r, value, 256<<10)
+}
+
+func decodeSCIMJSONWithin(w http.ResponseWriter, r *http.Request, value any, limit int64) error {
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || (mediaType != "application/scim+json" && mediaType != "application/json") {
 		return apierr.New("invalid_request", "SCIM JSON body is required")
 	}
-	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		return apierr.New("invalid_request", "SCIM JSON body is invalid")
@@ -1086,7 +1074,12 @@ func scimPagination(r *http.Request) (int32, int32, error) {
 			return 0, 0, apierr.New("invalid_request", "count is invalid")
 		}
 	}
-	return int32(max(start, 1)), int32(min(max(count, 0), enterprise.MaxSCIMPageSize)), nil
+	page, size := normalizeSCIMPage(int32(start), int32(count))
+	return page, size, nil
+}
+
+func normalizeSCIMPage(start, count int32) (int32, int32) {
+	return max(start, 1), min(max(count, 0), enterprise.MaxSCIMPageSize)
 }
 
 func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollectionFilter, error) {
