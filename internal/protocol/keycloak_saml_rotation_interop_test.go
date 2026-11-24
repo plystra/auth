@@ -55,7 +55,7 @@ func verifyKeycloakSAMLRotation(t *testing.T, rp *humanRP, admin keycloakAdmin, 
 	identified, _ := oldBrowser.request(t, http.MethodPost, oldPath+"/identify", map[string]string{
 		"email": "original@workforce.example.test", "method": "password",
 	}, rp.host.URL, "", http.StatusOK)
-	keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, oldPath, identified)
+	keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, oldPath, "original", identified)
 
 	original, _ := admin.signingKeys(t)
 	var realm struct{ ID string }

@@ -270,6 +270,8 @@ func registerKeycloakSAMLClient(t *testing.T, client *http.Client, issuer, passw
 	converted["protocolMappers"] = []map[string]any{
 		mapper("email", "saml-user-property-mapper"),
 		mapper(keycloakSAMLDirectoryClaim, "saml-user-attribute-mapper"),
+		{"name": "workforce-groups", "protocol": "saml", "protocolMapper": "saml-group-membership-mapper",
+			"config": map[string]string{"attribute.name": "groups", "attribute.nameformat": "Basic", "single": "true", "full.path": "false"}},
 	}
 	admin.call(t, http.MethodPost, "/clients", converted, nil, http.StatusCreated)
 	return admin
@@ -310,7 +312,7 @@ func (a keycloakAdmin) exchange(t *testing.T, method, path, contentType string, 
 	return res.Header.Get("Location")
 }
 
-func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, issuer, callback, interaction string, identified interactionResponse) {
+func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, issuer, callback, interaction, username string, identified interactionResponse) {
 	t.Helper()
 	target, err := url.Parse(identified.AuthorizationURL)
 	if err != nil || identified.AuthorizationMethod != http.MethodGet ||
@@ -318,7 +320,7 @@ func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, 
 		target.Query().Get("SAMLRequest") == "" || target.Query().Get("RelayState") == "" {
 		t.Fatal("the interaction did not start the discovered Keycloak SAML endpoint")
 	}
-	login := submitKeycloakLogin(t, transport, target.String(), "original")
+	login := submitKeycloakLogin(t, transport, target.String(), username)
 	page, err := html.Parse(io.LimitReader(login.Body, 128<<10))
 	_ = login.Body.Close()
 	if err != nil || login.StatusCode != http.StatusOK {

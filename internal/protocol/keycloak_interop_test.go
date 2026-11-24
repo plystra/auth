@@ -400,7 +400,7 @@ func testKeycloakDirectoryEmployee(t *testing.T, provider string, processFailove
 		}
 		var loggedIn interactionResponse
 		if provider == "saml" {
-			keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, path, identified)
+			keycloakSAMLCallback(t, rp, transport, issuer, connection.RedirectURI, path, "original", identified)
 			// The cross-site ACS has staged the assertion. Only the original browser
 			// may finish the interaction after the staging process exits.
 			failedOver := exitPrimary != nil
