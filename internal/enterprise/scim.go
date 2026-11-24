@@ -29,6 +29,8 @@ type SCIMUserInput struct {
 	DisplayNameSet bool
 	Name           SCIMName
 	NamePatches    []SCIMName // A nil patch clears the entire name.
+	Emails         []SCIMEmail
+	EmailPatches   []SCIMEmailPatch
 }
 
 type SCIMUser struct {
@@ -37,6 +39,7 @@ type SCIMUser struct {
 	UserName    string
 	DisplayName string
 	Name        SCIMName
+	Emails      []SCIMEmail
 	Active      bool
 	Version     int64
 	CreatedAt   time.Time
@@ -78,6 +81,10 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 	name, err := encodeSCIMName(in.Name, nil)
 	if err != nil {
 		return SCIMUser{}, apierr.New("invalid_request", "SCIM name is invalid")
+	}
+	emails, err := encodeSCIMEmails(in.Emails, nil)
+	if err != nil {
+		return SCIMUser{}, err
 	}
 	var out SCIMUser
 	err = s.withDirectoryTx(ctx, directory, token, true, func(ctx context.Context, q *db.Queries, directory db.Directory) error {
@@ -124,7 +131,7 @@ func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token 
 		}
 		created, err := q.CreateDirectoryUser(ctx, db.CreateDirectoryUserParams{
 			ID: string(ids.New[ids.ID]("dusr")), DirectoryID: directory.ID, ExternalID: in.ExternalID,
-			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, ScimName: name,
+			UserID: user.ID, MemberID: memberRow.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, ScimName: name, ScimEmails: emails,
 		})
 		if err != nil {
 			return err
@@ -282,14 +289,22 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 			return apierr.New("precondition_failed", "SCIM resource version does not match")
 		}
 		initialName := in.Name
+		initialEmails := in.Emails
 		if patch {
 			if err := json.Unmarshal(row.ScimName, &initialName); err != nil {
+				return err
+			}
+			if err := json.Unmarshal(row.ScimEmails, &initialEmails); err != nil {
 				return err
 			}
 		}
 		name, err := encodeSCIMName(initialName, in.NamePatches)
 		if err != nil {
 			return apierr.New("invalid_request", "SCIM name is invalid")
+		}
+		emails, err := encodeSCIMEmails(initialEmails, in.EmailPatches)
+		if err != nil {
+			return err
 		}
 		if in.ExternalID == "" {
 			in.ExternalID = row.ExternalID
@@ -336,7 +351,7 @@ func (s *Service) mutateSCIMUser(ctx context.Context, directoryID string, token 
 				return err
 			}
 		}
-		updated, err := q.UpdateDirectoryUser(ctx, db.UpdateDirectoryUserParams{DirectoryID: directory.ID, ID: row.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, Version: row.Version, ScimName: name})
+		updated, err := q.UpdateDirectoryUser(ctx, db.UpdateDirectoryUserParams{DirectoryID: directory.ID, ID: row.ID, UserName: in.UserName, DisplayName: in.DisplayName, Active: in.Active, Version: row.Version, ScimName: name, ScimEmails: emails})
 		if err != nil {
 			return err
 		}
@@ -432,7 +447,11 @@ func scimUserFromRow(row db.DirectoryUser) (SCIMUser, error) {
 	if err := json.Unmarshal(row.ScimName, &name); err != nil {
 		return SCIMUser{}, err
 	}
-	return SCIMUser{ID: row.ID, ExternalID: row.ExternalID, UserName: row.UserName, DisplayName: row.DisplayName, Name: name, Active: row.Active, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}, nil
+	var emails []SCIMEmail
+	if err := json.Unmarshal(row.ScimEmails, &emails); err != nil {
+		return SCIMUser{}, err
+	}
+	return SCIMUser{ID: row.ID, ExternalID: row.ExternalID, UserName: row.UserName, DisplayName: row.DisplayName, Name: name, Emails: emails, Active: row.Active, Version: row.Version, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}, nil
 }
 
 func scimGroupFromRow(row db.DirectoryGroup, members []string) SCIMGroup {

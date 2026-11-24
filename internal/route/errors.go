@@ -18,8 +18,11 @@ func WriteSCIMError(w http.ResponseWriter, err error) {
 		public = apierr.New("temporarily_unavailable", "SCIM operation is unavailable")
 	}
 	status, scimType := public.GetStatus(), ""
-	if public.Code == "invalid_filter" {
+	switch public.Code {
+	case "invalid_filter":
 		status, scimType = http.StatusBadRequest, "invalidFilter"
+	case "scim_no_target":
+		status, scimType = http.StatusBadRequest, "noTarget"
 	}
 	w.Header().Set("Content-Type", "application/scim+json")
 	w.WriteHeader(status)

@@ -737,13 +737,14 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 type scimUserBody struct {
-	Schemas     []string            `json:"schemas,omitempty"`
-	ExternalID  string              `json:"externalId,omitempty"`
-	UserName    string              `json:"userName,omitempty"`
-	DisplayName *string             `json:"displayName,omitempty"`
-	Name        enterprise.SCIMName `json:"name,omitempty"`
-	Active      *bool               `json:"active,omitempty"`
-	Operations  []scimOperation     `json:"Operations,omitempty"`
+	Schemas     []string               `json:"schemas,omitempty"`
+	ExternalID  string                 `json:"externalId,omitempty"`
+	UserName    string                 `json:"userName,omitempty"`
+	DisplayName *string                `json:"displayName,omitempty"`
+	Name        enterprise.SCIMName    `json:"name,omitempty"`
+	Emails      []enterprise.SCIMEmail `json:"emails,omitempty"`
+	Active      *bool                  `json:"active,omitempty"`
+	Operations  []scimOperation        `json:"Operations,omitempty"`
 }
 
 func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
@@ -756,7 +757,7 @@ func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
 	if b.DisplayName != nil {
 		displayName = *b.DisplayName
 	}
-	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: displayName, DisplayNameSet: b.DisplayName != nil, Name: b.Name, Active: active, ActiveSet: activeSet || !patch}
+	return enterprise.SCIMUserInput{ExternalID: b.ExternalID, UserName: b.UserName, DisplayName: displayName, DisplayNameSet: b.DisplayName != nil, Name: b.Name, Emails: b.Emails, Active: active, ActiveSet: activeSet || !patch}
 }
 
 func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
@@ -766,7 +767,8 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 	input := enterprise.SCIMUserInput{}
 	for _, operation := range b.Operations {
 		op := strings.ToLower(strings.TrimSpace(operation.Op))
-		path := strings.ToLower(strings.TrimSpace(operation.Path))
+		rawPath := strings.TrimSpace(operation.Path)
+		path := strings.ToLower(rawPath)
 		if op != "add" && op != "replace" && op != "remove" {
 			return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH operation is unsupported")
 		}
@@ -807,6 +809,12 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 						return enterprise.SCIMUserInput{}, err
 					}
 					input.NamePatches = append(input.NamePatches, value)
+				case "emails":
+					patch, err := scimEmailsPatch(op, name, value)
+					if err != nil {
+						return enterprise.SCIMUserInput{}, err
+					}
+					input.EmailPatches = append(input.EmailPatches, patch)
 				default:
 					return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH attribute is unsupported")
 				}
@@ -844,6 +852,14 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 			}
 			input.Active, input.ActiveSet = value, true
 		default:
+			if path == "emails" || strings.HasPrefix(path, "emails[") {
+				patch, err := scimEmailsPatch(op, rawPath, operation.Value)
+				if err != nil {
+					return enterprise.SCIMUserInput{}, err
+				}
+				input.EmailPatches = append(input.EmailPatches, patch)
+				continue
+			}
 			if path != "name" && !strings.HasPrefix(path, "name.") {
 				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH path is unsupported")
 			}
@@ -1149,6 +1165,9 @@ func scimUserResource(user enterprise.SCIMUser, directoryID string) map[string]a
 	resource := map[string]any{"schemas": []string{scimUser}, "id": user.ID, "externalId": user.ExternalID, "userName": user.UserName, "displayName": user.DisplayName, "active": user.Active, "meta": scimMeta("User", user.Version, user.CreatedAt, user.UpdatedAt, "/scim/v2/"+directoryID+"/Users/"+user.ID)}
 	if len(user.Name) > 0 {
 		resource["name"] = user.Name
+	}
+	if len(user.Emails) > 0 {
+		resource["emails"] = user.Emails
 	}
 	return resource
 }

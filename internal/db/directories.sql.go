@@ -236,9 +236,9 @@ func (q *Queries) CreateDirectoryProvisionedUser(ctx context.Context, arg Create
 }
 
 const createDirectoryUser = `-- name: CreateDirectoryUser :one
-INSERT INTO directory_users (id, directory_id, external_id, user_id, member_id, user_name, display_name, active, scim_name)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+INSERT INTO directory_users (id, directory_id, external_id, user_id, member_id, user_name, display_name, active, scim_name, scim_emails)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 `
 
 type CreateDirectoryUserParams struct {
@@ -251,6 +251,7 @@ type CreateDirectoryUserParams struct {
 	DisplayName string `json:"display_name"`
 	Active      bool   `json:"active"`
 	ScimName    []byte `json:"scim_name"`
+	ScimEmails  []byte `json:"scim_emails"`
 }
 
 func (q *Queries) CreateDirectoryUser(ctx context.Context, arg CreateDirectoryUserParams) (DirectoryUser, error) {
@@ -264,6 +265,7 @@ func (q *Queries) CreateDirectoryUser(ctx context.Context, arg CreateDirectoryUs
 		arg.DisplayName,
 		arg.Active,
 		arg.ScimName,
+		arg.ScimEmails,
 	)
 	var i DirectoryUser
 	err := row.Scan(
@@ -280,6 +282,7 @@ func (q *Queries) CreateDirectoryUser(ctx context.Context, arg CreateDirectoryUs
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }
@@ -530,7 +533,7 @@ func (q *Queries) GetDirectoryLoginIdentity(ctx context.Context, arg GetDirector
 }
 
 const getDirectoryUserByExternalID = `-- name: GetDirectoryUserByExternalID :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 FROM directory_users WHERE directory_id = $1 AND external_id = $2
 `
 
@@ -556,12 +559,13 @@ func (q *Queries) GetDirectoryUserByExternalID(ctx context.Context, arg GetDirec
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }
 
 const getDirectoryUserByID = `-- name: GetDirectoryUserByID :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 FROM directory_users WHERE directory_id = $1 AND id = $2 AND deleted_at IS NULL
 `
 
@@ -587,6 +591,7 @@ func (q *Queries) GetDirectoryUserByID(ctx context.Context, arg GetDirectoryUser
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }
@@ -869,7 +874,7 @@ func (q *Queries) ListDirectoryGroups(ctx context.Context, arg ListDirectoryGrou
 }
 
 const listDirectoryUsers = `-- name: ListDirectoryUsers :many
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 FROM directory_users
 WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR user_name = $2)
@@ -915,6 +920,7 @@ func (q *Queries) ListDirectoryUsers(ctx context.Context, arg ListDirectoryUsers
 			&i.UpdatedAt,
 			&i.DeletedAt,
 			&i.ScimName,
+			&i.ScimEmails,
 		); err != nil {
 			return nil, err
 		}
@@ -1052,7 +1058,7 @@ func (q *Queries) LockDirectoryGroup(ctx context.Context, arg LockDirectoryGroup
 }
 
 const lockDirectoryUser = `-- name: LockDirectoryUser :one
-SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+SELECT id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 FROM directory_users WHERE directory_id = $1 AND id = $2 AND deleted_at IS NULL FOR UPDATE
 `
 
@@ -1078,6 +1084,7 @@ func (q *Queries) LockDirectoryUser(ctx context.Context, arg LockDirectoryUserPa
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }
@@ -1178,9 +1185,9 @@ func (q *Queries) RotateDirectoryToken(ctx context.Context, arg RotateDirectoryT
 }
 
 const tombstoneDirectoryUser = `-- name: TombstoneDirectoryUser :one
-UPDATE directory_users SET active = false, deleted_at = now(), scim_name = '{}', version = version + 1, updated_at = now()
+UPDATE directory_users SET active = false, deleted_at = now(), scim_name = '{}', scim_emails = '[]', version = version + 1, updated_at = now()
 WHERE directory_id = $1 AND id = $2 AND version = $3
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 `
 
 type TombstoneDirectoryUserParams struct {
@@ -1206,6 +1213,7 @@ func (q *Queries) TombstoneDirectoryUser(ctx context.Context, arg TombstoneDirec
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }
@@ -1288,15 +1296,16 @@ func (q *Queries) UpdateDirectoryGroup(ctx context.Context, arg UpdateDirectoryG
 
 const updateDirectoryUser = `-- name: UpdateDirectoryUser :one
 UPDATE directory_users SET user_name = $1, display_name = $2, scim_name = $3,
-    active = $4, version = version + 1, updated_at = now()
-WHERE directory_id = $5 AND id = $6 AND version = $7
-RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name
+    scim_emails = $4, active = $5, version = version + 1, updated_at = now()
+WHERE directory_id = $6 AND id = $7 AND version = $8
+RETURNING id, directory_id, external_id, user_id, member_id, user_name, display_name, active, version, created_at, updated_at, deleted_at, scim_name, scim_emails
 `
 
 type UpdateDirectoryUserParams struct {
 	UserName    string `json:"user_name"`
 	DisplayName string `json:"display_name"`
 	ScimName    []byte `json:"scim_name"`
+	ScimEmails  []byte `json:"scim_emails"`
 	Active      bool   `json:"active"`
 	DirectoryID string `json:"directory_id"`
 	ID          string `json:"id"`
@@ -1308,6 +1317,7 @@ func (q *Queries) UpdateDirectoryUser(ctx context.Context, arg UpdateDirectoryUs
 		arg.UserName,
 		arg.DisplayName,
 		arg.ScimName,
+		arg.ScimEmails,
 		arg.Active,
 		arg.DirectoryID,
 		arg.ID,
@@ -1328,6 +1338,7 @@ func (q *Queries) UpdateDirectoryUser(ctx context.Context, arg UpdateDirectoryUs
 		&i.UpdatedAt,
 		&i.DeletedAt,
 		&i.ScimName,
+		&i.ScimEmails,
 	)
 	return i, err
 }

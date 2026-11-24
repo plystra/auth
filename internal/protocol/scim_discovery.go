@@ -129,13 +129,18 @@ func scimSchemas(base string) []map[string]any {
 		nameFields = append(nameFields, attribute(field, "string", false, false))
 	}
 	name["subAttributes"] = nameFields
+	emails := attribute("emails", "complex", false, true)
+	emails["subAttributes"] = []map[string]any{
+		attribute("value", "string", false, false), attribute("type", "string", false, false),
+		attribute("display", "string", false, false), attribute("primary", "boolean", false, false),
+	}
 	members := attribute("members", "complex", false, true)
 	memberValue := attribute("value", "string", true, false)
 	memberValue["caseExact"] = true
 	memberValue["mutability"] = "immutable"
 	members["subAttributes"] = []map[string]any{memberValue}
 	return []map[string]any{
-		schema(scimUser, "User", "Directory-provisioned user.", userName, name,
+		schema(scimUser, "User", "Directory-provisioned user.", userName, name, emails,
 			attribute("displayName", "string", false, false), attribute("active", "boolean", false, false)),
 		schema(scimGroup, "Group", "Directory-managed group with User members.",
 			attribute("displayName", "string", true, false), members),

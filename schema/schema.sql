@@ -2158,3 +2158,6 @@ CREATE INDEX saml_assertion_uses_expiry_idx ON saml_assertion_uses(expires_at);
 
 ALTER TABLE directory_users ADD COLUMN scim_name jsonb NOT NULL DEFAULT '{}'
     CHECK (jsonb_typeof(scim_name) = 'object' AND octet_length(scim_name::text) <= 4096);
+
+ALTER TABLE directory_users ADD COLUMN scim_emails jsonb NOT NULL DEFAULT '[]'
+    CHECK (jsonb_typeof(scim_emails) = 'array' AND jsonb_array_length(scim_emails) <= 16);
