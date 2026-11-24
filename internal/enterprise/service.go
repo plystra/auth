@@ -207,13 +207,8 @@ func (s *Service) CreateConnection(ctx context.Context, actorMemberID, spaceID s
 	if err := validateRedirectURI(redirectURI); err != nil {
 		return Connection{}, err
 	}
-	if len(in.RoleMappings) > maxRoleMappings {
-		return Connection{}, apierr.New("validation_failed", "too many SSO role mappings")
-	}
-	for group, roleID := range in.RoleMappings {
-		if strings.TrimSpace(group) == "" || len(group) > 256 || strings.TrimSpace(roleID) == "" {
-			return Connection{}, apierr.New("validation_failed", "SSO role mappings are invalid")
-		}
+	if err := validateSSORoleMappings(in.RoleMappings); err != nil {
+		return Connection{}, err
 	}
 	var ciphertext []byte
 	var err error
@@ -1201,7 +1196,8 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 			return apierr.New("conflict", "OIDC client credentials changed; restart sign-in")
 		}
 		if lockedConnection.ConfiguredByMemberID != connection.ConfiguredByMemberID || lockedConnection.ConfiguredByUserID != connection.ConfiguredByUserID ||
-			lockedConnection.GroupsClaim != connection.GroupsClaim || !bytes.Equal(lockedConnection.RoleMappings, connection.RoleMappings) {
+			lockedConnection.GroupsClaim != connection.GroupsClaim || !bytes.Equal(lockedConnection.RoleMappings, connection.RoleMappings) ||
+			!bytes.Equal(lockedConnection.RoleMappingAuthority, connection.RoleMappingAuthority) {
 			return apierr.New("conflict", "SSO mapping changed; restart sign-in")
 		}
 		active, err := q.AreSpaceAncestorsActive(ctx, db.AreSpaceAncestorsActiveParams{SpaceID: connection.SpaceID})
@@ -1289,9 +1285,11 @@ func (s *Service) finishCallback(ctx context.Context, connection db.SsoConnectio
 				if s.Authorization == nil {
 					return apierr.New("unavailable", "authorization is unavailable")
 				}
-				if err := s.Authorization.CheckSSOLoginGrantsTx(ctx, q, connection.ConfiguredByMemberID.String, connection.ConfiguredByUserID.String,
-					connection.SpaceID, connection.ID, plan.mapped, plan.roles); err != nil {
-					return err
+				for _, grant := range plan.grants {
+					if err := s.Authorization.CheckSSOLoginGrantsTx(ctx, q, grant.authority.MemberID, grant.authority.UserID,
+						connection.SpaceID, connection.ID, grant.roles, plan.roles); err != nil {
+						return err
+					}
 				}
 				createdMember, createErr := q.CreateMemberWithPolicy(ctx, db.CreateMemberWithPolicyParams{ID: string(ids.New[ids.MemberID]("mem")), SpaceID: connection.SpaceID, Name: displayName(claims, email), Type: "human", BindingPolicy: "single"})
 				if createErr != nil {

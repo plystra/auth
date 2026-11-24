@@ -298,7 +298,7 @@ const getSSOConnection = `-- name: GetSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id
+    configured_by_member_id, configured_by_user_id, role_mapping_authority
 FROM sso_connections WHERE id = $1
 `
 
@@ -330,6 +330,7 @@ func (q *Queries) GetSSOConnection(ctx context.Context, arg GetSSOConnectionPara
 		&i.CoversSubtree,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.RoleMappingAuthority,
 	)
 	return i, err
 }
@@ -537,7 +538,7 @@ const lockSSOConnection = `-- name: LockSSOConnection :one
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id
+    configured_by_member_id, configured_by_user_id, role_mapping_authority
 FROM sso_connections WHERE id = $1 FOR UPDATE
 `
 
@@ -569,6 +570,7 @@ func (q *Queries) LockSSOConnection(ctx context.Context, arg LockSSOConnectionPa
 		&i.CoversSubtree,
 		&i.ConfiguredByMemberID,
 		&i.ConfiguredByUserID,
+		&i.RoleMappingAuthority,
 	)
 	return i, err
 }
@@ -744,6 +746,65 @@ type ReplaceSAMLSigningCertificatesRow struct {
 func (q *Queries) ReplaceSAMLSigningCertificates(ctx context.Context, arg ReplaceSAMLSigningCertificatesParams) (ReplaceSAMLSigningCertificatesRow, error) {
 	row := q.db.QueryRow(ctx, replaceSAMLSigningCertificates, arg.SamlIdpCertificate, arg.ID, arg.SpaceID)
 	var i ReplaceSAMLSigningCertificatesRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Name,
+		&i.Provider,
+		&i.Issuer,
+		&i.ClientID,
+		&i.RedirectUri,
+		&i.GroupsClaim,
+		&i.RoleMappings,
+		&i.Status,
+		&i.CoversSubtree,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const replaceSSORoleMappings = `-- name: ReplaceSSORoleMappings :one
+UPDATE sso_connections
+SET role_mappings = $1,
+    role_mapping_authority = $2,
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = $3 AND space_id = $4
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at
+`
+
+type ReplaceSSORoleMappingsParams struct {
+	RoleMappings         []byte `json:"role_mappings"`
+	RoleMappingAuthority []byte `json:"role_mapping_authority"`
+	ID                   string `json:"id"`
+	SpaceID              string `json:"space_id"`
+}
+
+type ReplaceSSORoleMappingsRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Name          string             `json:"name"`
+	Provider      string             `json:"provider"`
+	Issuer        string             `json:"issuer"`
+	ClientID      string             `json:"client_id"`
+	RedirectUri   string             `json:"redirect_uri"`
+	GroupsClaim   string             `json:"groups_claim"`
+	RoleMappings  []byte             `json:"role_mappings"`
+	Status        string             `json:"status"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) ReplaceSSORoleMappings(ctx context.Context, arg ReplaceSSORoleMappingsParams) (ReplaceSSORoleMappingsRow, error) {
+	row := q.db.QueryRow(ctx, replaceSSORoleMappings,
+		arg.RoleMappings,
+		arg.RoleMappingAuthority,
+		arg.ID,
+		arg.SpaceID,
+	)
+	var i ReplaceSSORoleMappingsRow
 	err := row.Scan(
 		&i.ID,
 		&i.SpaceID,

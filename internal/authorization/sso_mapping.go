@@ -18,17 +18,9 @@ import (
 // role grants. First login creates a human in the connection's own Space,
 // even when descendants inherit its discovery route.
 func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries, actorID, spaceID, connectionID string, mappings map[string]string) error {
-	if err := lockHumanActorAccountTx(ctx, q, actorID); err != nil {
+	roles, err := LockSSOMappingUpdateRolesTx(ctx, q, actorID, spaceID, mappings)
+	if err != nil {
 		return err
-	}
-	mapped := slices.Compact(slices.Sorted(maps.Values(mappings)))
-	var roles []db.LockSSOMappingRolesRow
-	if len(mapped) > 0 {
-		var err error
-		roles, err = q.LockSSOMappingRoles(ctx, db.LockSSOMappingRolesParams{SpaceID: spaceID, MappedRoleIds: mapped})
-		if err != nil {
-			return err
-		}
 	}
 	// Acquire role locks before member and node locks, but disclose no role
 	// information until the caller's current management authority is proven.
@@ -39,10 +31,29 @@ func (s *Service) CheckSSOConnectionCreateTx(ctx context.Context, q *db.Queries,
 	if decision.Effect != engine.Allow {
 		return &apierr.Error{Code: decision.Code, Message: "The authorization engine denied this operation."}
 	}
+	return s.CheckSSOMappingUpdateDeltaTx(ctx, q, actorID, spaceID, connectionID, mappings, roles)
+}
+
+// LockSSOMappingUpdateRolesTx acquires roles before the governance check takes
+// member and Space locks. Scope and role validation follow authorization.
+func LockSSOMappingUpdateRolesTx(ctx context.Context, q *db.Queries, actorID, spaceID string, mappings map[string]string) ([]db.LockSSOMappingRolesRow, error) {
+	if err := lockHumanActorAccountTx(ctx, q, actorID); err != nil {
+		return nil, err
+	}
+	if len(mappings) == 0 {
+		return nil, nil
+	}
+	mapped := slices.Compact(slices.Sorted(maps.Values(mappings)))
+	return q.LockSSOMappingRoles(ctx, db.LockSSOMappingRolesParams{SpaceID: spaceID, MappedRoleIds: mapped})
+}
+
+// CheckSSOMappingUpdateDeltaTx checks newly configured group-to-role entries
+// with the already locked roles and previously authorized current actor.
+func (s *Service) CheckSSOMappingUpdateDeltaTx(ctx context.Context, q *db.Queries, actorID, spaceID, connectionID string, changed map[string]string, roles []db.LockSSOMappingRolesRow) error {
 	if err := checkSSOConfiguratorTx(ctx, q, actorID, HumanActorUserID(ctx, actorID)); err != nil {
 		return err
 	}
-	return s.checkSSOMappedDeltaTx(ctx, q, actorID, spaceID, connectionID, mapped, roles, false)
+	return s.checkSSOMappedDeltaTx(ctx, q, actorID, spaceID, connectionID, slices.Compact(slices.Sorted(maps.Values(changed))), roles, false)
 }
 
 // CheckSSOLoginGrantsTx runs only for a newly bound human, with the same roles,
@@ -77,6 +88,9 @@ func (s *Service) checkSSOMappedDeltaTx(ctx context.Context, q *db.Queries, acto
 	found := 0
 	for _, role := range roles {
 		isMapped := slices.Contains(mapped, role.ID)
+		if !isMapped && role.Name != "member" {
+			continue
+		}
 		if isMapped {
 			if err := validateOrdinaryGrantRoleTx(ctx, q, role.ID); err != nil {
 				return err

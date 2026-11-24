@@ -19,7 +19,7 @@ RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id
+    configured_by_member_id, configured_by_user_id, role_mapping_authority
 FROM sso_connections WHERE id = sqlc.arg(id);
 
 -- name: GetSSOConnectionInSpace :one
@@ -44,7 +44,7 @@ LIMIT 32;
 SELECT id, space_id, name, provider, issuer, client_id, client_secret_ciphertext,
     redirect_uri, groups_claim, role_mappings, status, created_at, updated_at,
     saml_entity_id, saml_sso_url, saml_sso_binding, saml_idp_certificate, covers_subtree,
-    configured_by_member_id, configured_by_user_id
+    configured_by_member_id, configured_by_user_id, role_mapping_authority
 FROM sso_connections WHERE id = sqlc.arg(id) FOR UPDATE;
 
 -- name: DisableSSOConnection :exec
@@ -69,6 +69,15 @@ RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_
 -- name: ReplaceOIDCClientSecret :one
 UPDATE sso_connections
 SET client_secret_ciphertext = sqlc.arg(client_secret_ciphertext),
+    updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
+RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,
+    role_mappings, status, covers_subtree, created_at, updated_at;
+
+-- name: ReplaceSSORoleMappings :one
+UPDATE sso_connections
+SET role_mappings = sqlc.arg(role_mappings),
+    role_mapping_authority = sqlc.arg(role_mapping_authority),
     updated_at = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 microsecond')
 WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id)
 RETURNING id, space_id, name, provider, issuer, client_id, redirect_uri, groups_claim,

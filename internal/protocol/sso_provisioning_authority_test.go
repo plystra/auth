@@ -74,6 +74,11 @@ func (f *jitMappingFixture) exec(t *testing.T, query string) {
 
 func (f *jitMappingFixture) start(t *testing.T, subject string, groups ...string) enterprise.CallbackInput {
 	t.Helper()
+	return f.startWithExchange(t, subject, groups, nil)
+}
+
+func (f *jitMappingFixture) startWithExchange(t *testing.T, subject string, groups []string, afterExchange func(context.Context)) enterprise.CallbackInput {
+	t.Helper()
 	start, err := f.svc.Start(context.Background(), f.connection.ID, "")
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +87,7 @@ func (f *jitMappingFixture) start(t *testing.T, subject string, groups ...string
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.provider.addCode(start.State, oidcTestCode{nonce: target.Query().Get("nonce"), subject: subject, email: subject + "@example.test", emailVerified: true, groups: groups})
+	f.provider.addCode(start.State, oidcTestCode{nonce: target.Query().Get("nonce"), subject: subject, email: subject + "@example.test", emailVerified: true, groups: groups, afterExchange: afterExchange})
 	return enterprise.CallbackInput{ConnectionID: f.connection.ID, State: start.State, Code: start.State}
 }
 

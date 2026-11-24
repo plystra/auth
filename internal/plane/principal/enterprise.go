@@ -53,8 +53,9 @@ type updateSSOConnectionInput struct {
 	ConnectionID  string `path:"conn_id"`
 	IfMatch       string `header:"If-Match"`
 	Body          struct {
-		SAMLMetadata *string        `json:"saml_metadata,omitempty" minLength:"1" maxLength:"1048576"`
-		ClientSecret *secret.String `json:"client_secret,omitempty"`
+		SAMLMetadata *string           `json:"saml_metadata,omitempty" minLength:"1" maxLength:"1048576"`
+		ClientSecret *secret.String    `json:"client_secret,omitempty"`
+		RoleMappings map[string]string `json:"role_mappings,omitempty"`
 	}
 }
 
@@ -385,14 +386,24 @@ func (a *API) updateSSOConnection(ctx context.Context, in *updateSSOConnectionIn
 		return nil, apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
 	}
 	saml, oidc := in.Body.SAMLMetadata, in.Body.ClientSecret
-	if (saml == nil) == (oidc == nil) {
-		return nil, apierr.New("validation_failed", "provide exactly one of saml_metadata or client_secret")
+	mappings := in.Body.RoleMappings
+	updates := 0
+	for _, present := range []bool{saml != nil, oidc != nil, mappings != nil} {
+		if present {
+			updates++
+		}
+	}
+	if updates != 1 {
+		return nil, apierr.New("validation_failed", "provide exactly one of saml_metadata, client_secret or role_mappings")
 	}
 	const operation = enterprise.SSOConnectionUpdateOperation
 	var request map[string]string
-	if oidc != nil {
+	switch {
+	case mappings != nil:
+		request = enterprise.SSORoleMappingUpdateRequest(in.ID, in.ConnectionID, ifMatch, mappings)
+	case oidc != nil:
 		request = enterprise.OIDCClientSecretUpdateRequest(in.ID, in.ConnectionID, ifMatch, *oidc)
-	} else {
+	default:
 		request = enterprise.SAMLMetadataUpdateRequest(in.ID, in.ConnectionID, ifMatch, *saml)
 	}
 	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
@@ -404,9 +415,12 @@ func (a *API) updateSSOConnection(ctx context.Context, in *updateSSOConnectionIn
 		return nil, err
 	}
 	var connection enterprise.Connection
-	if oidc != nil {
+	switch {
+	case mappings != nil:
+		connection, err = a.Enterprise.ReplaceSSORoleMappings(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, mappings)
+	case oidc != nil:
 		connection, err = a.Enterprise.ReplaceOIDCClientSecret(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, *oidc)
-	} else {
+	default:
 		connection, err = a.Enterprise.ReplaceSAMLSigningCertificates(ctx, actor.ID, in.ID, in.ConnectionID, ifMatch, *saml)
 	}
 	if err != nil {

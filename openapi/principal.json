@@ -3624,6 +3624,12 @@
           "client_secret": {
             "type": "string"
           },
+          "role_mappings": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
           "saml_metadata": {
             "maxLength": 1048576,
             "minLength": 1,

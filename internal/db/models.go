@@ -722,6 +722,7 @@ type SsoConnection struct {
 	CoversSubtree          bool               `json:"covers_subtree"`
 	ConfiguredByMemberID   pgtype.Text        `json:"configured_by_member_id"`
 	ConfiguredByUserID     pgtype.Text        `json:"configured_by_user_id"`
+	RoleMappingAuthority   []byte             `json:"role_mapping_authority"`
 }
 
 type SsoDomain struct {

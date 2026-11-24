@@ -15,8 +15,13 @@ import (
 type ssoLoginGrants struct {
 	userID   string
 	memberID string
-	mapped   []string
+	grants   []ssoMappingGrant
 	roles    []db.LockSSOMappingRolesRow
+}
+
+type ssoMappingGrant struct {
+	authority ssoMappingAuthority
+	roles     []string
 }
 
 // Existing and SCIM-provisioned memberships authenticate without replaying a
@@ -49,20 +54,36 @@ func lockSSOLoginTx(ctx context.Context, q *db.Queries, c db.SsoConnection, clai
 	if err := json.Unmarshal(c.RoleMappings, &mappings); err != nil {
 		return nil, err
 	}
-	matched := make(map[string]bool)
+	var sources map[string]ssoMappingAuthority
+	if err := json.Unmarshal(c.RoleMappingAuthority, &sources); err != nil {
+		return nil, err
+	}
+	defaultSource := ssoMappingAuthority{MemberID: c.ConfiguredByMemberID.String, UserID: c.ConfiguredByUserID.String}
+	matched := make(map[string]struct{})
+	byAuthority := make(map[ssoMappingAuthority]map[string]struct{})
+	var authorityOrder []ssoMappingAuthority
 	for _, group := range claims.Groups {
 		if role, ok := mappings[group]; ok {
-			matched[role] = true
+			source, overridden := sources[group]
+			if !overridden {
+				source = defaultSource
+			}
+			if byAuthority[source] == nil {
+				byAuthority[source] = make(map[string]struct{})
+				authorityOrder = append(authorityOrder, source)
+			}
+			byAuthority[source][role], matched[role] = struct{}{}, struct{}{}
 		}
 	}
-	plan := &ssoLoginGrants{userID: external.UserID, mapped: slices.Sorted(maps.Keys(matched))}
+	plan := &ssoLoginGrants{userID: external.UserID}
 	users := []string{external.UserID}
 	var members []string
-	if len(plan.mapped) > 0 {
-		users = append(users, c.ConfiguredByUserID.String)
-		members = append(members, c.ConfiguredByMemberID.String)
+	for _, source := range authorityOrder {
+		plan.grants = append(plan.grants, ssoMappingGrant{source, slices.Sorted(maps.Keys(byAuthority[source]))})
+		users = append(users, source.UserID)
+		members = append(members, source.MemberID)
 	}
-	plan.roles, err = authorization.LockSSOLoginGrantsTx(ctx, q, c.SpaceID, users, members, plan.mapped)
+	plan.roles, err = authorization.LockSSOLoginGrantsTx(ctx, q, c.SpaceID, users, members, slices.Sorted(maps.Keys(matched)))
 	if err != nil {
 		return nil, err
 	}
