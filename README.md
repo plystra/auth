@@ -79,12 +79,12 @@ Deploy updated Auth binaries with the migration and plan for those users to sign
 
 ### Register a SAML service provider
 
-After creating the active SAML connection from the IdP's metadata, obtain request-bound
-step-up for `sso_connections.get` with the Space and connection IDs. Read
-`GET /v1/spaces/{id}/sso-connections/{conn_id}` using the same administrator session
-and the step-up proof. Save the decoded `data.saml_sp_metadata` string as an XML file
-and import it in the IdP's SAML application settings. The XML carries the SP entity ID
-and the exact HTTP-POST assertion consumer URL.
+After creating the active SAML connection from the IdP's metadata, complete request-bound
+step-up for `sso_connections.get` with the Space and connection IDs. Then read
+`GET /v1/spaces/{id}/sso-connections/{conn_id}` with the same administrator session.
+Save the decoded `data.saml_sp_metadata` string as an XML file and import it in the
+IdP's SAML application settings. The XML carries the SP entity ID and the exact
+HTTP-POST assertion consumer URL.
 
 Configure the IdP to sign the SAML Response and Assertion, using SHA-256 or stronger.
 Allow unsigned AuthnRequests as declared in the XML. In Keycloak, review **Client signature
