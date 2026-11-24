@@ -730,7 +730,18 @@ func (h HTTP) scimGroups(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// SCIM clients may echo these read-only fields on a full resource write.
+type scimReadOnlyFields struct {
+	ID   json.RawMessage `json:"id,omitempty"`
+	Meta json.RawMessage `json:"meta,omitempty"`
+}
+
+func (f scimReadOnlyFields) hasReadOnlyFields() bool {
+	return f.ID != nil || f.Meta != nil
+}
+
 type scimUserBody struct {
+	scimReadOnlyFields
 	Schemas     []string               `json:"schemas,omitempty"`
 	ExternalID  string                 `json:"externalId,omitempty"`
 	UserName    string                 `json:"userName,omitempty"`
@@ -755,6 +766,9 @@ func (b scimUserBody) input(patch bool) enterprise.SCIMUserInput {
 }
 
 func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
+	if b.hasReadOnlyFields() {
+		return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "SCIM PATCH requires a PatchOp document")
+	}
 	if err := validateSCIMPatch(b.Schemas, len(b.Operations)); err != nil {
 		return enterprise.SCIMUserInput{}, err
 	}
@@ -888,11 +902,13 @@ func scimNamePatch(op, path string, value any) (enterprise.SCIMName, error) {
 }
 
 type scimGroupBody struct {
+	scimReadOnlyFields
 	Schemas     []string `json:"schemas,omitempty"`
 	ExternalID  string   `json:"externalId,omitempty"`
 	DisplayName string   `json:"displayName,omitempty"`
 	Members     []struct {
 		Value string `json:"value"`
+		Type  string `json:"type,omitempty"`
 	} `json:"members,omitempty"`
 	Operations []scimOperation `json:"Operations,omitempty"`
 }
@@ -906,12 +922,18 @@ type scimOperation struct {
 func (b scimGroupBody) input() (enterprise.SCIMGroupInput, error) {
 	members := make([]string, 0, len(b.Members))
 	for _, member := range b.Members {
+		if member.Type != "" && !strings.EqualFold(member.Type, "User") {
+			return enterprise.SCIMGroupInput{}, apierr.New("invalid_request", "group members must have type User")
+		}
 		members = append(members, member.Value)
 	}
 	return enterprise.SCIMGroupInput{ExternalID: b.ExternalID, DisplayName: b.DisplayName, MemberIDs: members}, nil
 }
 
 func (b scimGroupBody) patchOperations() ([]enterprise.SCIMGroupOperation, error) {
+	if b.hasReadOnlyFields() {
+		return nil, apierr.New("invalid_request", "SCIM PATCH requires a PatchOp document")
+	}
 	if err := validateSCIMPatch(b.Schemas, len(b.Operations)); err != nil {
 		return nil, err
 	}

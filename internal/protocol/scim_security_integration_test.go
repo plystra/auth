@@ -127,6 +127,67 @@ func scimPatch(operations ...map[string]any) string {
 	return string(body)
 }
 
+func TestSCIMFullResourceRoundTripKeepsServerOwnedIdentityAndVersion(t *testing.T) {
+	f := newSCIMFixture(t)
+	f.handler = route.Middleware(route.Principal, f.handler)
+	encode := func(fields map[string]any) string {
+		t.Helper()
+		body, err := json.Marshal(fields)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+	for _, item := range []struct {
+		collection string
+		fields     map[string]any
+	}{
+		{"Users", map[string]any{"externalId": "person", "userName": "person@scim.test", "displayName": "Original", "active": true}},
+		{"Groups", map[string]any{"externalId": "team", "displayName": "Original group", "members": []map[string]string{{"value": f.user(t, "member", true).ID, "type": "User"}}}},
+	} {
+		t.Run(item.collection, func(t *testing.T) {
+			item.fields["id"] = "client-supplied-id"
+			item.fields["meta"] = map[string]any{"location": "/client-chosen", "version": `W/"99"`}
+			created := scimResource(t, f.request(t, http.MethodPost, item.collection, encode(item.fields), "", http.StatusCreated))
+			path := item.collection + "/" + created.ID
+			if created.ID == "client-supplied-id" || !strings.HasSuffix(created.Meta.Location, "/"+path) {
+				t.Fatal("creation accepted client-owned identity metadata")
+			}
+			retrieved := f.request(t, http.MethodGet, path, "", "", http.StatusOK)
+			var replacement map[string]any
+			if err := json.Unmarshal(retrieved.Body.Bytes(), &replacement); err != nil {
+				t.Fatal(err)
+			}
+			replacement["displayName"] = "Updated"
+			f.request(t, http.MethodPut, path, encode(replacement), "", http.StatusPreconditionFailed)
+			updated := scimResource(t, f.request(t, http.MethodPut, path, encode(replacement), created.Meta.Version, http.StatusOK))
+			if updated.ID != created.ID || updated.Meta.Location != created.Meta.Location ||
+				updated.Meta.Version == created.Meta.Version || updated.DisplayName != "Updated" ||
+				!slices.Equal(updated.Members, created.Members) {
+				t.Fatal("resource round trip lost identity, version, or members")
+			}
+			replacement["id"] = "another-resource"
+			replacement["meta"] = map[string]any{"location": "/wrong", "version": updated.Meta.Version}
+			replacement["displayName"] = "Updated again"
+			f.request(t, http.MethodPut, path, encode(replacement), created.Meta.Version, http.StatusPreconditionFailed)
+			current := scimResource(t, f.request(t, http.MethodPut, path, encode(replacement), updated.Meta.Version, http.StatusOK))
+			if current.ID != created.ID || current.Meta.Location != created.Meta.Location || current.DisplayName != "Updated again" {
+				t.Fatal("read-only metadata overrode the addressed resource")
+			}
+			if item.collection == "Groups" {
+				replacement["members"] = []map[string]string{{"value": created.Members[0].Value, "type": "Group"}}
+				f.request(t, http.MethodPut, path, encode(replacement), current.Meta.Version, http.StatusBadRequest)
+				delete(replacement, "members")
+			}
+			replacement["unknown"] = true
+			f.request(t, http.MethodPut, path, encode(replacement), current.Meta.Version, http.StatusBadRequest)
+			if got := f.request(t, http.MethodGet, path, "", "", http.StatusOK).Header().Get("ETag"); got != current.Meta.Version {
+				t.Fatal("rejected replacement changed the version")
+			}
+		})
+	}
+}
+
 func TestSCIMDiscoveryDescribesSupportedResourcesAndRequiresCurrentDirectoryToken(t *testing.T) {
 	f := newSCIMFixture(t)
 	const issuer = "https://identity.example.test"
