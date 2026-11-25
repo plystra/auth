@@ -314,9 +314,34 @@ func (a keycloakAdmin) exchange(t *testing.T, method, path, contentType string, 
 
 func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, issuer, callback, interaction, username string, identified interactionResponse) {
 	t.Helper()
-	target, err := url.Parse(identified.AuthorizationURL)
-	if err != nil || identified.AuthorizationMethod != http.MethodGet ||
-		target.Scheme+"://"+target.Host+target.EscapedPath() != issuer+"/protocol/saml" ||
+	if identified.AuthorizationMethod != http.MethodGet {
+		t.Fatal("the interaction did not start a SAML Redirect request")
+	}
+	posted := keycloakSAMLRedirectForm(t, transport, issuer, callback, username, identified.AuthorizationURL)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, callback, strings.NewReader(posted.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", strings.TrimSuffix(issuer, "/realms/"+keycloakRealm))
+	acs := &http.Client{Transport: rp.host.Client().Transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	res, err := acs.Do(req)
+	if err != nil {
+		t.Fatal("POST the Keycloak form to the service provider failed")
+	}
+	defer func() { _ = res.Body.Close() }()
+	redirect := "/oidc/upstream#interaction=" + strings.TrimPrefix(interaction, route.OIDCInteractionsPath+"/")
+	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != redirect {
+		t.Fatalf("the ACS did not resume its original interaction: %d", res.StatusCode)
+	}
+}
+
+func keycloakSAMLRedirectForm(t *testing.T, transport *http.Transport, issuer, callback, username, authorizationURL string) url.Values {
+	t.Helper()
+	target, err := url.Parse(authorizationURL)
+	if err != nil || target.Scheme+"://"+target.Host+target.EscapedPath() != issuer+"/protocol/saml" ||
 		target.Query().Get("SAMLRequest") == "" || target.Query().Get("RelayState") == "" {
 		t.Fatal("the interaction did not start the discovered Keycloak SAML endpoint")
 	}
@@ -331,24 +356,7 @@ func keycloakSAMLCallback(t *testing.T, rp *humanRP, transport *http.Transport, 
 		len(posted["RelayState"]) != 1 || posted.Get("RelayState") != target.Query().Get("RelayState") {
 		t.Fatal("Keycloak's POST was not bound to the exact ACS and original relay")
 	}
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, callback, strings.NewReader(posted.Encode()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Origin", target.Scheme+"://"+target.Host)
-	acs := &http.Client{Transport: rp.host.Client().Transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	res, err := acs.Do(req)
-	if err != nil {
-		t.Fatal("POST the Keycloak form to the service provider failed")
-	}
-	defer func() { _ = res.Body.Close() }()
-	redirect := "/oidc/upstream#interaction=" + strings.TrimPrefix(interaction, route.OIDCInteractionsPath+"/")
-	if res.StatusCode != http.StatusSeeOther || res.Header.Get("Location") != redirect {
-		t.Fatalf("the ACS did not resume its original interaction: %d", res.StatusCode)
-	}
+	return posted
 }
 
 func keycloakSAMLForm(page *html.Node, callback string) url.Values {

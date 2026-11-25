@@ -24,7 +24,7 @@ jobs:
           cache: true
       - name: Run checks
         run: make check
-      - name: Verify workforce login failover and SAML role mapping
-        run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak((SAML)?DirectoryEmployeeCompletesAfterIssuerProcessExit|WorkforceSAMLUsesCurrentRoleMapping)$' -count=1
+      - name: Verify workforce login failover, SAML role mapping and account linking
+        run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak((SAML)?DirectoryEmployeeCompletesAfterIssuerProcessExit|WorkforceSAMLUsesCurrentRoleMapping|ExistingAccountLinksSAMLAndSignsInToRelyingParty)$' -count=1
       - name: Verify directory access lifecycle and upstream credential rotation
         run: go test -tags interop -race ./internal/protocol -run '^TestKeycloak(IdPInitiatedSAMLLoginAndDirectoryOffboarding|(SAML)?DirectoryEmployeeLosesRelyingPartyAccessOnOffboarding|DirectoryGroupControlsEmployeeSessionAccess)$' -count=1
