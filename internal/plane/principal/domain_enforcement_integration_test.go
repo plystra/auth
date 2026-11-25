@@ -5,15 +5,19 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/account"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/enterprise"
+	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/secret"
+	"github.com/pquerna/otp/totp"
 )
 
 func TestVerifiedDomainEnforcementHTTPRollsOutAndReverts(t *testing.T) {
@@ -33,6 +37,7 @@ func TestVerifiedDomainEnforcementHTTPRollsOutAndReverts(t *testing.T) {
 	seedTestInlineGrant(t, st, spaceID, owner.ID, memberID, "self:read")
 	service := &enterprise.Service{Store: st, Authorization: authz, StepUp: sessions, DataKey: secret.New(strings.Repeat("d", 32))}
 	sessions.SpaceSignInPolicy = service
+	sessions.Factors = &factor.Service{Store: st, DataKey: service.DataKey}
 	admin, err := sessions.CreateForMember(ctx, adminID, owner.ID, nil, "test", 1)
 	if err != nil {
 		t.Fatal(err)
@@ -101,6 +106,22 @@ func TestVerifiedDomainEnforcementHTTPRollsOutAndReverts(t *testing.T) {
 	changeProof := func(version string, force bool) {
 		prove(enterprise.DomainUpdateOperation, enterprise.DomainUpdateRequest(spaceID, pending.ID, version, force))
 	}
+	changeWithMFA := func(version string, force bool) {
+		t.Helper()
+		enrolled, err := sessions.Factors.EnrollTOTPForUser(ctx, adminID, "principal-actor@example.test", "rollout approval "+strconv.FormatBool(force))
+		if err != nil {
+			t.Fatal(err)
+		}
+		code, err := totp.GenerateCode(enrolled.Secret.Value(), time.Now().UTC())
+		if err != nil {
+			t.Fatal(err)
+		}
+		send(http.MethodPost, "/v1/auth/step-up", admin.AccessToken, "", map[string]any{
+			"operation": enterprise.DomainUpdateOperation,
+			"request":   enterprise.DomainUpdateRequest(spaceID, pending.ID, version, force),
+			"mfa_code":  code,
+		}, http.StatusOK)
+	}
 	change := func(version string, force bool, want int) *httptest.ResponseRecorder {
 		return send(http.MethodPatch, path, admin.AccessToken, version, map[string]bool{"force_sso": force}, want)
 	}
@@ -135,7 +156,7 @@ func TestVerifiedDomainEnforcementHTTPRollsOutAndReverts(t *testing.T) {
 		CREATE TRIGGER reject_domain_policy_audit BEFORE INSERT ON audit_logs FOR EACH ROW EXECUTE FUNCTION reject_domain_policy_audit()`); err != nil {
 		t.Fatal(err)
 	}
-	changeProof(verified.ETag, true)
+	changeWithMFA(verified.ETag, true)
 	change(verified.ETag, true, http.StatusServiceUnavailable)
 	send(http.MethodGet, "/v1/me", employee.AccessToken, "", nil, http.StatusOK)
 	if _, err := st.Pool.Exec(ctx, `DROP TRIGGER reject_domain_policy_audit ON audit_logs`); err != nil {
@@ -161,7 +182,7 @@ func TestVerifiedDomainEnforcementHTTPRollsOutAndReverts(t *testing.T) {
 
 	prove("sso_connections.delete", map[string]any{"operation": "sso_connections.delete", "space_id": spaceID, "connection_id": connection.ID})
 	send(http.MethodDelete, "/v1/spaces/"+spaceID+"/sso-connections/"+connection.ID, admin.AccessToken, "", nil, http.StatusOK)
-	changeProof(forced.ETag, false)
+	changeWithMFA(forced.ETag, false)
 	rolledBack := change(forced.ETag, false, http.StatusOK)
 	if err := json.Unmarshal(rolledBack.Body.Bytes(), &envelope); err != nil || envelope.Data.ForceSSO || envelope.Data.ETag == forced.ETag {
 		t.Fatal("verified domain could not revert enforcement during provider disablement")
