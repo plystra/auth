@@ -18,9 +18,9 @@ import (
 
 const SSOConnectionUpdateOperation = "sso_connections.update"
 
-func (c Connection) ETag() string { return connectionETag(c.ID, c.UpdatedAt) }
+func (c Connection) ETag() string { return resourceETag(c.ID, c.UpdatedAt) }
 
-func connectionETag(id string, updatedAt time.Time) string {
+func resourceETag(id string, updatedAt time.Time) string {
 	return `"` + sha256Hex(id+":"+strconv.FormatInt(updatedAt.UnixMicro(), 10)) + `"`
 }
 
@@ -94,7 +94,7 @@ func (s *Service) lockConnectionUpdateTx(ctx context.Context, q *db.Queries, act
 	if err != nil {
 		return db.LockSSOConnectionInSpaceRow{}, err
 	}
-	if request["if_match"] != connectionETag(current.ID, current.UpdatedAt.Time) {
+	if request["if_match"] != resourceETag(current.ID, current.UpdatedAt.Time) {
 		return db.LockSSOConnectionInSpaceRow{}, apierr.New("precondition_failed", "If-Match must contain the current SSO connection ETag")
 	}
 	return current, nil

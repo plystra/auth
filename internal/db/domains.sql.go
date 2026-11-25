@@ -100,7 +100,8 @@ func (q *Queries) CreateSSODomain(ctx context.Context, arg CreateSSODomainParams
 }
 
 const disableSSODomain = `-- name: DisableSSODomain :exec
-UPDATE sso_domains SET status = 'disabled', updated_at = now()
+UPDATE sso_domains SET status = 'disabled',
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
 WHERE id = $1 AND status <> 'disabled'
 `
 
@@ -343,11 +344,12 @@ func (q *Queries) LockForcedSSODomainForLogin(ctx context.Context, arg LockForce
 const lockSSODomain = `-- name: LockSSODomain :one
 SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status,
     verified_at, created_at, updated_at
-FROM sso_domains WHERE id = $1 FOR UPDATE
+FROM sso_domains WHERE id = $1 AND space_id = $2 FOR UPDATE
 `
 
 type LockSSODomainParams struct {
-	ID string `json:"id"`
+	ID      string `json:"id"`
+	SpaceID string `json:"space_id"`
 }
 
 type LockSSODomainRow struct {
@@ -365,7 +367,7 @@ type LockSSODomainRow struct {
 }
 
 func (q *Queries) LockSSODomain(ctx context.Context, arg LockSSODomainParams) (LockSSODomainRow, error) {
-	row := q.db.QueryRow(ctx, lockSSODomain, arg.ID)
+	row := q.db.QueryRow(ctx, lockSSODomain, arg.ID, arg.SpaceID)
 	var i LockSSODomainRow
 	err := row.Scan(
 		&i.ID,
@@ -383,8 +385,53 @@ func (q *Queries) LockSSODomain(ctx context.Context, arg LockSSODomainParams) (L
 	return i, err
 }
 
+const updateSSODomainEnforcement = `-- name: UpdateSSODomainEnforcement :one
+UPDATE sso_domains SET force_sso = $1,
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
+WHERE id = $2 AND space_id = $3 AND status = 'verified'
+RETURNING id, space_id, domain, connection_id, force_sso, covers_subtree, status, verified_at, created_at, updated_at
+`
+
+type UpdateSSODomainEnforcementParams struct {
+	ForceSso bool   `json:"force_sso"`
+	ID       string `json:"id"`
+	SpaceID  string `json:"space_id"`
+}
+
+type UpdateSSODomainEnforcementRow struct {
+	ID            string             `json:"id"`
+	SpaceID       string             `json:"space_id"`
+	Domain        string             `json:"domain"`
+	ConnectionID  pgtype.Text        `json:"connection_id"`
+	ForceSso      bool               `json:"force_sso"`
+	CoversSubtree bool               `json:"covers_subtree"`
+	Status        string             `json:"status"`
+	VerifiedAt    pgtype.Timestamptz `json:"verified_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
+func (q *Queries) UpdateSSODomainEnforcement(ctx context.Context, arg UpdateSSODomainEnforcementParams) (UpdateSSODomainEnforcementRow, error) {
+	row := q.db.QueryRow(ctx, updateSSODomainEnforcement, arg.ForceSso, arg.ID, arg.SpaceID)
+	var i UpdateSSODomainEnforcementRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Domain,
+		&i.ConnectionID,
+		&i.ForceSso,
+		&i.CoversSubtree,
+		&i.Status,
+		&i.VerifiedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const verifySSODomain = `-- name: VerifySSODomain :exec
-UPDATE sso_domains SET status = 'verified', verified_at = now(), updated_at = now()
+UPDATE sso_domains SET status = 'verified', verified_at = now(),
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
 WHERE id = $1 AND status = 'pending'
 `
 

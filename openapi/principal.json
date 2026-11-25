@@ -1691,6 +1691,9 @@
           "domain": {
             "type": "string"
           },
+          "etag": {
+            "type": "string"
+          },
           "force_sso": {
             "type": "boolean"
           },
@@ -1717,6 +1720,7 @@
         },
         "required": [
           "id",
+          "etag",
           "space_id",
           "domain",
           "force_sso",
@@ -1724,6 +1728,21 @@
           "status",
           "created_at",
           "updated_at"
+        ],
+        "type": "object"
+      },
+      "DomainEnforcementInputBody": {
+        "additionalProperties": false,
+        "properties": {
+          "force_sso": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "force_sso"
         ],
         "type": "object"
       },
@@ -7219,7 +7238,14 @@
                 }
               }
             },
-            "description": "OK"
+            "description": "OK",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "default": {
             "content": {
@@ -7293,6 +7319,88 @@
           }
         },
         "summary": "domains.delete"
+      },
+      "patch": {
+        "operationId": "domains.update",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Approval-Id",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-Match",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "domain_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DomainEnforcementInputBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DomainOutputBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "default": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "description": "Error"
+          }
+        },
+        "summary": "domains.update"
       }
     },
     "/v1/spaces/{id}/domains/{domain_id}/verify": {

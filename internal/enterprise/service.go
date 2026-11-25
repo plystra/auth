@@ -82,6 +82,7 @@ type DomainInput struct {
 
 type Domain struct {
 	ID                string    `json:"id"`
+	ETag              string    `json:"etag"`
 	SpaceID           string    `json:"space_id"`
 	Domain            string    `json:"domain"`
 	ConnectionID      string    `json:"connection_id,omitempty"`
@@ -444,7 +445,7 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 		return Domain{}, err
 	}
 	if in.ForceSSO && strings.TrimSpace(in.ConnectionID) == "" {
-		return Domain{}, apierr.New("validation_failed", "force_sso requires an OIDC connection")
+		return Domain{}, apierr.New("validation_failed", "force_sso requires an SSO connection")
 	}
 	if in.CoversSubtree && strings.TrimSpace(in.ConnectionID) == "" {
 		return Domain{}, apierr.New("validation_failed", "covers_subtree requires an SSO connection")
@@ -474,7 +475,7 @@ func (s *Service) CreateDomain(ctx context.Context, actorMemberID, spaceID strin
 				return apierr.New("not_found", "SSO connection was not found")
 			}
 			if in.ForceSSO && connection.Status != "active" {
-				return apierr.New("validation_failed", "force_sso requires an active OIDC connection")
+				return apierr.New("validation_failed", "force_sso requires an active SSO connection")
 			}
 			if in.CoversSubtree && !connection.CoversSubtree {
 				return apierr.New("validation_failed", "covers_subtree requires a connection that covers the subtree")
@@ -571,8 +572,8 @@ func (s *Service) VerifyDomain(ctx context.Context, actorMemberID, spaceID, doma
 		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
 			return err
 		}
-		locked, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: row.ID})
-		if errors.Is(err, pgx.ErrNoRows) || locked.SpaceID != spaceID {
+		locked, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: row.ID, SpaceID: spaceID})
+		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("not_found", "domain was not found")
 		}
 		if err != nil {
@@ -607,15 +608,12 @@ func (s *Service) DisableDomain(ctx context.Context, actorMemberID, spaceID, dom
 		if err := s.checkConnectionManagement(ctx, q, actorMemberID, spaceID); err != nil {
 			return err
 		}
-		row, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: strings.TrimSpace(domainID)})
+		row, err := q.LockSSODomain(ctx, db.LockSSODomainParams{ID: strings.TrimSpace(domainID), SpaceID: spaceID})
 		if errors.Is(err, pgx.ErrNoRows) {
 			return apierr.New("not_found", "domain was not found")
 		}
 		if err != nil {
 			return err
-		}
-		if row.SpaceID != spaceID {
-			return apierr.New("not_found", "domain was not found")
 		}
 		if err := s.consumeStepUp(ctx, q); err != nil {
 			return err
@@ -1843,6 +1841,7 @@ func normalizeConnectionError(err error) error {
 
 func domainFromRow(row db.CreateSSODomainRow) Domain {
 	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, CoversSubtree: row.CoversSubtree, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	out.ETag = resourceETag(out.ID, out.UpdatedAt)
 	if row.ConnectionID.Valid {
 		out.ConnectionID = row.ConnectionID.String
 	}
@@ -1854,6 +1853,7 @@ func domainFromRow(row db.CreateSSODomainRow) Domain {
 
 func domainFromListRow(row db.ListSSODomainsRow) Domain {
 	out := Domain{ID: row.ID, SpaceID: row.SpaceID, Domain: row.Domain, ForceSSO: row.ForceSso, CoversSubtree: row.CoversSubtree, Status: row.Status, CreatedAt: row.CreatedAt.Time, UpdatedAt: row.UpdatedAt.Time}
+	out.ETag = resourceETag(out.ID, out.UpdatedAt)
 	if row.ConnectionID.Valid {
 		out.ConnectionID = row.ConnectionID.String
 	}

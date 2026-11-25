@@ -100,7 +100,19 @@ type domainPathInput struct {
 	DomainID      string `path:"domain_id"`
 }
 
+type domainEnforcementInput struct {
+	Authorization string `header:"Authorization"`
+	ApprovalID    string `header:"Approval-Id"`
+	IfMatch       string `header:"If-Match"`
+	ID            string `path:"id"`
+	DomainID      string `path:"domain_id"`
+	Body          struct {
+		ForceSSO *bool `json:"force_sso"`
+	}
+}
+
 type domainOutput struct {
+	ETag string `header:"ETag"`
 	Body struct {
 		Data enterprise.Domain `json:"data"`
 	}
@@ -191,6 +203,7 @@ func (a *API) registerEnterpriseRoutes(api huma.API) {
 	route.Register(api, route.NewSpec(authorization.DirectoryGroupGrantOperation, "POST", "/v1/spaces/{id}/directories/{dir_id}/groups/{directory_group_id}/grants", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithConditionalPermission("auth.grants:assign"), route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDirectoryGroupGrant)
 	route.Register(api, route.NewSpec("domains.list", "GET", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listDomains)
 	route.Register(api, route.NewSpec("domains.create", "POST", "/v1/spaces/{id}/domains", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.createDomain)
+	route.Register(api, route.NewSpec(enterprise.DomainUpdateOperation, "PATCH", "/v1/spaces/{id}/domains/{domain_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.updateDomainEnforcement)
 	route.Register(api, route.NewSpec("domains.verify", "POST", "/v1/spaces/{id}/domains/{domain_id}/verify", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.verifyDomain)
 	route.Register(api, route.NewSpec("domains.delete", "DELETE", "/v1/spaces/{id}/domains/{domain_id}", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.deleteDomain)
 	route.Register(api, route.NewSpec("sso_connections.list", "GET", "/v1/spaces/{id}/sso-connections", route.Principal, "auth.connections:manage", []route.Subject{route.HumanAgent}, route.WithStepUp(), route.WithAuthoritativeCheck()), a.listSSOConnections)
@@ -412,9 +425,41 @@ func (a *API) createDomain(ctx context.Context, in *createDomainInput) (*domainO
 	if err != nil {
 		return nil, err
 	}
-	out := &domainOutput{}
+	return domainResponse(domain), nil
+}
+
+func domainResponse(domain enterprise.Domain) *domainOutput {
+	out := &domainOutput{ETag: domain.ETag}
 	out.Body.Data = domain
-	return out, nil
+	return out
+}
+
+func (a *API) updateDomainEnforcement(ctx context.Context, in *domainEnforcementInput) (*domainOutput, error) {
+	if a.Enterprise == nil {
+		return nil, apierr.New("unavailable", "enterprise connection service is unavailable")
+	}
+	ifMatch := strings.TrimSpace(in.IfMatch)
+	if ifMatch == "" {
+		return nil, apierr.New("precondition_failed", "If-Match must contain the current domain ETag")
+	}
+	if in.Body.ForceSSO == nil {
+		return nil, apierr.New("validation_failed", "force_sso is required")
+	}
+	const operation = enterprise.DomainUpdateOperation
+	request := enterprise.DomainUpdateRequest(in.ID, in.DomainID, ifMatch, *in.Body.ForceSSO)
+	actor, ctx, err := a.actorForGovernanceTarget(ctx, in.Authorization, in.ApprovalID, in.ID, "", "auth.connections:manage", operation, request)
+	if err != nil {
+		return nil, err
+	}
+	ctx, err = a.principalStepUpContext(ctx, in.Authorization, operation, request)
+	if err != nil {
+		return nil, err
+	}
+	domain, err := a.Enterprise.UpdateDomainEnforcement(ctx, actor.ID, in.ID, in.DomainID, ifMatch, *in.Body.ForceSSO)
+	if err != nil {
+		return nil, err
+	}
+	return domainResponse(domain), nil
 }
 
 func (a *API) verifyDomain(ctx context.Context, in *domainPathInput) (*authorizationDataOutput[acceptedData], error) {

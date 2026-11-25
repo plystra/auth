@@ -22,7 +22,7 @@ ORDER BY created_at, id;
 -- name: LockSSODomain :one
 SELECT id, space_id, domain, verification_token_hash, connection_id, force_sso, covers_subtree, status,
     verified_at, created_at, updated_at
-FROM sso_domains WHERE id = sqlc.arg(id) FOR UPDATE;
+FROM sso_domains WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id) FOR UPDATE;
 
 -- name: LockForcedSSODomainForLogin :exec
 SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(domain)::text, 723615832002));
@@ -31,12 +31,20 @@ SELECT pg_advisory_xact_lock_shared(hashtextextended(sqlc.arg(domain)::text, 723
 SELECT pg_advisory_xact_lock(hashtextextended(sqlc.arg(domain)::text, 723615832002));
 
 -- name: VerifySSODomain :exec
-UPDATE sso_domains SET status = 'verified', verified_at = now(), updated_at = now()
+UPDATE sso_domains SET status = 'verified', verified_at = now(),
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
 WHERE id = sqlc.arg(id) AND status = 'pending';
 
 -- name: DisableSSODomain :exec
-UPDATE sso_domains SET status = 'disabled', updated_at = now()
+UPDATE sso_domains SET status = 'disabled',
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
 WHERE id = sqlc.arg(id) AND status <> 'disabled';
+
+-- name: UpdateSSODomainEnforcement :one
+UPDATE sso_domains SET force_sso = sqlc.arg(force_sso),
+    updated_at = greatest(clock_timestamp(), updated_at + interval '1 microsecond')
+WHERE id = sqlc.arg(id) AND space_id = sqlc.arg(space_id) AND status = 'verified'
+RETURNING id, space_id, domain, connection_id, force_sso, covers_subtree, status, verified_at, created_at, updated_at;
 
 -- name: GetSSOForEmailDomain :one
 SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
