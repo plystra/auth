@@ -218,6 +218,44 @@ the backup timestamp tested, recovery time, result and any gap against your reco
 objectives. See [pg_dump](https://www.postgresql.org/docs/17/app-pgdump.html) and
 [pg_restore](https://www.postgresql.org/docs/17/app-pgrestore.html).
 
+#### Replay offboarding missing from an older snapshot
+
+Keep the restored service private. From the authoritative directory, obtain each confirmed
+departure's stable `externalId` and its directory assignment. Use the corresponding restored
+directory's current SCIM bearer credential through your secret store. Work on the isolated
+recovery URL and retain a record of the authoritative changes you reconcile.
+
+1. Send `POST /scim/v2/{directory_id}/Users/.search` with `Content-Type: application/scim+json`.
+   Encode the external ID as a JSON string literal inside the filter, then encode the request
+   body as JSON. Require exactly one result with the exact `externalId`. Investigate an absent
+   or ambiguous match before making changes.
+
+   ```json
+   {
+     "schemas": ["urn:ietf:params:scim:api:messages:2.0:SearchRequest"],
+     "filter": "externalId eq \"employee-123\"",
+     "attributes": ["id", "externalId", "active", "meta"],
+     "count": 2
+   }
+   ```
+
+2. If the restored user is active, send `PATCH /scim/v2/{directory_id}/Users/{id}` using
+   the returned `id` and `meta.version` as the strong `If-Match` value. The restored version
+   comes from the recovery database. On HTTP 412, read the record again and reconcile the
+   concurrent change before issuing another write. Skip records that are already inactive.
+
+   ```json
+   {
+     "schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"],
+     "Operations": [{"op": "replace", "path": "active", "value": false}]
+   }
+   ```
+
+3. Read back the inactive record. Verify that pre-departure access and refresh tokens fail,
+   including an enterprise session that switched member before departure, and check that an
+   independent session retains access. Complete reconciliation of all changes after the backup
+   timestamp before opening recovered traffic.
+
 ### Integrate application sign-in
 
 1. Register an application with its exact HTTPS callback and `human_oidc_enabled: true`.

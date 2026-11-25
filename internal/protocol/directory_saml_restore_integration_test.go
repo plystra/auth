@@ -23,6 +23,15 @@ import (
 )
 
 func TestDirectoryEmployeeSAMLRestorePreservesOffboarding(t *testing.T) {
+	testDirectoryEmployeeSAMLRestore(t, false)
+}
+
+func TestDirectoryEmployeeSAMLRestoreReconcilesOlderSnapshot(t *testing.T) {
+	testDirectoryEmployeeSAMLRestore(t, true)
+}
+
+func testDirectoryEmployeeSAMLRestore(t *testing.T, snapshotBeforeOffboarding bool) {
+	t.Helper()
 	ctx := t.Context()
 	st, authz, sso, owner, spaceID, _ := newSSOHTTPFixture(t)
 	sessions := sso.Sessions
@@ -68,12 +77,16 @@ func TestDirectoryEmployeeSAMLRestorePreservesOffboarding(t *testing.T) {
 		t.Fatal("invalid provisioned employee or SCIM version")
 	}
 	userPath := users + "/" + employee.ID
-	setActive := func(current employeeLifecycleClient, active bool, version string) employeeLifecycleResponse {
+	patchActive := func(current employeeLifecycleClient, path string, active bool, version string) employeeLifecycleResponse {
 		t.Helper()
-		result := current.send(t, http.MethodPatch, userPath, directory.Token.Value(), scim, version, map[string]any{
+		return current.send(t, http.MethodPatch, path, directory.Token.Value(), scim, version, map[string]any{
 			"schemas":    []string{"urn:ietf:params:scim:api:messages:2.0:PatchOp"},
 			"Operations": []map[string]any{{"op": "replace", "path": "active", "value": active}},
 		})
+	}
+	setActive := func(current employeeLifecycleClient, path string, active bool, version string) employeeLifecycleResponse {
+		t.Helper()
+		result := patchActive(current, path, active, version)
 		result.requireStatus(t, http.StatusOK)
 		if result.etag == "" || result.etag == version {
 			t.Fatal("the directory version did not advance")
@@ -134,9 +147,27 @@ func TestDirectoryEmployeeSAMLRestorePreservesOffboarding(t *testing.T) {
 	if local.Tokens == nil || local.User.ID != first.User.ID {
 		t.Fatal("the employee could not establish an independent password session")
 	}
-	suspended := setActive(client, false, created.etag)
+	var suspended employeeLifecycleResponse
+	if !snapshotBeforeOffboarding {
+		suspended = setActive(client, userPath, false, created.etag)
+	}
 	recovered := restoreEmployeeDatabase(t, st)
 	replica := openEmployeeLifecycleReplica(t, recovered.AppURL, sso)
+	if snapshotBeforeOffboarding {
+		sourceChange := setActive(client, userPath, false, created.etag)
+		identity := findSCIMRecoveryUser(t, client, users, directory.Token.Value(), externalID)
+		if identity.Active || identity.Meta.Version != sourceChange.etag {
+			t.Fatal("the authoritative directory did not have the newer offboarding change")
+		}
+		candidate := findSCIMRecoveryUser(t, replica, users, directory.Token.Value(), externalID)
+		if !candidate.Active || candidate.ID != employee.ID || candidate.Meta.Version != created.etag {
+			t.Fatal("the isolated snapshot did not contain the original active directory record")
+		}
+		replica.send(t, http.MethodGet, "/v1/me/members", switched.AccessToken, "", "", nil).requireStatus(t, http.StatusOK)
+		candidatePath := users + "/" + candidate.ID
+		patchActive(replica, candidatePath, false, identity.Meta.Version).requireStatus(t, http.StatusPreconditionFailed)
+		suspended = setActive(replica, candidatePath, false, candidate.Meta.Version)
+	}
 	assertRevoked := func() {
 		t.Helper()
 		for _, revoked := range []session.Tokens{*first.Tokens, switched} {
@@ -157,7 +188,7 @@ func TestDirectoryEmployeeSAMLRestorePreservesOffboarding(t *testing.T) {
 		t.Fatal("SCIM identity, deactivation or revision changed during restore")
 	}
 	samlLogin(replica).requireError(t, http.StatusBadRequest, "invalid_grant")
-	setActive(replica, true, suspended.etag)
+	setActive(replica, userPath, true, suspended.etag)
 	newLogin := employeeLifecycleData[account.AuthResult](t, samlLogin(replica))
 	if newLogin.Tokens == nil || newLogin.User.ID != first.User.ID || newLogin.Tokens.SessionID == first.Tokens.SessionID {
 		t.Fatal("rehire did not create a fresh SAML session for the original employee")
@@ -168,4 +199,31 @@ func TestDirectoryEmployeeSAMLRestorePreservesOffboarding(t *testing.T) {
 	}
 	replica.send(t, http.MethodGet, "/v1/me/members", newLogin.Tokens.AccessToken, "", "", nil).requireStatus(t, http.StatusOK)
 	assertRevoked()
+}
+
+func findSCIMRecoveryUser(t *testing.T, client employeeLifecycleClient, users, token, externalID string) scimTestResource {
+	t.Helper()
+	literal, err := json.Marshal(externalID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := client.send(t, http.MethodPost, users+"/.search", token, "application/scim+json", "", map[string]any{
+		"schemas":    []string{"urn:ietf:params:scim:api:messages:2.0:SearchRequest"},
+		"filter":     "externalId eq " + string(literal),
+		"attributes": []string{"id", "externalId", "active", "meta"},
+		"count":      2,
+	})
+	result.requireStatus(t, http.StatusOK)
+	var list struct {
+		Total     int                `json:"totalResults"`
+		Resources []scimTestResource `json:"Resources"`
+	}
+	if err := json.Unmarshal(result.body, &list); err != nil || list.Total != 1 || len(list.Resources) != 1 {
+		t.Fatal("the directory recovery search did not resolve one stable identity")
+	}
+	user := list.Resources[0]
+	if user.ID == "" || user.ExternalID != externalID || user.Meta.Version == "" {
+		t.Fatal("the directory recovery search did not return the exact identity and version")
+	}
+	return user
 }
