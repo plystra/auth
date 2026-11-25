@@ -2660,7 +2660,8 @@
           "method": {
             "enum": [
               "password",
-              "passkey"
+              "passkey",
+              "sso"
             ],
             "type": "string"
           }

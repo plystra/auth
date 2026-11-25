@@ -48,8 +48,13 @@ func workforceBrowser(t *testing.T) (*humanRP, oidcBrowser, *oidcTestProvider, e
 func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTestProvider, connection enterprise.Connection, path string, extra map[string]any, maxAge ...string) map[string]string {
 	t.Helper()
 	identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": "password"}, browser.rp.host.URL, "", http.StatusOK)
+	return workforceBrowserCallback(t, upstream, connection, identified, extra, maxAge...)
+}
+
+func workforceBrowserCallback(t *testing.T, upstream *oidcTestProvider, connection enterprise.Connection, identified interactionResponse, extra map[string]any, maxAge ...string) map[string]string {
+	t.Helper()
 	if identified.NextStep != "sso" || identified.SSOConnectionID != connection.ID {
-		t.Fatal("the browser did not route the account to its required connection")
+		t.Fatal("the browser did not route the account to its configured connection")
 	}
 	upstreamURL, err := url.Parse(identified.AuthorizationURL)
 	if err != nil || upstreamURL.Scheme+"://"+upstreamURL.Host+upstreamURL.Path != upstream.issuer+"/authorize" {
@@ -72,8 +77,23 @@ func startWorkforceBrowser(t *testing.T, browser oidcBrowser, upstream *oidcTest
 }
 
 func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
+	t.Run("required", func(t *testing.T) { checkWorkforceBrowserRelyingParty(t, "password") })
+	t.Run("voluntary", func(t *testing.T) { checkWorkforceBrowserRelyingParty(t, "sso") })
+}
+
+func checkWorkforceBrowserRelyingParty(t *testing.T, method string) {
+	t.Helper()
 	rp, browser, upstream, connection := workforceBrowser(t)
 	origin := rp.host.URL
+	if method == "sso" {
+		if _, err := rp.st.Pool.Exec(t.Context(), `UPDATE sso_domains SET force_sso=false WHERE connection_id=$1`, connection.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identify := func(browser oidcBrowser, path string, extra map[string]any, maxAge ...string) map[string]string {
+		identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": method}, origin, "", http.StatusOK)
+		return workforceBrowserCallback(t, upstream, connection, identified, extra, maxAge...)
+	}
 	callback := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	t.Cleanup(callback.Close)
 	rp.config.RedirectURL = callback.URL + "/callback"
@@ -83,7 +103,7 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	verifier, state, nonce := oauth2.GenerateVerifier(), oauth2.GenerateVerifier(), oauth2.GenerateVerifier()
 	path := browser.beginFromAuthorization(t, verifier, state, nonce, oauth2.SetAuthURLParam("max_age", "7200"))
 	authenticatedAt := time.Now().Add(-time.Hour).Unix()
-	upstreamCallback := startWorkforceBrowser(t, browser, upstream, connection, path, map[string]any{"auth_time": authenticatedAt}, "7200")
+	upstreamCallback := identify(browser, path, map[string]any{"auth_time": authenticatedAt}, "7200")
 	read, _ := browser.request(t, http.MethodGet, path, nil, "", "", http.StatusOK)
 	if read.NextStep != "sso" || read.SSOConnectionID != connection.ID || read.AuthorizationURL != "" {
 		t.Fatal("the interaction did not retain the pending upstream step")
@@ -96,7 +116,7 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	}
 	other := newOIDCBrowser(t, rp)
 	otherPath, _ := other.begin(t, oauth2.GenerateVerifier(), "other-state", "other-nonce")
-	_ = startWorkforceBrowser(t, other, upstream, connection, otherPath, nil)
+	_ = identify(other, otherPath, nil)
 	ordinary := "/v1/sso/" + connection.ID
 	ordinaryState, _ := browser.request(t, http.MethodGet, ordinary+"/start", nil, "", "", http.StatusOK)
 	ordinaryURL, err := url.Parse(ordinaryState.AuthorizationURL)
@@ -151,6 +171,42 @@ func TestOIDCBrowserWorkforceContinuesAtIndependentRelyingParty(t *testing.T) {
 	if err := rp.st.Pool.QueryRow(t.Context(), `SELECT count(*) FROM audit_logs WHERE action='auth.sso.login'
 		AND actor_id=$1 AND user_id=$2 AND outcome='success'`, connection.ID, identity.Subject).Scan(&audited); err != nil || audited != 1 {
 		t.Fatal("enterprise sign-in was not audited once for the signed-in identity")
+	}
+}
+
+func TestOIDCBrowserOptionalWorkforceRequiresAVerifiedDomain(t *testing.T) {
+	rp, browser, upstream, connection := workforceBrowser(t)
+	ctx := t.Context()
+	path, _ := browser.begin(t, oauth2.GenerateVerifier(), "optional-state", "optional-nonce")
+	identifySSO := func(email string, status int, code string) {
+		browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": email, "method": "sso"}, rp.host.URL, "", status, code)
+	}
+	before := upstream.discoveryRequests.Load()
+	identifySSO("employee@unconfigured.example.test", http.StatusBadRequest, "login_required")
+	for _, status := range []string{"pending", "disabled"} {
+		if _, err := rp.st.Pool.Exec(ctx, `UPDATE sso_domains SET force_sso=false, status=$1 WHERE id='dom_rp_workforce'`, status); err != nil {
+			t.Fatal(err)
+		}
+		identifySSO(browserEmployee, http.StatusBadRequest, "login_required")
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE sso_domains SET status='verified', connection_id=NULL WHERE id='dom_rp_workforce'`); err != nil {
+		t.Fatal(err)
+	}
+	identifySSO(browserEmployee, http.StatusBadRequest, "login_required")
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE sso_domains SET connection_id=$1 WHERE id='dom_rp_workforce'`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE sso_connections SET status='disabled' WHERE id=$1`, connection.ID); err != nil {
+		t.Fatal(err)
+	}
+	identifySSO(browserEmployee, http.StatusServiceUnavailable, "temporarily_unavailable")
+	if _, err := rp.st.Pool.Exec(ctx, `UPDATE sso_connections SET status='active',redirect_uri=$2 WHERE id=$1`, connection.ID, rp.host.URL+"/other"); err != nil {
+		t.Fatal(err)
+	}
+	identifySSO(browserEmployee, http.StatusServiceUnavailable, "temporarily_unavailable")
+	identified, _ := browser.request(t, http.MethodPost, path+"/identify", map[string]string{"email": browserEmployee, "method": "password"}, rp.host.URL, "", http.StatusOK)
+	if identified.NextStep != "password" || identified.SSOConnectionID != "" || upstream.discoveryRequests.Load() != before {
+		t.Fatal("voluntary SSO failure should leave the original interaction eligible for local sign-in")
 	}
 }
 

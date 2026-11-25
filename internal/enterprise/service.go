@@ -647,6 +647,14 @@ func (s *Service) ForcedConnectionForEmail(ctx context.Context, email string, ta
 	return forcedConnectionForDomain(ctx, s.Store.Queries(), domain, spaceID)
 }
 
+func (s *Service) BrowserConnectionForEmail(ctx context.Context, email string, includeOptional bool) (string, error) {
+	_, domain, err := splitEmailDomain(email)
+	if err != nil {
+		return "", nil
+	}
+	return globalConnectionForDomain(ctx, s.Store.Queries(), domain, includeOptional)
+}
+
 func (s *Service) CheckLocalSignInTx(ctx context.Context, q *db.Queries, email, spaceID string) error {
 	_, domain, err := splitEmailDomain(email)
 	if err != nil {
@@ -722,7 +730,11 @@ func forcedConnectionForDomain(ctx context.Context, q *db.Queries, domain, space
 		}
 		return row.SsoConnectionID.String, nil
 	}
-	row, err := q.GetForcedSSOForEmailDomain(ctx, db.GetForcedSSOForEmailDomainParams{Domain: domain})
+	return globalConnectionForDomain(ctx, q, domain, false)
+}
+
+func globalConnectionForDomain(ctx context.Context, q *db.Queries, domain string, includeOptional bool) (string, error) {
+	row, err := q.GetSSOForEmailDomain(ctx, db.GetSSOForEmailDomainParams{Domain: domain, IncludeOptional: includeOptional})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}

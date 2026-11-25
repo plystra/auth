@@ -113,49 +113,6 @@ func (q *Queries) DisableSSODomain(ctx context.Context, arg DisableSSODomainPara
 	return err
 }
 
-const getForcedSSOForEmailDomain = `-- name: GetForcedSSOForEmailDomain :one
-SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
-    c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
-FROM sso_domains d
-LEFT JOIN sso_connections c ON c.id = d.connection_id
-WHERE d.domain = $1 AND d.status = 'verified' AND d.force_sso = true
-`
-
-type GetForcedSSOForEmailDomainParams struct {
-	Domain string `json:"domain"`
-}
-
-type GetForcedSSOForEmailDomainRow struct {
-	ID                         string      `json:"id"`
-	SpaceID                    string      `json:"space_id"`
-	Domain                     string      `json:"domain"`
-	ConnectionID               pgtype.Text `json:"connection_id"`
-	ForceSso                   bool        `json:"force_sso"`
-	CoversSubtree              bool        `json:"covers_subtree"`
-	Status                     string      `json:"status"`
-	SsoConnectionID            pgtype.Text `json:"sso_connection_id"`
-	SsoConnectionStatus        pgtype.Text `json:"sso_connection_status"`
-	SsoConnectionCoversSubtree pgtype.Bool `json:"sso_connection_covers_subtree"`
-}
-
-func (q *Queries) GetForcedSSOForEmailDomain(ctx context.Context, arg GetForcedSSOForEmailDomainParams) (GetForcedSSOForEmailDomainRow, error) {
-	row := q.db.QueryRow(ctx, getForcedSSOForEmailDomain, arg.Domain)
-	var i GetForcedSSOForEmailDomainRow
-	err := row.Scan(
-		&i.ID,
-		&i.SpaceID,
-		&i.Domain,
-		&i.ConnectionID,
-		&i.ForceSso,
-		&i.CoversSubtree,
-		&i.Status,
-		&i.SsoConnectionID,
-		&i.SsoConnectionStatus,
-		&i.SsoConnectionCoversSubtree,
-	)
-	return i, err
-}
-
 const getForcedSSOForEmailDomainInSpace = `-- name: GetForcedSSOForEmailDomainInSpace :one
 WITH RECURSIVE ancestors AS (
     SELECT spaces.id, spaces.parent_id, 0 AS depth
@@ -254,6 +211,51 @@ func (q *Queries) GetSSODomain(ctx context.Context, arg GetSSODomainParams) (Get
 		&i.VerifiedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getSSOForEmailDomain = `-- name: GetSSOForEmailDomain :one
+SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
+    c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
+FROM sso_domains d
+LEFT JOIN sso_connections c ON c.id = d.connection_id
+WHERE d.domain = $1 AND d.status = 'verified'
+  AND (d.force_sso OR ($2::boolean AND d.connection_id IS NOT NULL))
+`
+
+type GetSSOForEmailDomainParams struct {
+	Domain          string `json:"domain"`
+	IncludeOptional bool   `json:"include_optional"`
+}
+
+type GetSSOForEmailDomainRow struct {
+	ID                         string      `json:"id"`
+	SpaceID                    string      `json:"space_id"`
+	Domain                     string      `json:"domain"`
+	ConnectionID               pgtype.Text `json:"connection_id"`
+	ForceSso                   bool        `json:"force_sso"`
+	CoversSubtree              bool        `json:"covers_subtree"`
+	Status                     string      `json:"status"`
+	SsoConnectionID            pgtype.Text `json:"sso_connection_id"`
+	SsoConnectionStatus        pgtype.Text `json:"sso_connection_status"`
+	SsoConnectionCoversSubtree pgtype.Bool `json:"sso_connection_covers_subtree"`
+}
+
+func (q *Queries) GetSSOForEmailDomain(ctx context.Context, arg GetSSOForEmailDomainParams) (GetSSOForEmailDomainRow, error) {
+	row := q.db.QueryRow(ctx, getSSOForEmailDomain, arg.Domain, arg.IncludeOptional)
+	var i GetSSOForEmailDomainRow
+	err := row.Scan(
+		&i.ID,
+		&i.SpaceID,
+		&i.Domain,
+		&i.ConnectionID,
+		&i.ForceSso,
+		&i.CoversSubtree,
+		&i.Status,
+		&i.SsoConnectionID,
+		&i.SsoConnectionStatus,
+		&i.SsoConnectionCoversSubtree,
 	)
 	return i, err
 }

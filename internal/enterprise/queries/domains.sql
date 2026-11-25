@@ -38,12 +38,13 @@ WHERE id = sqlc.arg(id) AND status = 'pending';
 UPDATE sso_domains SET status = 'disabled', updated_at = now()
 WHERE id = sqlc.arg(id) AND status <> 'disabled';
 
--- name: GetForcedSSOForEmailDomain :one
+-- name: GetSSOForEmailDomain :one
 SELECT d.id, d.space_id, d.domain, d.connection_id, d.force_sso, d.covers_subtree, d.status,
     c.id AS sso_connection_id, c.status AS sso_connection_status, c.covers_subtree AS sso_connection_covers_subtree
 FROM sso_domains d
 LEFT JOIN sso_connections c ON c.id = d.connection_id
-WHERE d.domain = sqlc.arg(domain) AND d.status = 'verified' AND d.force_sso = true;
+WHERE d.domain = sqlc.arg(domain) AND d.status = 'verified'
+  AND (d.force_sso OR (sqlc.arg(include_optional)::boolean AND d.connection_id IS NOT NULL));
 
 -- name: GetForcedSSOForEmailDomainInSpace :one
 WITH RECURSIVE ancestors AS (

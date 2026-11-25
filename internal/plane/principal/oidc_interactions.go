@@ -56,7 +56,7 @@ type oidcBrowserIdentifyInput struct {
 	OIDCBrowserInput
 	Body struct {
 		Email  string `json:"email" minLength:"1" maxLength:"320"`
-		Method string `json:"method" enum:"password,passkey"`
+		Method string `json:"method" enum:"password,passkey,sso"`
 	}
 }
 
@@ -207,8 +207,9 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 		return nil, apierr.New("CONFLICT", "the interaction already has an authentication attempt")
 	}
 	state := oidcInteractionState(interaction)
+	chooseSSO := in.Body.Method == "sso"
 	if a.Enterprise != nil {
-		connection, err := a.Enterprise.ForcedConnectionForEmail(ctx, in.Body.Email)
+		connection, err := a.Enterprise.BrowserConnectionForEmail(ctx, in.Body.Email, chooseSSO)
 		if err != nil {
 			return nil, err
 		}
@@ -221,11 +222,17 @@ func (a *API) identifyOIDCBrowserUser(ctx context.Context, in *oidcBrowserIdenti
 			if err != nil {
 				return nil, err
 			}
+			if chooseSSO && start.AuthorizationURL == "" {
+				return nil, apierr.New("temporarily_unavailable", "the configured SSO connection cannot continue browser sign-in")
+			}
 			state.NextStep, state.SSOConnectionID = "sso", connection
 			state.AuthorizationURL = start.AuthorizationURL
 			state.AuthorizationMethod, state.SAMLRequest, state.RelayState = start.AuthorizationMethod, start.SAMLRequest, start.RelayState
 			return oidcStateOutput(state), nil
 		}
+	}
+	if chooseSSO {
+		return nil, apierr.New("login_required", "no enterprise sign-in is configured for this email domain")
 	}
 	login := account.LoginInput{Email: in.Body.Email, IP: requestinfo.Get(ctx).IP}
 	var challenge account.SignInChallenge
