@@ -883,34 +883,45 @@ func (s *Service) prepareOIDCRequest(ctx context.Context, row db.SsoConnection, 
 }
 
 func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, error) {
-	provider, err := s.samlProvider(row)
+	result, state, err := s.prepareSAMLRequest(row, redirectURI, browser)
 	if err != nil {
 		return StartResult{}, err
+	}
+	if err := s.createSSOState(ctx, state, browser); err != nil {
+		return StartResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Service) prepareSAMLRequest(row db.SsoConnection, redirectURI string, browser *OIDCBrowserBinding) (StartResult, db.CreateSSOStateParams, error) {
+	provider, err := s.samlProvider(row)
+	if err != nil {
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	relayState, err := randomOpaque("saml_state_")
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	nonce, err := randomOpaque("saml_nonce_")
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
 	document, err := provider.BuildAuthRequestDocumentNoSig()
 	if err != nil {
-		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+		return StartResult{}, db.CreateSSOStateParams{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
 	if browser != nil && browser.MaxAuthenticationAge.Valid {
 		document.Root().CreateAttr("ForceAuthn", "true")
 	}
 	requestBytes, err := document.WriteToBytes()
 	if err != nil {
-		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+		return StartResult{}, db.CreateSSOStateParams{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
 	var request struct {
 		ID string `xml:"ID,attr"`
 	}
 	if err := xml.Unmarshal(requestBytes, &request); err != nil || request.ID == "" {
-		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+		return StartResult{}, db.CreateSSOStateParams{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
 	expiresAt := time.Now().UTC().Add(stateLifetime)
 	if browser != nil && browser.ExpiresAt.Before(expiresAt) {
@@ -918,16 +929,14 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 	}
 	verifierCiphertext, err := s.seal([]byte("saml"), pkceVerifierAAD)
 	if err != nil {
-		return StartResult{}, err
+		return StartResult{}, db.CreateSSOStateParams{}, err
 	}
-	if err := s.createSSOState(ctx, db.CreateSSOStateParams{
+	state := db.CreateSSOStateParams{
 		ID: string(ids.New[ids.ID]("sos")), ConnectionID: row.ID,
 		StateHash: digest(relayState), NonceHash: digest(nonce),
 		PkceVerifierCiphertext: verifierCiphertext, RedirectUri: redirectURI,
 		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
 		RequestID: pgtype.Text{String: request.ID, Valid: true},
-	}, browser); err != nil {
-		return StartResult{}, err
 	}
 	result := StartResult{State: relayState, ExpiresAt: expiresAt, AuthorizationMethod: "GET"}
 	if row.SamlSsoBinding.String == saml2.BindingHttpPost {
@@ -935,13 +944,13 @@ func (s *Service) startSAML(ctx context.Context, row db.SsoConnection, redirectU
 		result.AuthorizationURL = row.SamlSsoUrl.String
 		result.SAMLRequest = base64.StdEncoding.EncodeToString(requestBytes)
 		result.RelayState = relayState
-		return result, nil
+		return result, state, nil
 	}
 	result.AuthorizationURL, err = provider.BuildAuthURLRedirect(relayState, document)
 	if err != nil {
-		return StartResult{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
+		return StartResult{}, db.CreateSSOStateParams{}, apierr.New("temporarily_unavailable", "SAML authorization request could not be built")
 	}
-	return result, nil
+	return result, state, nil
 }
 
 func (s *Service) createSSOState(ctx context.Context, in db.CreateSSOStateParams, browser *OIDCBrowserBinding) error {

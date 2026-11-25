@@ -3653,13 +3653,15 @@
           "code": {
             "type": "string"
           },
+          "saml_response": {
+            "type": "string"
+          },
           "state": {
             "type": "string"
           }
         },
         "required": [
-          "state",
-          "code"
+          "state"
         ],
         "type": "object"
       },

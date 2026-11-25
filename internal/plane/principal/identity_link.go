@@ -5,6 +5,7 @@ import (
 
 	"github.com/plystra/auth/internal/apierr"
 	"github.com/plystra/auth/internal/enterprise"
+	"github.com/plystra/auth/internal/secret"
 )
 
 type ssoIdentityLinkInput struct {
@@ -23,8 +24,9 @@ type ssoIdentityLinkCompleteInput struct {
 	Authorization string `header:"Authorization"`
 	ConnectionID  string `path:"connection_id"`
 	Body          struct {
-		State string `json:"state"`
-		Code  string `json:"code"`
+		State        string        `json:"state"`
+		Code         string        `json:"code,omitempty"`
+		SAMLResponse secret.String `json:"saml_response,omitempty"`
 	}
 }
 
@@ -61,7 +63,7 @@ func (a *API) completeSSOIdentityLink(ctx context.Context, in *ssoIdentityLinkCo
 	if a.Enterprise == nil {
 		return nil, apierr.New("unavailable", "enterprise SSO is unavailable")
 	}
-	if err := a.Enterprise.CompleteIdentityLink(ctx, in.ConnectionID, claims.Subject, claims.SessionID, in.Body.State, in.Body.Code); err != nil {
+	if err := a.Enterprise.CompleteIdentityLink(ctx, in.ConnectionID, claims.Subject, claims.SessionID, in.Body.State, in.Body.Code, in.Body.SAMLResponse.Value()); err != nil {
 		return nil, err
 	}
 	out := &ssoIdentityLinkCompleteOutput{}

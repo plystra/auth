@@ -2182,3 +2182,11 @@ SELECT id AS session_id, auth_time AS session_authentication_time,
          WHEN auth_methods && ARRAY['pwd', 'webauthn']::text[] THEN auth_time
        END)::timestamptz AS authentication_time
 FROM sessions;
+
+ALTER TABLE sso_states
+    DROP CONSTRAINT sso_states_link_context_check,
+    ADD CONSTRAINT sso_states_link_context_check CHECK (
+        (link_session_id IS NULL AND link_member_id IS NULL AND link_connection_updated_at IS NULL)
+        OR (link_session_id IS NOT NULL AND link_member_id IS NOT NULL
+            AND link_connection_updated_at IS NOT NULL AND NOT browser_bound)
+    );

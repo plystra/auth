@@ -23,6 +23,10 @@ func IdentityLinkProofRequest(connectionID, state, code string) map[string]strin
 	return map[string]string{"connection_id": connectionID, "state_sha256": hexDigest(state), "code_sha256": hexDigest(code)}
 }
 
+func SAMLIdentityLinkProofRequest(connectionID, state, response string) map[string]string {
+	return map[string]string{"connection_id": connectionID, "state_sha256": hexDigest(state), "saml_response_sha256": hexDigest(response)}
+}
+
 func (s *Service) StartIdentityLink(ctx context.Context, connectionID, userID, sessionID string) (StartResult, error) {
 	connection, err := s.identityLinkConnection(ctx, connectionID)
 	if err != nil {
@@ -44,7 +48,13 @@ func (s *Service) StartIdentityLink(ctx context.Context, connectionID, userID, s
 	}); err != nil {
 		return StartResult{}, err
 	}
-	result, state, err := s.prepareOIDCRequest(ctx, connection, connection.RedirectUri, nil)
+	var result StartResult
+	var state db.CreateSSOStateParams
+	if connection.Provider == "saml" {
+		result, state, err = s.prepareSAMLRequest(connection, connection.RedirectUri, nil)
+	} else {
+		result, state, err = s.prepareOIDCRequest(ctx, connection, connection.RedirectUri, nil)
+	}
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -67,15 +77,22 @@ func (s *Service) StartIdentityLink(ctx context.Context, connectionID, userID, s
 	return result, nil
 }
 
-func (s *Service) CompleteIdentityLink(ctx context.Context, connectionID, userID, sessionID, rawState, code string) error {
-	if rawState == "" || code == "" || strings.TrimSpace(rawState) != rawState || strings.TrimSpace(code) != code {
-		return apierr.New("invalid_request", "state and code are required")
+func (s *Service) CompleteIdentityLink(ctx context.Context, connectionID, userID, sessionID, rawState, code, samlResponse string) error {
+	if rawState == "" || strings.TrimSpace(rawState) != rawState || (code == "") == (samlResponse == "") || strings.TrimSpace(code) != code || strings.TrimSpace(samlResponse) != samlResponse {
+		return apierr.New("invalid_request", "state and exactly one protocol credential are required")
 	}
 	connection, err := s.identityLinkConnection(ctx, connectionID)
 	if err != nil {
 		return err
 	}
-	proof, err := stepup.DigestValue(IdentityLinkProofRequest(connectionID, rawState, code))
+	request := IdentityLinkProofRequest(connectionID, rawState, code)
+	if connection.Provider == "saml" {
+		request = SAMLIdentityLinkProofRequest(connectionID, rawState, samlResponse)
+	}
+	if (connection.Provider == "saml") != (samlResponse != "") {
+		return apierr.New("invalid_request", "the credential does not match the connection protocol")
+	}
+	proof, err := stepup.DigestValue(request)
 	if err != nil {
 		return err
 	}
@@ -92,18 +109,18 @@ func (s *Service) CompleteIdentityLink(ctx context.Context, connectionID, userID
 	if err != nil {
 		return err
 	}
-	claims, err := s.exchangeOIDCCode(ctx, connection, state, code)
-	if err != nil {
-		return err
+	var claims idTokenClaims
+	if connection.Provider == "oidc" {
+		claims, err = s.exchangeOIDCCode(ctx, connection, state, code)
+		if err != nil {
+			return err
+		}
 	}
 	ctx = session.WithStepUpRequirement(ctx, session.StepUpRequirement{SessionID: sessionID, Operation: CompleteIdentityLinkOperation, Digest: proof})
 	return s.Store.InTx(ctx, func(q *db.Queries) error {
 		email, err := lockIdentityLinkTarget(ctx, q, connection, userID, state.LinkMemberID.String)
 		if err != nil {
 			return err
-		}
-		if email != strings.ToLower(strings.TrimSpace(claims.Email)) {
-			return unavailableIdentityLink()
 		}
 		if err := lockIdentityLinkSession(ctx, q, userID, sessionID, proof); err != nil {
 			return err
@@ -113,6 +130,15 @@ func (s *Service) CompleteIdentityLink(ctx context.Context, connectionID, userID
 			return err
 		}
 		if current.LinkMemberID != state.LinkMemberID {
+			return unavailableIdentityLink()
+		}
+		if connection.Provider == "saml" {
+			claims, err = s.verifyBrowserSAML(ctx, connection, current.RequestID.String, samlResponse, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+		}
+		if email != strings.ToLower(strings.TrimSpace(claims.Email)) {
 			return unavailableIdentityLink()
 		}
 		if err := s.Sessions.ConsumeStepUpTx(ctx, q); err != nil {
@@ -128,18 +154,28 @@ func (s *Service) CompleteIdentityLink(ctx context.Context, connectionID, userID
 		if err != nil {
 			return err
 		}
-		return audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
+		if err := audit.WriteSecurityEvent(ctx, q, audit.SecurityEvent{
 			ActorType: "user", ActorID: userID, UserID: userID, MemberID: current.LinkMemberID.String,
-			Action: "auth.sso.identity.link", Outcome: "success", CredentialType: "oidc",
+			Action: "auth.sso.identity.link", Outcome: "success", CredentialType: connection.Provider,
 			Resource:      audit.Resource{Type: "sso_connection", ID: connection.ID, SpaceID: connection.SpaceID},
 			PolicyVersion: space.PolicyVersion, Metadata: map[string]string{"subject_hash": hexDigest(claims.Subject)},
-		})
+		}); err != nil {
+			return err
+		}
+		if proof := claims.samlProof; proof != nil {
+			if err := proof.recheck(ctx); err != nil {
+				return err
+			}
+			_, err := proof.provider.verify(ctx, proof.response, proof.keyHintMissing)
+			return err
+		}
+		return nil
 	})
 }
 
 func (s *Service) identityLinkConnection(ctx context.Context, connectionID string) (db.SsoConnection, error) {
 	connection, err := s.Store.Queries().GetSSOConnection(ctx, db.GetSSOConnectionParams{ID: connectionID})
-	if errors.Is(err, pgx.ErrNoRows) || err == nil && (connection.Provider != "oidc" || connection.Status != "active") {
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && (connection.Status != "active" || connection.Provider != "oidc" && connection.Provider != "saml") {
 		return db.SsoConnection{}, unavailableIdentityLink()
 	}
 	return connection, err
