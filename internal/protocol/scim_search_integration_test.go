@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -120,5 +121,66 @@ func TestSCIMSearchUsesDirectoryScopedReadOnlyCollections(t *testing.T) {
 		if f.request(t, http.MethodGet, path, "", "", http.StatusOK).Header().Get("ETag") != resource.Meta.Version {
 			t.Fatal("body-based search advanced a resource version")
 		}
+	}
+}
+
+func TestSCIMReconcilesActiveStateAfterVersionedPatch(t *testing.T) {
+	f := newSCIMFixture(t)
+	employee := f.user(t, "reconciled", true)
+	stillActive := f.user(t, "peer", true)
+	f.user(t, "already-inactive", false)
+	path := "Users/" + employee.ID
+	disable := scimPatch(map[string]any{"op": "Replace", "path": "active", "value": "False"})
+	f.request(t, http.MethodPatch, path, disable, "", http.StatusPreconditionFailed)
+	f.request(t, http.MethodPatch, path, disable, `W/"999"`, http.StatusPreconditionFailed)
+	for _, value := range []any{"0", " false ", 0, nil} {
+		f.request(t, http.MethodPatch, path, scimPatch(map[string]any{
+			"op": "replace", "path": "active", "value": value,
+		}), employee.Meta.Version, http.StatusBadRequest)
+	}
+	disabled := scimResource(t, f.request(t, http.MethodPatch, path, disable, employee.Meta.Version, http.StatusOK))
+	if disabled.Active || disabled.Meta.Version == employee.Meta.Version {
+		t.Fatal("versioned disable did not advance the resource and return a false Boolean")
+	}
+	type page struct {
+		TotalResults, ItemsPerPage int
+		Resources                  []scimTestResource
+	}
+	assertPage := func(body []byte, total, items int) []scimTestResource {
+		t.Helper()
+		var got page
+		if err := json.Unmarshal(body, &got); err != nil || got.TotalResults != total || got.ItemsPerPage != items || len(got.Resources) != items {
+			t.Fatal("active filter returned incorrect totals or items")
+		}
+		return got.Resources
+	}
+	search := func(query string, count int) []scimTestResource {
+		t.Helper()
+		request, err := json.Marshal(map[string]any{"schemas": []string{scimSearchSchema}, "filter": query, "count": count})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := f.request(t, http.MethodPost, "Users/.search", string(request), "", http.StatusOK)
+		return assertPage(result.Body.Bytes(), 2, count)
+	}
+	active := f.request(t, http.MethodGet, "Users?filter="+url.QueryEscape("AcTiVe EQ true"), "", "", http.StatusOK)
+	if users := assertPage(active.Body.Bytes(), 1, 1); users[0].ID != stillActive.ID || !users[0].Active {
+		t.Fatal("active filter returned the wrong employee")
+	}
+	search("active eq false", 0)
+	inactive := search("active eq false", 2)
+	if inactive[0].Active || inactive[1].Active || inactive[0].ID != employee.ID && inactive[1].ID != employee.ID {
+		t.Fatal("search did not reconcile the disabled employee")
+	}
+	for _, filter := range []string{`active eq "false"`, `active ne false`, `active eq false or active eq true`} {
+		f.request(t, http.MethodGet, "Users?filter="+url.QueryEscape(filter), "", "", http.StatusBadRequest)
+	}
+	f.request(t, http.MethodGet, "Groups?filter="+url.QueryEscape("active eq false"), "", "", http.StatusBadRequest)
+	f.request(t, http.MethodPut, path, `{"externalId":"reconciled","userName":"reconciled@scim.test","active":"True"}`, disabled.Meta.Version, http.StatusBadRequest)
+	enabled := scimResource(t, f.request(t, http.MethodPatch, path, scimPatch(map[string]any{
+		"op": "replace", "value": map[string]any{"ACTIVE": "TrUe"},
+	}), disabled.Meta.Version, http.StatusOK))
+	if !enabled.Active || enabled.Meta.Version == disabled.Meta.Version {
+		t.Fatal("the pathless versioned PATCH did not reactivate the employee")
 	}
 }

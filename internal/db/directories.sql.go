@@ -97,16 +97,23 @@ SELECT count(*)::bigint FROM directory_users
 WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR user_name = $2)
   AND ($3::text = '' OR external_id = $3)
+  AND ($4::boolean IS NULL OR active = $4)
 `
 
 type CountDirectoryUsersParams struct {
-	DirectoryID      string `json:"directory_id"`
-	FilterUserName   string `json:"filter_user_name"`
-	FilterExternalID string `json:"filter_external_id"`
+	DirectoryID      string      `json:"directory_id"`
+	FilterUserName   string      `json:"filter_user_name"`
+	FilterExternalID string      `json:"filter_external_id"`
+	FilterActive     pgtype.Bool `json:"filter_active"`
 }
 
 func (q *Queries) CountDirectoryUsers(ctx context.Context, arg CountDirectoryUsersParams) (int64, error) {
-	row := q.db.QueryRow(ctx, countDirectoryUsers, arg.DirectoryID, arg.FilterUserName, arg.FilterExternalID)
+	row := q.db.QueryRow(ctx, countDirectoryUsers,
+		arg.DirectoryID,
+		arg.FilterUserName,
+		arg.FilterExternalID,
+		arg.FilterActive,
+	)
 	var column_1 int64
 	err := row.Scan(&column_1)
 	return column_1, err
@@ -908,16 +915,18 @@ FROM directory_users
 WHERE directory_id = $1 AND deleted_at IS NULL
   AND ($2::text = '' OR user_name = $2)
   AND ($3::text = '' OR external_id = $3)
+  AND ($4::boolean IS NULL OR active = $4)
 ORDER BY id
-LIMIT $5 OFFSET $4
+LIMIT $6 OFFSET $5
 `
 
 type ListDirectoryUsersParams struct {
-	DirectoryID      string `json:"directory_id"`
-	FilterUserName   string `json:"filter_user_name"`
-	FilterExternalID string `json:"filter_external_id"`
-	OffsetCount      int32  `json:"offset_count"`
-	LimitCount       int32  `json:"limit_count"`
+	DirectoryID      string      `json:"directory_id"`
+	FilterUserName   string      `json:"filter_user_name"`
+	FilterExternalID string      `json:"filter_external_id"`
+	FilterActive     pgtype.Bool `json:"filter_active"`
+	OffsetCount      int32       `json:"offset_count"`
+	LimitCount       int32       `json:"limit_count"`
 }
 
 func (q *Queries) ListDirectoryUsers(ctx context.Context, arg ListDirectoryUsersParams) ([]DirectoryUser, error) {
@@ -925,6 +934,7 @@ func (q *Queries) ListDirectoryUsers(ctx context.Context, arg ListDirectoryUsers
 		arg.DirectoryID,
 		arg.FilterUserName,
 		arg.FilterExternalID,
+		arg.FilterActive,
 		arg.OffsetCount,
 		arg.LimitCount,
 	)

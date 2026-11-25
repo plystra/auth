@@ -64,6 +64,7 @@ FROM directory_users
 WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name))
   AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id))
+  AND (sqlc.narg(filter_active)::boolean IS NULL OR active = sqlc.narg(filter_active))
 ORDER BY id
 LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 
@@ -71,7 +72,8 @@ LIMIT sqlc.arg(limit_count) OFFSET sqlc.arg(offset_count);
 SELECT count(*)::bigint FROM directory_users
 WHERE directory_id = sqlc.arg(directory_id) AND deleted_at IS NULL
   AND (sqlc.arg(filter_user_name)::text = '' OR user_name = sqlc.arg(filter_user_name))
-  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id));
+  AND (sqlc.arg(filter_external_id)::text = '' OR external_id = sqlc.arg(filter_external_id))
+  AND (sqlc.narg(filter_active)::boolean IS NULL OR active = sqlc.narg(filter_active));
 
 -- name: UpdateDirectoryUser :one
 UPDATE directory_users SET user_name = sqlc.arg(user_name), display_name = sqlc.arg(display_name), scim_name = sqlc.arg(scim_name),

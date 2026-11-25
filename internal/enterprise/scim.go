@@ -66,6 +66,7 @@ type SCIMGroup struct {
 type SCIMCollectionFilter struct {
 	Name       string
 	ExternalID string
+	Active     *bool
 }
 
 func (s *Service) CreateSCIMUser(ctx context.Context, directoryID string, token secret.String, in SCIMUserInput) (SCIMUser, error) {
@@ -164,16 +165,20 @@ func (s *Service) ListSCIMUsers(ctx context.Context, directoryID string, token s
 	}
 	users := []SCIMUser{}
 	var total int64
+	var active pgtype.Bool
+	if filter.Active != nil {
+		active = pgtype.Bool{Bool: *filter.Active, Valid: true}
+	}
 	err = s.withDirectoryTx(ctx, directory, token, false, func(ctx context.Context, q *db.Queries, _ db.Directory) error {
 		rows, e := q.ListDirectoryUsers(ctx, db.ListDirectoryUsersParams{
-			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID,
+			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID, FilterActive: active,
 			OffsetCount: startIndex - 1, LimitCount: count,
 		})
 		if e != nil {
 			return e
 		}
 		total, e = q.CountDirectoryUsers(ctx, db.CountDirectoryUsersParams{
-			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID,
+			DirectoryID: directory.ID, FilterUserName: filter.Name, FilterExternalID: filter.ExternalID, FilterActive: active,
 		})
 		if e != nil {
 			return e

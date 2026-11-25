@@ -24,6 +24,9 @@ func FuzzSCIMUserFilter(f *testing.F) {
 		`externalId eq "Employee\u002d7"`,
 		`externalId eq ""`,
 		`externalId eq "a\u0000b"`,
+		`active eq false`,
+		`AcTiVe EQ true`,
+		`active eq "false"`,
 		strings.Repeat(" ", 513),
 	} {
 		f.Add(seed)
@@ -39,6 +42,12 @@ func FuzzSCIMUserFilter(f *testing.F) {
 		}
 		if len(expression) > 4096 || (filter == (enterprise.SCIMCollectionFilter{})) != (strings.TrimSpace(expression) == "") {
 			t.Fatal("accepted filter bypassed the expression bound or became unfiltered")
+		}
+		if filter.Active != nil {
+			if filter.Name != "" || filter.ExternalID != "" || len(expression) > 512 {
+				t.Fatal("accepted active filter exceeded its scope or bound")
+			}
+			return
 		}
 		if filter.ExternalID != "" {
 			if filter.Name != "" || len(filter.ExternalID) > 512 || !utf8.ValidString(filter.ExternalID) {

@@ -133,9 +133,13 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	userPath := usersPath + "/" + employee.ID
 	updateActive := func(active bool, version string) string {
 		t.Helper()
+		value := "False"
+		if active {
+			value = "True"
+		}
 		payload := map[string]any{
 			"schemas":    []string{"urn:ietf:params:scim:api:messages:2.0:PatchOp"},
-			"Operations": []map[string]any{{"op": "replace", "path": "active", "value": active}},
+			"Operations": []map[string]any{{"op": "Replace", "path": "active", "value": value}},
 		}
 		response := client.send(t, http.MethodPatch, userPath, directory.Token.Value(), scimContentType, version, payload)
 		response.requireStatus(t, http.StatusOK)

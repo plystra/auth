@@ -821,7 +821,7 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 					}
 					input.DisplayName, input.DisplayNameSet = v, true
 				case "active":
-					v, ok := value.(bool)
+					v, ok := scimPatchActive(value)
 					if !ok {
 						return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "active must be a boolean")
 					}
@@ -871,7 +871,7 @@ func (b scimUserBody) patchInput() (enterprise.SCIMUserInput, error) {
 				input.Active, input.ActiveSet = false, true
 				continue
 			}
-			value, ok := operation.Value.(bool)
+			value, ok := scimPatchActive(operation.Value)
 			if !ok {
 				return enterprise.SCIMUserInput{}, apierr.New("invalid_request", "active must be a boolean")
 			}
@@ -1141,6 +1141,22 @@ func normalizeSCIMPage(start, count int32) (int32, int32) {
 	return max(start, 1), min(max(count, 0), enterprise.MaxSCIMPageSize)
 }
 
+func scimPatchActive(value any) (bool, bool) {
+	switch value := value.(type) {
+	case bool:
+		return value, true
+	case string:
+		// Older Entra SCIM clients send the Boolean attribute as a string.
+		switch strings.ToLower(value) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
 func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollectionFilter, error) {
 	var filter enterprise.SCIMCollectionFilter
 	// Allow JSON escaping of each byte in a 512-byte external ID.
@@ -1153,11 +1169,20 @@ func parseSCIMCollectionFilter(raw, nameAttribute string) (enterprise.SCIMCollec
 	}
 	attribute, operator, literal := splitSCIMComparison(expression)
 	external := strings.EqualFold(attribute, "externalId")
-	if (!external && !strings.EqualFold(attribute, nameAttribute)) || !strings.EqualFold(operator, "eq") {
-		return filter, apierr.New("invalid_filter", "only equality on "+nameAttribute+" and externalId is supported")
+	active := nameAttribute == "userName" && strings.EqualFold(attribute, "active")
+	if (!external && !active && !strings.EqualFold(attribute, nameAttribute)) || !strings.EqualFold(operator, "eq") {
+		return filter, apierr.New("invalid_filter", "the SCIM filter attribute or operator is unsupported")
 	}
 	if !external && len(raw) > 512 {
 		return filter, apierr.New("invalid_filter", "SCIM filter is too long")
+	}
+	if active {
+		if literal != "true" && literal != "false" {
+			return filter, apierr.New("invalid_filter", "active requires a JSON Boolean literal")
+		}
+		enabled := literal == "true"
+		filter.Active = &enabled
+		return filter, nil
 	}
 	value, valid := decodeSCIMFilterValue(literal)
 	if !valid {
