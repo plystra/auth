@@ -16,11 +16,14 @@ import (
 
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 	"github.com/plystra/auth/internal/account"
+	"github.com/plystra/auth/internal/agent"
+	"github.com/plystra/auth/internal/application"
 	"github.com/plystra/auth/internal/authorization"
 	"github.com/plystra/auth/internal/db"
 	"github.com/plystra/auth/internal/enterprise"
 	"github.com/plystra/auth/internal/factor"
 	"github.com/plystra/auth/internal/plane/principal"
+	"github.com/plystra/auth/internal/plane/server"
 	"github.com/plystra/auth/internal/route"
 	"github.com/plystra/auth/internal/security"
 	"github.com/plystra/auth/internal/session"
@@ -293,6 +296,8 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 		assertBoundSession(*unrelated.Tokens, otherMember.ID, "pwd")
 		members(current).requireStatus(t, http.StatusOK)
 	})
+	delegation := issueEmployeeDelegation(t, client, peer, enterpriseSvc, owner, current, initialClaims, email)
+	delegation.assertOnline(t, true)
 
 	second := employeeLifecycleData[account.AuthResult](t, login())
 	third := employeeLifecycleData[account.AuthResult](t, login())
@@ -305,6 +310,8 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	members(switched).requireStatus(t, http.StatusOK)
 
 	suspendedVersion := updateActive(false, provisioned.etag)
+	delegation.assertOnline(t, false)
+	delegation.assertExchangeRevoked(t, peer)
 	login().requireStatus(t, http.StatusBadRequest)
 	for _, family := range []struct {
 		name        string
@@ -383,6 +390,19 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	assertBoundSession(*fresh.Tokens, initialClaims.MemberID, "oidc")
 	members(*fresh.Tokens).requireStatus(t, http.StatusOK)
 	members(retained).requireStatus(t, http.StatusOK)
+	delegation.assertOnline(t, false)
+	delegation.assertExchangeRevoked(t, peer)
+	var suspensionAudited bool
+	if err := st.Pool.QueryRow(ctx, `SELECT EXISTS (
+		SELECT 1 FROM audit_logs suspension JOIN audit_logs change ON change.request_id = suspension.request_id
+		WHERE suspension.action = 'agent.binding.suspend' AND suspension.actor_type = 'directory'
+		  AND suspension.actor_id = $1 AND suspension.member_id = $2 AND suspension.space_id = $3
+		  AND suspension.resource_id = $2 AND suspension.owner_chain->0->>'member_id' = $5
+		  AND change.action = 'scim.user.update' AND change.resource_id = $4
+		  AND change.policy_version = suspension.policy_version AND change.metadata->>'active' = 'false'
+	)`, directory.ID, delegation.parentID, spaceID, employee.ID, initialClaims.MemberID).Scan(&suspensionAudited); err != nil || !suspensionAudited {
+		t.Fatal("directory deactivation and delegated subtree suspension were not correlated in the audit")
+	}
 
 	if err := enterpriseSvc.DisableConnection(adminContext, owner.ID, spaceID, connection.ID); err != nil {
 		t.Fatal(err)
@@ -392,14 +412,159 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	members(retained).requireStatus(t, http.StatusOK)
 }
 
+const employeeDelegationAudience = "employee-delegation-rp"
+
+type employeeDelegation struct {
+	relyingParty employeeLifecycleClient
+	key          string
+	spaceID      string
+	parentID     string
+	parentKey    string
+	parentAccess string
+	childKey     string
+	childAccess  string
+	parentTicket string
+}
+
+func issueEmployeeDelegation(t *testing.T, client, peer employeeLifecycleClient, enterpriseSvc *enterprise.Service,
+	owner authorization.Member, tokens session.Tokens, employee security.Claims, email string) employeeDelegation {
+	t.Helper()
+	ctx := t.Context()
+	st := enterpriseSvc.Store
+	const applicationID = "app_employee_delegation"
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO applications (id, space_id, name, client_id, manifest_permissions)
+		VALUES ($1, $2, 'Employee relying party', $3, '["auth.authz:check", "auth.tokens:introspect"]')`, applicationID, owner.SpaceID, employeeDelegationAudience); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Pool.Exec(ctx, `INSERT INTO authorization_grants
+		(id, space_id, permission_keys, grantee_member_id, scope, anchor_space_id, granted_by) VALUES
+		('grt_employee_delegate', $1, '["auth.agents:create", "auth.members:read"]', $2, 'space', $1, $3),
+		('grt_employee_rp_manage', $1, '["auth.applications:manage"]', $3, 'space', $1, $3)`,
+		owner.SpaceID, employee.MemberID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	apps := &application.Service{Store: st, Authorization: enterpriseSvc.Authorization, HMACKeys: enterpriseSvc.Sessions.HMACKeys}
+	admin := authorization.WithHumanActor(ctx, owner.ID, "usr_sso_http_owner")
+	if _, err := apps.InstallSpace(admin, owner.ID, applicationID, owner.SpaceID); err != nil {
+		t.Fatal(err)
+	}
+	keyExpiry := time.Now().UTC().Add(time.Hour)
+	key, err := apps.CreateKey(ctx, applicationID, "employee-rp", []string{"auth.authz:check", "auth.tokens:introspect"}, &keyExpiry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replicaStore, err := store.Open(ctx, st.Pool.Config().ConnString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(replicaStore.Close)
+	replicaAuthz := &authorization.Service{Store: replicaStore}
+	replicaSessions := &session.Service{Store: replicaStore, LoadSigner: enterpriseSvc.Sessions.LoadSigner, HMACKeys: apps.HMACKeys}
+	replicaSessions.SpaceSignInPolicy = &enterprise.Service{Store: replicaStore}
+	serverMux := http.NewServeMux()
+	(&server.API{
+		Applications: &application.Service{Store: replicaStore, HMACKeys: apps.HMACKeys}, Authorization: replicaAuthz, Sessions: replicaSessions,
+		Agents: &agent.Service{Store: replicaStore, HMACKeys: apps.HMACKeys},
+	}).Register(humago.New(serverMux, route.HumaConfig("Employee relying party", "1.0.0")))
+	relyingParty := httptest.NewTLSServer(route.Middleware(route.Server, serverMux))
+	t.Cleanup(relyingParty.Close)
+
+	enrollment, err := enterpriseSvc.Sessions.Factors.BeginTOTP(ctx, employee.Subject, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mfaCode, err := totp.GenerateCode(enrollment.Secret.Value(), time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Second)
+	create := map[string]any{"name": "Employee workspace", "expires_at": expiry, "source": "manual"}
+	client.send(t, http.MethodPost, "/v1/auth/step-up", tokens.AccessToken, "application/json", "",
+		map[string]any{"operation": "me.agents.create", "request": create, "mfa_code": mfaCode}).requireStatus(t, http.StatusOK)
+	type createdAgent struct {
+		Agent agent.Agent `json:"agent"`
+		Key   string      `json:"agent_key"`
+	}
+	parent := employeeLifecycleData[createdAgent](t, client.send(t, http.MethodPost, "/v1/me/agents", tokens.AccessToken, "application/json", "", create))
+	grant := func(actor, target string, permissions ...string) {
+		t.Helper()
+		client.send(t, http.MethodPut, "/v1/me/agents/"+target+"/grants", actor, "application/json", "",
+			map[string]any{"permissions": permissions, "scope": "space"}).requireStatus(t, http.StatusOK)
+	}
+	grant(tokens.AccessToken, parent.Agent.ID, "auth.agents:create", "auth.members:read")
+	ticket := exchangeEmployeeAgent(t, peer, employeeAgentKeyGrant(parent.Key, security.DefaultApplicationAudience))
+	child := employeeLifecycleData[createdAgent](t, client.send(t, http.MethodPost, "/v1/me/agents", ticket, "application/json", "",
+		map[string]any{"name": "Employee delegate", "source": "delegation", "expires_at": expiry.Add(-time.Minute)}))
+	grant(ticket, child.Agent.ID, "auth.members:read")
+	delegation := employeeDelegation{relyingParty: employeeLifecycleClient{server: relyingParty}, key: key, spaceID: owner.SpaceID,
+		parentID: parent.Agent.ID, parentKey: parent.Key, childKey: child.Key, parentTicket: ticket}
+	delegation.parentAccess = exchangeEmployeeAgent(t, peer, employeeAgentKeyGrant(parent.Key, employeeDelegationAudience))
+	delegation.childAccess = exchangeEmployeeAgent(t, peer, delegation.childGrant())
+	return delegation
+}
+
+func employeeAgentKeyGrant(key, audience string) url.Values {
+	return url.Values{"grant_type": {"agent_key"}, "agent_key": {key}, "resource": {audience}}
+}
+
+func (d employeeDelegation) childGrant() url.Values {
+	return url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:token-exchange"}, "subject_token": {d.parentTicket},
+		"actor_token": {d.childKey}, "scope": {"auth.members:read"}, "resource": {employeeDelegationAudience}}
+}
+
+func exchangeEmployeeAgent(t *testing.T, client employeeLifecycleClient, grant url.Values) string {
+	t.Helper()
+	response := client.send(t, http.MethodPost, "/oauth/token", "", "application/x-www-form-urlencoded", "", grant)
+	var out session.Tokens
+	if response.status != http.StatusOK || json.Unmarshal(response.body, &out) != nil || out.AccessToken == "" {
+		t.Fatalf("Agent token exchange returned HTTP %d", response.status)
+	}
+	return out.AccessToken
+}
+
+func (d employeeDelegation) assertOnline(t *testing.T, active bool) {
+	t.Helper()
+	post := func(path string, payload any) employeeLifecycleResponse {
+		t.Helper()
+		return d.relyingParty.send(t, http.MethodPost, "/server/v1/"+path, d.key, "application/json", "", payload)
+	}
+	for _, credential := range []string{d.parentKey, d.childKey, d.parentAccess, d.childAccess} {
+		identity := employeeLifecycleData[server.IntrospectIdentity](t, post("tokens/introspect", map[string]string{"token": credential}))
+		if identity.Active != active {
+			t.Fatalf("Agent credential active = %t, want %t", identity.Active, active)
+		}
+		if !active && (identity.Subject != "" || identity.MemberID != "" || len(identity.OwnerChain) > 0) {
+			t.Fatal("revoked Agent credential exposed identity or ownership information")
+		}
+	}
+	result := post("authz/check", server.CheckBody{Subject: server.CheckSubject{Token: d.childAccess}, Action: "auth.members:read",
+		Resource: server.CheckResource{Type: "space", ID: d.spaceID, SpaceID: d.spaceID}})
+	if active {
+		if decision := employeeLifecycleData[server.CheckDecision](t, result); decision.Decision != "allow" {
+			t.Fatal("the relying party could not authorize the active delegated Agent")
+		}
+	} else {
+		result.requireError(t, http.StatusUnauthorized, "UNAUTHENTICATED")
+	}
+}
+
+func (d employeeDelegation) assertExchangeRevoked(t *testing.T, client employeeLifecycleClient) {
+	t.Helper()
+	for _, grant := range []url.Values{employeeAgentKeyGrant(d.parentKey, employeeDelegationAudience), employeeAgentKeyGrant(d.childKey, employeeDelegationAudience), d.childGrant()} {
+		client.send(t, http.MethodPost, "/oauth/token", "", "application/x-www-form-urlencoded", "", grant).
+			requireError(t, http.StatusBadRequest, "invalid_grant")
+	}
+}
+
 func startEmployeeLifecycleEndpoint(t *testing.T, accounts *account.Service, enterpriseSvc *enterprise.Service) employeeLifecycleClient {
 	t.Helper()
 	mux := http.NewServeMux()
 	sessions := enterpriseSvc.Sessions
+	agents := &agent.Service{Store: enterpriseSvc.Store, HMACKeys: sessions.HMACKeys, StepUp: sessions}
 	(&principal.API{
-		Accounts: accounts, Authorization: enterpriseSvc.Authorization, Sessions: sessions, Signer: sessions.Signer, Enterprise: enterpriseSvc,
+		Accounts: accounts, Authorization: enterpriseSvc.Authorization, Sessions: sessions, Signer: sessions.Signer, Enterprise: enterpriseSvc, Agents: agents,
 	}).Register(humago.New(mux, route.HumaConfig("Enterprise employee lifecycle", "1.0.0")))
-	(HTTP{Enterprise: enterpriseSvc}).Register(mux)
+	(HTTP{Enterprise: enterpriseSvc, Agents: agents, Sessions: sessions, Authorization: enterpriseSvc.Authorization}).Register(mux)
 	host := httptest.NewTLSServer(route.Middleware(route.Principal, mux))
 	t.Cleanup(host.Close)
 	return employeeLifecycleClient{server: host}
@@ -417,12 +582,16 @@ type employeeLifecycleResponse struct {
 	status int
 	body   []byte
 	etag   string
+	method string
+	path   string
 }
 
 func (c employeeLifecycleClient) send(t *testing.T, method, path, bearer, contentType, ifMatch string, payload any) employeeLifecycleResponse {
 	t.Helper()
 	var body []byte
-	if payload != nil {
+	if form, ok := payload.(url.Values); ok {
+		body = []byte(form.Encode())
+	} else if payload != nil {
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
@@ -451,7 +620,7 @@ func (c employeeLifecycleClient) send(t *testing.T, method, path, bearer, conten
 	if err != nil {
 		t.Fatal(err)
 	}
-	return employeeLifecycleResponse{status: res.StatusCode, body: data, etag: res.Header.Get("ETag")}
+	return employeeLifecycleResponse{status: res.StatusCode, body: data, etag: res.Header.Get("ETag"), method: method, path: path}
 }
 
 func (r employeeLifecycleResponse) requireStatus(t *testing.T, want int) {
@@ -461,7 +630,7 @@ func (r employeeLifecycleResponse) requireStatus(t *testing.T, want int) {
 			Error struct{ Code string }
 		}
 		_ = json.Unmarshal(r.body, &problem)
-		t.Errorf("HTTP status = %d with code %q, want %d", r.status, problem.Error.Code, want)
+		t.Errorf("%s %s returned status %d with code %q, want %d", r.method, r.path, r.status, problem.Error.Code, want)
 	}
 }
 
