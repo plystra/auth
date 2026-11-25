@@ -51,31 +51,7 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 		return store.LoadSigningKeys(ctx, q, issuer, wrappingKey)
 	}
 	sessions.LoadSigner = loadSigner
-	openReplica := func(t *testing.T, dsn string) employeeLifecycleClient {
-		t.Helper()
-		replicaStore, err := store.Open(t.Context(), dsn)
-		if err != nil {
-			t.Fatal("open the replica's database pool")
-		}
-		t.Cleanup(replicaStore.Close)
-		replicaSigner, err := loadSigner(t.Context(), replicaStore.Queries())
-		if err != nil {
-			t.Fatal(err)
-		}
-		replicaAuthz := &authorization.Service{Store: replicaStore}
-		replicaSessions := &session.Service{
-			Store: replicaStore, Signer: replicaSigner, LoadSigner: loadSigner, HMACKeys: sessions.HMACKeys, Settings: sessions.Settings,
-		}
-		replicaSSO := &enterprise.Service{
-			Store: replicaStore, Authorization: replicaAuthz, Sessions: replicaSessions, StepUp: replicaSessions,
-			DataKey: enterpriseSvc.DataKey, Passwords: enterpriseSvc.Passwords, HTTPClient: provider.server.Client(),
-		}
-		replicaSessions.SpaceSignInPolicy = replicaSSO
-		return startEmployeeLifecycleEndpoint(t, &account.Service{
-			Store: replicaStore, Passwords: replicaSSO.Passwords, Sessions: replicaSessions, Authorization: replicaAuthz, SignInPolicy: replicaSSO,
-		}, replicaSSO)
-	}
-	peer := openReplica(t, st.Pool.Config().ConnString())
+	peer := openEmployeeLifecycleReplica(t, st.Pool.Config().ConnString(), enterpriseSvc)
 
 	const adminID = "usr_sso_http_owner"
 	admin, err := sessions.CreateForMember(ctx, adminID, owner.ID, nil, "workforce fixture", 1)
@@ -339,19 +315,8 @@ func TestDirectoryEmployeeOIDCSessionFromProvisioningThroughOffboarding(t *testi
 	assertBoundSession(retained, otherMember.ID, "pwd")
 
 	t.Run("logical_restore_preserves_offboarding", func(t *testing.T) {
-		recoveryCtx, cancel := context.WithTimeout(t.Context(), time.Minute)
-		defer cancel()
-		recovery, err := testdb.Start(recoveryCtx)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = recovery.Close(context.Background()) })
-		restored, err := protocolDB.RestoreSnapshot(recoveryCtx, st.Pool.Config().ConnConfig.Database, recovery)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Cleanup(func() { _ = restored.Close(context.Background()) })
-		restoreReplica := openReplica(t, restored.AppURL)
+		restored := restoreEmployeeDatabase(t, st)
+		restoreReplica := openEmployeeLifecycleReplica(t, restored.AppURL, enterpriseSvc)
 		originalClient, originalPeer := client, peer
 		client, peer = restoreReplica, restoreReplica
 		defer func() { client, peer = originalClient, originalPeer }()
@@ -558,6 +523,49 @@ func (d employeeDelegation) assertExchangeRevoked(t *testing.T, client employeeL
 		client.send(t, http.MethodPost, "/oauth/token", "", "application/x-www-form-urlencoded", "", grant).
 			requireError(t, http.StatusBadRequest, "invalid_grant")
 	}
+}
+
+func restoreEmployeeDatabase(t *testing.T, source *store.Store) testdb.Database {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	recovery, err := testdb.Start(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recovery.Close(context.Background()) })
+	restored, err := protocolDB.RestoreSnapshot(ctx, source.Pool.Config().ConnConfig.Database, recovery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restored.Close(context.Background()) })
+	return restored
+}
+
+func openEmployeeLifecycleReplica(t *testing.T, dsn string, source *enterprise.Service) employeeLifecycleClient {
+	t.Helper()
+	replica, err := store.Open(t.Context(), dsn)
+	if err != nil {
+		t.Fatal("open the replica's database pool")
+	}
+	t.Cleanup(replica.Close)
+	loadSigner := source.Sessions.LoadSigner
+	signer, err := loadSigner(t.Context(), replica.Queries())
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz := &authorization.Service{Store: replica}
+	sessions := &session.Service{
+		Store: replica, Signer: signer, LoadSigner: loadSigner, HMACKeys: source.Sessions.HMACKeys, Settings: source.Sessions.Settings,
+	}
+	sso := &enterprise.Service{
+		Store: replica, Authorization: authz, Sessions: sessions, StepUp: sessions, Issuer: source.Issuer,
+		DataKey: source.DataKey, Passwords: source.Passwords, HTTPClient: source.HTTPClient,
+	}
+	sessions.SpaceSignInPolicy = sso
+	return startEmployeeLifecycleEndpoint(t, &account.Service{
+		Store: replica, Passwords: sso.Passwords, Sessions: sessions, Authorization: authz, SignInPolicy: sso,
+	}, sso)
 }
 
 func startEmployeeLifecycleEndpoint(t *testing.T, accounts *account.Service, enterpriseSvc *enterprise.Service) employeeLifecycleClient {
